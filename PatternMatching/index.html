@@ -1,0 +1,967 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>index</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<style type="text/css">
+/* GitHub stylesheet for MarkdownPad (http://markdownpad.com) */
+/* Author: Nicolas Hery - http://nicolashery.com */
+/* Version: b13fe65ca28d2e568c6ed5d7f06581183df8f2ff */
+/* Source: https://github.com/nicolahery/markdownpad-github */
+
+/* RESET
+=============================================================================*/
+
+html, body, div, span, applet, object, iframe, h1, h2, h3, h4, h5, h6, p, blockquote, pre, a, abbr, acronym, address, big, cite, code, del, dfn, em, img, ins, kbd, q, s, samp, small, strike, strong, sub, sup, tt, var, b, u, i, center, dl, dt, dd, ol, ul, li, fieldset, form, label, legend, table, caption, tbody, tfoot, thead, tr, th, td, article, aside, canvas, details, embed, figure, figcaption, footer, header, hgroup, menu, nav, output, ruby, section, summary, time, mark, audio, video {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+/* BODY
+=============================================================================*/
+
+body {
+  font-family: Helvetica, arial, freesans, clean, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #333;
+  background-color: #fff;
+  padding: 20px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+body>*:first-child {
+  margin-top: 0 !important;
+}
+
+body>*:last-child {
+  margin-bottom: 0 !important;
+}
+
+/* BLOCKS
+=============================================================================*/
+
+p, blockquote, ul, ol, dl, table, pre {
+  margin: 15px 0;
+}
+
+/* HEADERS
+=============================================================================*/
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 20px 0 10px;
+  padding: 0;
+  font-weight: bold;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1 tt, h1 code, h2 tt, h2 code, h3 tt, h3 code, h4 tt, h4 code, h5 tt, h5 code, h6 tt, h6 code {
+  font-size: inherit;
+}
+
+h1 {
+  font-size: 28px;
+  color: #000;
+}
+
+h2 {
+  font-size: 24px;
+  border-bottom: 1px solid #ccc;
+  color: #000;
+}
+
+h3 {
+  font-size: 18px;
+}
+
+h4 {
+  font-size: 16px;
+}
+
+h5 {
+  font-size: 14px;
+}
+
+h6 {
+  color: #777;
+  font-size: 14px;
+}
+
+body>h2:first-child, body>h1:first-child, body>h1:first-child+h2, body>h3:first-child, body>h4:first-child, body>h5:first-child, body>h6:first-child {
+  margin-top: 0;
+  padding-top: 0;
+}
+
+a:first-child h1, a:first-child h2, a:first-child h3, a:first-child h4, a:first-child h5, a:first-child h6 {
+  margin-top: 0;
+  padding-top: 0;
+}
+
+h1+p, h2+p, h3+p, h4+p, h5+p, h6+p {
+  margin-top: 10px;
+}
+
+/* LINKS
+=============================================================================*/
+
+a {
+  color: #4183C4;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* LISTS
+=============================================================================*/
+
+ul, ol {
+  padding-left: 30px;
+}
+
+ul li > :first-child, 
+ol li > :first-child, 
+ul li ul:first-of-type, 
+ol li ol:first-of-type, 
+ul li ol:first-of-type, 
+ol li ul:first-of-type {
+  margin-top: 0px;
+}
+
+ul ul, ul ol, ol ol, ol ul {
+  margin-bottom: 0;
+}
+
+dl {
+  padding: 0;
+}
+
+dl dt {
+  font-size: 14px;
+  font-weight: bold;
+  font-style: italic;
+  padding: 0;
+  margin: 15px 0 5px;
+}
+
+dl dt:first-child {
+  padding: 0;
+}
+
+dl dt>:first-child {
+  margin-top: 0px;
+}
+
+dl dt>:last-child {
+  margin-bottom: 0px;
+}
+
+dl dd {
+  margin: 0 0 15px;
+  padding: 0 15px;
+}
+
+dl dd>:first-child {
+  margin-top: 0px;
+}
+
+dl dd>:last-child {
+  margin-bottom: 0px;
+}
+
+/* CODE
+=============================================================================*/
+
+pre, code, tt {
+  font-size: 12px;
+  font-family: Consolas, "Liberation Mono", Courier, monospace;
+}
+
+code, tt {
+  margin: 0 0px;
+  padding: 0px 0px;
+  white-space: nowrap;
+  border: 1px solid #eaeaea;
+  background-color: #f8f8f8;
+  border-radius: 3px;
+}
+
+pre>code {
+  margin: 0;
+  padding: 0;
+  white-space: pre;
+  border: none;
+  background: transparent;
+}
+
+pre {
+  background-color: #f8f8f8;
+  border: 1px solid #ccc;
+  font-size: 13px;
+  line-height: 19px;
+  overflow: auto;
+  padding: 6px 10px;
+  border-radius: 3px;
+}
+
+pre code, pre tt {
+  background-color: transparent;
+  border: none;
+}
+
+kbd {
+    -moz-border-bottom-colors: none;
+    -moz-border-left-colors: none;
+    -moz-border-right-colors: none;
+    -moz-border-top-colors: none;
+    background-color: #DDDDDD;
+    background-image: linear-gradient(#F1F1F1, #DDDDDD);
+    background-repeat: repeat-x;
+    border-color: #DDDDDD #CCCCCC #CCCCCC #DDDDDD;
+    border-image: none;
+    border-radius: 2px 2px 2px 2px;
+    border-style: solid;
+    border-width: 1px;
+    font-family: "Helvetica Neue",Helvetica,Arial,sans-serif;
+    line-height: 10px;
+    padding: 1px 4px;
+}
+
+/* QUOTES
+=============================================================================*/
+
+blockquote {
+  border-left: 4px solid #DDD;
+  padding: 0 15px;
+  color: #777;
+}
+
+blockquote>:first-child {
+  margin-top: 0px;
+}
+
+blockquote>:last-child {
+  margin-bottom: 0px;
+}
+
+/* HORIZONTAL RULES
+=============================================================================*/
+
+hr {
+  clear: both;
+  margin: 15px 0;
+  height: 0px;
+  overflow: hidden;
+  border: none;
+  background: transparent;
+  border-bottom: 4px solid #ddd;
+  padding: 0;
+}
+
+/* TABLES
+=============================================================================*/
+
+table th {
+  font-weight: bold;
+}
+
+table th, table td {
+  border: 1px solid #ccc;
+  padding: 6px 13px;
+}
+
+table tr {
+  border-top: 1px solid #ccc;
+  background-color: #fff;
+}
+
+table tr:nth-child(2n) {
+  background-color: #f8f8f8;
+}
+
+/* IMAGES
+=============================================================================*/
+
+img {
+  max-width: 100%
+}
+</style>
+<style type="text/css">
+.highlight  { background: #ffffff; }
+.highlight .c { color: #999988; font-style: italic } /* Comment */
+.highlight .err { color: #a61717; background-color: #e3d2d2 } /* Error */
+.highlight .k { font-weight: bold } /* Keyword */
+.highlight .o { font-weight: bold } /* Operator */
+.highlight .cm { color: #999988; font-style: italic } /* Comment.Multiline */
+.highlight .cp { color: #999999; font-weight: bold } /* Comment.Preproc */
+.highlight .c1 { color: #999988; font-style: italic } /* Comment.Single */
+.highlight .cs { color: #999999; font-weight: bold; font-style: italic } /* Comment.Special */
+.highlight .gd { color: #000000; background-color: #ffdddd } /* Generic.Deleted */
+.highlight .gd .x { color: #000000; background-color: #ffaaaa } /* Generic.Deleted.Specific */
+.highlight .ge { font-style: italic } /* Generic.Emph */
+.highlight .gr { color: #aa0000 } /* Generic.Error */
+.highlight .gh { color: #999999 } /* Generic.Heading */
+.highlight .gi { color: #000000; background-color: #ddffdd } /* Generic.Inserted */
+.highlight .gi .x { color: #000000; background-color: #aaffaa } /* Generic.Inserted.Specific */
+.highlight .go { color: #888888 } /* Generic.Output */
+.highlight .gp { color: #555555 } /* Generic.Prompt */
+.highlight .gs { font-weight: bold } /* Generic.Strong */
+.highlight .gu { color: #aaaaaa } /* Generic.Subheading */
+.highlight .gt { color: #aa0000 } /* Generic.Traceback */
+.highlight .kc { font-weight: bold } /* Keyword.Constant */
+.highlight .kd { font-weight: bold } /* Keyword.Declaration */
+.highlight .kp { font-weight: bold } /* Keyword.Pseudo */
+.highlight .kr { font-weight: bold } /* Keyword.Reserved */
+.highlight .kt { color: #445588; font-weight: bold } /* Keyword.Type */
+.highlight .m { color: #009999 } /* Literal.Number */
+.highlight .s { color: #d14 } /* Literal.String */
+.highlight .na { color: #008080 } /* Name.Attribute */
+.highlight .nb { color: #0086B3 } /* Name.Builtin */
+.highlight .nc { color: #445588; font-weight: bold } /* Name.Class */
+.highlight .no { color: #008080 } /* Name.Constant */
+.highlight .ni { color: #800080 } /* Name.Entity */
+.highlight .ne { color: #990000; font-weight: bold } /* Name.Exception */
+.highlight .nf { color: #990000; font-weight: bold } /* Name.Function */
+.highlight .nn { color: #555555 } /* Name.Namespace */
+.highlight .nt { color: #000080 } /* Name.Tag */
+.highlight .nv { color: #008080 } /* Name.Variable */
+.highlight .ow { font-weight: bold } /* Operator.Word */
+.highlight .w { color: #bbbbbb } /* Text.Whitespace */
+.highlight .mf { color: #009999 } /* Literal.Number.Float */
+.highlight .mh { color: #009999 } /* Literal.Number.Hex */
+.highlight .mi { color: #009999 } /* Literal.Number.Integer */
+.highlight .mo { color: #009999 } /* Literal.Number.Oct */
+.highlight .sb { color: #d14 } /* Literal.String.Backtick */
+.highlight .sc { color: #d14 } /* Literal.String.Char */
+.highlight .sd { color: #d14 } /* Literal.String.Doc */
+.highlight .s2 { color: #d14 } /* Literal.String.Double */
+.highlight .se { color: #d14 } /* Literal.String.Escape */
+.highlight .sh { color: #d14 } /* Literal.String.Heredoc */
+.highlight .si { color: #d14 } /* Literal.String.Interpol */
+.highlight .sx { color: #d14 } /* Literal.String.Other */
+.highlight .sr { color: #009926 } /* Literal.String.Regex */
+.highlight .s1 { color: #d14 } /* Literal.String.Single */
+.highlight .ss { color: #990073 } /* Literal.String.Symbol */
+.highlight .bp { color: #999999 } /* Name.Builtin.Pseudo */
+.highlight .vc { color: #008080 } /* Name.Variable.Class */
+.highlight .vg { color: #008080 } /* Name.Variable.Global */
+.highlight .vi { color: #008080 } /* Name.Variable.Instance */
+.highlight .il { color: #009999 } /* Literal.Number.Integer.Long */
+.pl-c {
+    color: #969896;
+}
+
+.pl-c1,.pl-mdh,.pl-mm,.pl-mp,.pl-mr,.pl-s1 .pl-v,.pl-s3,.pl-sc,.pl-sv {
+    color: #0086b3;
+}
+
+.pl-e,.pl-en {
+    color: #795da3;
+}
+
+.pl-s1 .pl-s2,.pl-smi,.pl-smp,.pl-stj,.pl-vo,.pl-vpf {
+    color: #333;
+}
+
+.pl-ent {
+    color: #63a35c;
+}
+
+.pl-k,.pl-s,.pl-st {
+    color: #a71d5d;
+}
+
+.pl-pds,.pl-s1,.pl-s1 .pl-pse .pl-s2,.pl-sr,.pl-sr .pl-cce,.pl-sr .pl-sra,.pl-sr .pl-sre,.pl-src,.pl-v {
+    color: #df5000;
+}
+
+.pl-id {
+    color: #b52a1d;
+}
+
+.pl-ii {
+    background-color: #b52a1d;
+    color: #f8f8f8;
+}
+
+.pl-sr .pl-cce {
+    color: #63a35c;
+    font-weight: bold;
+}
+
+.pl-ml {
+    color: #693a17;
+}
+
+.pl-mh,.pl-mh .pl-en,.pl-ms {
+    color: #1d3e81;
+    font-weight: bold;
+}
+
+.pl-mq {
+    color: #008080;
+}
+
+.pl-mi {
+    color: #333;
+    font-style: italic;
+}
+
+.pl-mb {
+    color: #333;
+    font-weight: bold;
+}
+
+.pl-md,.pl-mdhf {
+    background-color: #ffecec;
+    color: #bd2c00;
+}
+
+.pl-mdht,.pl-mi1 {
+    background-color: #eaffea;
+    color: #55a532;
+}
+
+.pl-mdr {
+    color: #795da3;
+    font-weight: bold;
+}
+
+.pl-mo {
+    color: #1d3e81;
+}
+.task-list {
+padding-left:10px;
+margin-bottom:0;
+}
+
+.task-list li {
+    margin-left: 20px;
+}
+
+.task-list-item {
+list-style-type:none;
+padding-left:10px;
+}
+
+.task-list-item label {
+font-weight:400;
+}
+
+.task-list-item.enabled label {
+cursor:pointer;
+}
+
+.task-list-item+.task-list-item {
+margin-top:3px;
+}
+
+.task-list-item-checkbox {
+display:inline-block;
+margin-left:-20px;
+margin-right:3px;
+vertical-align:1px;
+}
+</style>
+</head>
+<body>
+<h1>参考索引</h1>
+
+<hr>
+
+<h3>1. 阮一峰</h3>
+
+<ul>
+<li>字符串匹配的KMP算法 <a href="http://www.ruanyifeng.com/blog/2013/05/Knuth%E2%80%93Morris%E2%80%93Pratt_algorithm.html">http://www.ruanyifeng.com/blog/2013/05/Knuth–Morris–Pratt_algorithm.html</a>
+</li>
+<li>字符串匹配的Boyer-Moore算法 <a href="http://www.ruanyifeng.com/blog/2013/05/boyer-moore_string_search_algorithm.html">http://www.ruanyifeng.com/blog/2013/05/boyer-moore_string_search_algorithm.html</a>
+</li>
+</ul>
+
+<h3>2.图灵社区</h3>
+
+<ul>
+<li>【算法】KMP算法解析 <a href="http://www.ituring.com.cn/article/59881">http://www.ituring.com.cn/article/59881</a>
+</li>
+</ul>
+
+<h3>3.单模匹配系列</h3>
+
+<ul>
+<li>KMP Wikipedia <a href="https://en.wikipedia.org/wiki/Knuth%E2%80%93Morris%E2%80%93Pratt_algorithm">https://en.wikipedia.org/wiki/Knuth%E2%80%93Morris%E2%80%93Pratt_algorithm</a>
+</li>
+<li>图解 KMP 算法（JavaScript 实现） <a href="http://blog.jobbole.com/76611/">http://blog.jobbole.com/76611/</a>
+</li>
+<li>由KMP算法谈到BM算法 <a href="http://www.cnblogs.com/guoyiqi/archive/2011/06/14/2129308.html">http://www.cnblogs.com/guoyiqi/archive/2011/06/14/2129308.html</a>
+</li>
+<li>字符串匹配之 KMP 和 BM 算法 <a href="http://www.oschina.net/question/12_23429">http://www.oschina.net/question/12_23429</a>
+</li>
+<li>BM算法详解 <a href="http://blog.csdn.net/joylnwang/article/details/6785743">http://blog.csdn.net/joylnwang/article/details/6785743</a>
+</li>
+<li>关于BM算法的一些思考 <a href="http://blog.csdn.net/chong232/article/details/5806968">http://blog.csdn.net/chong232/article/details/5806968</a>
+</li>
+<li>Pattern Matching[PDF]
+
+<ol>
+<li>
+<strong>online</strong> <a href="https://www.cs.princeton.edu/%7Ers/AlgsDS07/21PatternMatching.pdf">https://www.cs.princeton.edu/~rs/AlgsDS07/21PatternMatching.pdf</a>
+</li>
+<li>
+<strong>offline</strong> <a href="./reference/Pattern%20Matching.pdf">Pattern Matching.pdf</a>
+</li>
+</ol>
+</li>
+<li>A Guided Tour to Approximate String Matching[PDF]
+
+<ol>
+<li>
+<strong>online</strong> <a href="http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.89.6907&amp;rep=rep1&amp;type=pdf">http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.89.6907&amp;rep=rep1&amp;type=pdf</a>
+</li>
+</ol>
+</li>
+<li>Lecture Notes on Pattern Matching Algorithms[PDF]
+
+<ol>
+<li>
+<strong>online</strong> <a href="http://www.cosc.canterbury.ac.nz/tad.takaoka/cosc229/patgeo.pdf">http://www.cosc.canterbury.ac.nz/tad.takaoka/cosc229/patgeo.pdf</a>
+</li>
+</ol>
+</li>
+<li>FAST PATTERN MATCHING IN STRINGS[PDF]
+
+<ol>
+<li>
+<strong>online</strong> <a href="http://www.cs.jhu.edu/%7Emisha/ReadingSeminar/Papers/Knuth77.pdf">http://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Knuth77.pdf</a>
+</li>
+</ol>
+</li>
+<li>A Faster Quick Search Algorithm[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/A%20Faster%20Quick%20Search%20Algorithm.pdf">A Faster Quick Search Algorithm.pdf</a>
+</li>
+</ol>
+</li>
+<li>Exact String Matching KMP &amp; Boyer-Moore Algorithms[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Exact%20String%20Matching%20KMP%20&amp;%20Boyer-Moore%20Algorithms.pdf">Exact String Matching KMP &amp; Boyer-Moore Algorithms.pdf</a>
+</li>
+</ol>
+</li>
+<li>Knuth-Morris-Pratt Algorithm[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Knuth-Morris-Pratt%20Algorithm.pdf">Knuth-Morris-Pratt Algorithm.pdf</a>
+</li>
+</ol>
+</li>
+<li>String Matching[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/String%20Matching.pdf">String Matching.pdf</a>
+</li>
+</ol>
+</li>
+<li>Substring Search[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/SubstringSearch.pdf">SubstringSearch.pdf</a>
+</li>
+</ol>
+</li>
+<li>Knuth-Morris-Pratt Algorithm[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Knuth-Morris-Pratt%20Algorithm.ppt">Knuth-Morris-Pratt Algorithm.ppt</a>
+</li>
+</ol>
+</li>
+<li>Strings and Pattern Matching[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Strings%20and%20Pattern%20Matching.ppt">Strings and Pattern Matching.ppt</a>
+</li>
+</ol>
+</li>
+<li>Strings and Pattern Matching2[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Strings%20and%20Pattern%20Matching2.ppt">Strings and Pattern Matching2.ppt</a> </li>
+</ol>
+</li>
+<li>Shift-based Pattern Matching for Compressed Web Traffic[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Shift-based%20Pattern%20Matching%20for%20Compressed%20Web%20Traffic.pptx">Shift-based Pattern Matching for Compressed Web Traffic.pptx</a>
+</li>
+</ol>
+</li>
+</ul>
+
+<h3>3.多模匹配系列</h3>
+
+<ul>
+<li>多模式匹配算法 <a href="http://blog.csdn.net/beta2/article/details/5698171">http://blog.csdn.net/beta2/article/details/5698171</a>
+</li>
+<li>AC自动机算法简单介绍 <a href="http://my.oschina.net/coda/blog/184499">http://my.oschina.net/coda/blog/184499</a>
+</li>
+<li>AC算法，多模式匹配 <a href="http://blog.csdn.net/zhoubl668/article/details/7321376">http://blog.csdn.net/zhoubl668/article/details/7321376</a>
+</li>
+<li>Aho-Corasick 多模式匹配算法、AC自动机详解 <a href="http://www.cnblogs.com/xudong-bupt/p/3433506.html">http://www.cnblogs.com/xudong-bupt/p/3433506.html</a>
+</li>
+<li>Aho-Corasick算法、多模正则匹配、Snort入门学习 <a href="http://www.cnblogs.com/LittleHann/p/3633840.html?utm_source=tuicool">http://www.cnblogs.com/LittleHann/p/3633840.html?utm_source=tuicool</a>
+</li>
+<li>正则表达式引擎及其分类 <a href="http://kb.cnblogs.com/page/86751/">http://kb.cnblogs.com/page/86751/</a>
+</li>
+<li>字符串匹配 <a href="http://www.cnblogs.com/tianchi/archive/2012/08/24/2654813.html">http://www.cnblogs.com/tianchi/archive/2012/08/24/2654813.html</a>
+</li>
+<li>AC 自动机的实现 <strong>菊苣</strong> 
+
+<ol>
+<li>
+<a href="http://nark.cc/p/?cat=8">http://nark.cc/p/?cat=8</a><br>
+</li>
+<li>2. <a href="http://nark.cc/p/?p=1453">http://nark.cc/p/?p=1453</a>
+</li>
+</ol>
+</li>
+<li>AC(Aho—Corasiek) 多模式匹配算法 <a href="http://my.oschina.net/amince/blog/196426">http://my.oschina.net/amince/blog/196426</a>
+</li>
+<li>状态机和行为树 <a href="http://aisharing.blogcn.com/?s=%E7%8A%B6%E6%80%81%E6%9C%BA">http://aisharing.blogcn.com/?s=%E7%8A%B6%E6%80%81%E6%9C%BA</a>
+</li>
+<li>Aho-Corasick算法学习 <a href="http://blog.csdn.net/sealyao/article/details/4560427">http://blog.csdn.net/sealyao/article/details/4560427</a>
+</li>
+<li>海量数据处理之Tire树（字典树 <a href="http://blog.csdn.net/ts173383201/article/details/7858598">http://blog.csdn.net/ts173383201/article/details/7858598</a>
+</li>
+<li>AC算法在美团上单系统的应用 <a href="http://tech.meituan.com/ac.html">http://tech.meituan.com/ac.html</a>
+</li>
+<li>Multiple pattern matching[PDF]
+
+<ol>
+<li>
+<strong>online</strong> <a href="http://courses.cs.ut.ee/2008/text/uploads/Main/TA%20Lecture%203_2%206up%20v2.pdf">http://courses.cs.ut.ee/2008/text/uploads/Main/TA%20Lecture%203_2%206up%20v2.pdf</a>
+</li>
+<li>
+<strong>offline</strong> <a href="./reference/Multiple%20pattern%20matching.pdf">Multiple pattern matching.pdf</a>
+</li>
+</ol>
+</li>
+<li>Flexible Pattern Matching In Strings[PDF]
+
+<ol>
+<li>
+<strong>online</strong> <a href="http://nlp.cs.swarthmore.edu/%7Erichardw/cs93-f07/flexiblePatternMatchingInStrings.pdf">http://nlp.cs.swarthmore.edu/~richardw/cs93-f07/flexiblePatternMatchingInStrings.pdf</a>
+</li>
+<li>
+<strong>offline</strong> <a href="./reference/Flexible%20Pattern%20Matching%20In%20Strings.pdf">Flexible Pattern Matching In Strings.pdf</a>
+</li>
+<li>
+<strong>中文</strong> <a href="./reference/%E6%9F%94%E6%80%A7%E5%AD%97%E7%AC%A6%E4%B8%B2%E5%8C%B9%E9%85%8D.pdf">柔性字符串匹配.pdf</a>
+</li>
+</ol>
+</li>
+<li>A comparative study on string matching algorithms of biological sequences[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/A%20comparative%20study%20on%20string%20matching%20algorithms%20of%20biological%20sequences.pdf">A comparative study on string matching algorithms of biological sequences.pdf</a>
+</li>
+</ol>
+</li>
+<li>A Survey on Deep Packet Inspection for Intrusion Detection Systems[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/A%20Survey%20on%20Deep%20Packet%20Inspection%20for%20Intrusion%20Detection%20Systems.pdf">A Survey on Deep Packet Inspection for Intrusion Detection Systems.pdf</a>
+</li>
+</ol>
+</li>
+<li>Algorithms on Strings, Trees and Sequences[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Algorithms%20on%20Strings,%20Trees%20and%20Sequences.pdf">Algorithms on Strings, Trees and Sequences.pdf</a>
+</li>
+</ol>
+</li>
+<li>An Examination of Pattern Matching Algorithms for Intrusion Detection Systems[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/An%20Examination%20of%20Pattern%20Matching%20Algorithms%20for%20Intrusion%20Detection%20Systems.pdf">An Examination of Pattern Matching Algorithms for Intrusion Detection Systems.pdf</a>
+</li>
+</ol>
+</li>
+<li>Applying Fast String Matching to Intrusion Detection[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Applying%20Fast%20String%20Matching%20to%20Intrusion%20Detection.pdf">Applying Fast String Matching to Intrusion Detection.pdf</a>
+</li>
+</ol>
+</li>
+<li>Attacking Pattern Matching Algorithms Based on the Gap between Average-Case and Worst-Case Complexity[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Attacking%20Pattern%20Matching%20Algorithms%20Based%20on%20the%20Gap%20between%20Average-Case%20and%20Worst-Case%20Complexity.pdf">Attacking Pattern Matching Algorithms Based on the Gap between Average-Case and Worst-Case Complexity.pdf</a>
+</li>
+</ol>
+</li>
+<li>Deterministic Memory-Efficient String Matching Algorithms for Intrusion Detection[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Deterministic%20Memory-Efficient%20String%20Matching%20Algorithms%20for%20Intrusion%20Detection.pdf">Deterministic Memory-Efficient String Matching Algorithms for Intrusion Detection.pdf</a>
+</li>
+</ol>
+</li>
+<li>Multi-Pattern String Matching with Very Large Pattern Sets[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Multi-Pattern%20String%20Matching%20with%20Very%20Large%20Pattern%20Sets.pdf">Multi-Pattern String Matching with Very Large Pattern Sets.pdf</a>
+</li>
+</ol>
+</li>
+<li>Optimizing Pattern Matching for Intrusion Detection[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Optimizing%20Pattern%20Matching%20for%20Intrusion%20Detection.pdf">Optimizing Pattern Matching for Intrusion Detection.pdf</a>
+</li>
+</ol>
+</li>
+<li>Pattern matching in strings[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Pattern%20matching%20in%20strings.pdf">Pattern matching in strings.pdf</a>
+</li>
+</ol>
+</li>
+<li>Set Matching and Aho-Corasick Algorithm[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Set%20Matching%20and%20Aho-Corasick%20Algorithm.pdf">Set Matching and Aho-Corasick Algorithm.pdf</a>
+</li>
+</ol>
+</li>
+<li>String algorithms[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/String%20algorithms.pdf">String algorithms.pdf</a>
+</li>
+</ol>
+</li>
+<li>Aho-Corasick Algorithm[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Aho-Corasick%20Algorithm.ppt">Aho-Corasick Algorithm.ppt</a>
+</li>
+</ol>
+</li>
+<li>Aho-Corasick String Matching[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Aho-Corasick%20String%20Matching.ppt">Aho-Corasick String Matching.ppt</a>
+</li>
+</ol>
+</li>
+<li>Construction of Aho Corasick automaton in Linear time for Integer Alphabets[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Construction%20of%20Aho%20Corasick%20automaton%20in%20Linear%20time%20for%20Integer%20Alphabets.ppt">Construction of Aho Corasick automaton in Linear time for Integer Alphabets.ppt</a>
+</li>
+</ol>
+</li>
+<li>Data Structures &amp; Algorithms Radix Search[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Data%20Structures%20&amp;%20Algorithms%20Radix%20Search.ppt">Data Structures &amp; Algorithms Radix Search.ppt</a>
+</li>
+</ol>
+</li>
+<li>Deterministic Memory-Efficient String Matching Algorithms for Intrusion Detection[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Deterministic%20Memory-Efficient%20String%20Matching%20Algorithms%20for%20Intrusion%20Detection.ppt">Deterministic Memory-Efficient String Matching Algorithms for Intrusion Detection.ppt</a>
+</li>
+</ol>
+</li>
+<li>Efficient String Matching  An Aid to Bibliographic Search[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Efficient%20String%20Matching%20%20An%20Aid%20to%20Bibliographic%20Search.ppt">Efficient String Matching  An Aid to Bibliographic Search.ppt</a>
+</li>
+</ol>
+</li>
+<li>Finite State Machines - FSMs[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Finite%20State%20Machines%20-%20FSMs.ppt">Finite State Machines - FSMs.ppt</a>
+</li>
+</ol>
+</li>
+<li>Finite State Machines[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Finite%20State%20Machines.ppt">Finite State Machines.ppt</a>
+</li>
+</ol>
+</li>
+<li>Finite State Machines2[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Finite%20State%20Machines2.ppt">Finite State Machines2.ppt</a>
+</li>
+</ol>
+</li>
+<li>Fundamental Data Structures and Algorithms - String Matching II[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Fundamental%20Data%20Structures%20and%20Algorithms%20-%20String%20Matching%20II.ppt">Fundamental Data Structures and Algorithms - String Matching II.ppt</a>
+</li>
+</ol>
+</li>
+<li>Gigabit Rate Multiple-Pattern Matching with TCAM[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Gigabit%20Rate%20Multiple-Pattern%20Matching%20with%20TCAM.ppt">Gigabit Rate Multiple-Pattern Matching with TCAM.ppt</a>
+</li>
+</ol>
+</li>
+<li>Modified Data Structure of  Aho-Corasick[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Modified%20Data%20Structure%20of%20%20Aho-Corasick.ppt">Modified Data Structure of  Aho-Corasick.ppt</a>
+</li>
+</ol>
+</li>
+<li>Anti-Virus[PPT]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Anti-Virus.pptx">Anti-Virus.pptx</a>
+</li>
+</ol>
+</li>
+</ul>
+
+<h3>4.snort</h3>
+
+<ul>
+<li>GitHub <a href="https://github.com/snortadmin/snort3">https://github.com/snortadmin/snort3</a>
+</li>
+<li>snort 快速匹配引擎的构建 <a href="http://my.oschina.net/u/572632/blog/292514">http://my.oschina.net/u/572632/blog/292514</a>
+</li>
+<li>snort规则管理整体框架 <a href="http://my.oschina.net/u/572632/blog/290351">http://my.oschina.net/u/572632/blog/290351</a>
+</li>
+<li>Snort中的模式匹配 <a href="http://www.cnblogs.com/hfww/archive/2012/05/11/2495245.html">http://www.cnblogs.com/hfww/archive/2012/05/11/2495245.html</a>
+</li>
+<li>snort源码分析[PDF] 
+
+<ol>
+<li>
+<strong>online</strong> <a href="http://read.pudn.com/downloads56/doc/project/199589/snort%E5%8E%9F%E4%BB%A3%E7%A0%81%E5%88%86%E6%9E%90.pdf">http://read.pudn.com/downloads56/doc/project/199589/snort原代码分析.pdf</a>
+</li>
+<li>
+<strong>offline</strong> <a href="./reference/snort_src_analysis.pdf">resource/snort_src_analysis.pdf</a>
+</li>
+</ol>
+</li>
+<li>
+<p>Introduction to Intrusion Detection and Snort[PDF]</p>
+
+<ol>
+<li>
+<strong>online</strong> <a href="http://ptgmedia.pearsoncmg.com/images/0131407333/samplechapter/0131407333_ch01.pdf">http://ptgmedia.pearsoncmg.com/images/0131407333/samplechapter/0131407333_ch01.pdf</a>
+</li>
+<li>
+<strong>offline</strong> <a href="./reference/Introduction%20to%20Intrusion%20Detection%20and%20Snort.pdf">Introduction to Intrusion Detection and Snort.pdf</a>
+</li>
+</ol>
+</li>
+<li>
+<p>Performance Characterization &amp;Improvement of Snort as an IDS[PDF]</p>
+
+<ol>
+<li>
+<strong>online</strong> <a href="http://www.tc.umn.edu/%7Essen/papers/bell_labs_report_snort.pdf">http://www.tc.umn.edu/~ssen/papers/bell_labs_report_snort.pdf</a>
+</li>
+<li>
+<strong>offline</strong> <a href="./reference/Performance%20Characterization%20&amp;Improvement%20of%20Snort%20as%20an%20IDS.pdf">Performance Characterization &amp;Improvement of Snort as an IDS.pdf</a>
+</li>
+</ol>
+</li>
+<li>A Performance Analysis of Snort and Suricata Network Intrusion Detection and Prevention Engines[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/A%20Performance%20Analysis%20of%20Snort%20and%20Suricata%20Network%20Intrusion%20Detection%20and%20Prevention%20Engines.pdf">A Performance Analysis of Snort and Suricata Network Intrusion Detection and Prevention Engines.pdf</a>
+</li>
+</ol>
+</li>
+<li>Snort检测引擎的改进与实现[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Snort%E6%A3%80%E6%B5%8B%E5%BC%95%E6%93%8E%E7%9A%84%E6%94%B9%E8%BF%9B%E4%B8%8E%E5%AE%9E%E7%8E%B0.pdf">Snort检测引擎的改进与实现.pdf</a>
+</li>
+</ol>
+</li>
+<li>Snort入侵检测系统的研究及其性能改进[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Snort%E5%85%A5%E4%BE%B5%E6%A3%80%E6%B5%8B%E7%B3%BB%E7%BB%9F%E7%9A%84%E7%A0%94%E7%A9%B6%E5%8F%8A%E5%85%B6%E6%80%A7%E8%83%BD%E6%94%B9%E8%BF%9B.pdf">Snort入侵检测系统的研究及其性能改进.pdf</a>
+</li>
+</ol>
+</li>
+<li>Snort入侵检测系统规则匹配方法研究[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/Snort%E5%85%A5%E4%BE%B5%E6%A3%80%E6%B5%8B%E7%B3%BB%E7%BB%9F%E8%A7%84%E5%88%99%E5%8C%B9%E9%85%8D%E6%96%B9%E6%B3%95%E7%A0%94%E7%A9%B6.pdf">Snort入侵检测系统规则匹配方法研究.pdf</a>
+</li>
+</ol>
+</li>
+<li>开源网络入侵检测系统snort的检测算法研究[PDF]
+
+<ol>
+<li>
+<strong>offline</strong> <a href="./reference/%E5%BC%80%E6%BA%90%E7%BD%91%E7%BB%9C%E5%85%A5%E4%BE%B5%E6%A3%80%E6%B5%8B%E7%B3%BB%E7%BB%9Fsnort%E7%9A%84%E6%A3%80%E6%B5%8B%E7%AE%97%E6%B3%95%E7%A0%94%E7%A9%B6.pdf">开源网络入侵检测系统snort的检测算法研究.pdf</a>
+</li>
+</ol>
+</li>
+</ul>
+</body>
+</html>
+<!-- This document was created with MarkdownPad, the Markdown editor for Windows (http://markdownpad.com) -->
