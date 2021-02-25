@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -26,16 +26,19 @@
 
 static const std::string start_comments =
     "\nCOMMENTS:\n"
-    "    these line were commented "
-    "in the configuration file.\n\n";
+    "    These lines were commented in the configuration file:\n\n";
+
+static const std::string start_unsupported =
+    "\nUNSUPPORTED:\n"
+    "    These configuration items are not currently supported:\n\n";
 
 static const std::string start_errors =
     "\nERRORS:\n"
-    "    all of these occured during the attempted conversion:\n\n";
+    "    All of these occurred during the attempted conversion:\n\n";
 
 static const std::string start_bad_rules =
     "\nFAILED RULES CONVERSIONS:\n"
-    "    These rules has invalid rule options\n\n";
+    "    These rules have invalid rule options:\n\n";
 
 class Comments
 {
@@ -49,13 +52,13 @@ public:
 
     Comments(CommentType);
     Comments(int depth, CommentType);
-    Comments(std::string name, int depth, CommentType);
-    virtual ~Comments();
+    Comments(const std::string& name, int depth, CommentType);
+    virtual ~Comments() = default;
 
-    void add_text(std::string new_text);
+    void add_text(const std::string& new_text);
     // insert this string before the first lexigraphically larger string.
     // will not add duplicates.
-    void add_sorted_text(std::string new_text);
+    void add_sorted_text(const std::string& new_text);
     bool empty() const;
     bool size() const;
 
@@ -68,10 +71,6 @@ private:
     bool prev_empty;
     bool header;  // true if a string was passed into constructor
     enum CommentType type;
-    const std::size_t max_line_length = 80;
-    const std::string comment_line = "--";
-    const std::string start_multi_com = "--[[";
-    const std::string end_multi_com = "--]]";
 };
 
 #endif

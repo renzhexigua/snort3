@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,25 +17,28 @@
 //--------------------------------------------------------------------------
 // ips_actions.cc author Russ Combs <rucombs@cisco.com>
 
-#include "ips_actions.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#ifdef STATIC_IPS_ACTIONS
-extern const BaseApi* act_react;
-extern const BaseApi* act_reject;
-#endif
-extern const BaseApi* act_replace;
+#include "ips_actions.h"
 
-const BaseApi* ips_actions[] =
+#include "managers/plugin_manager.h"
+
+using namespace snort;
+
+#ifdef STATIC_IPS_ACTIONS
+extern const BaseApi* act_react[];
+extern const BaseApi* act_reject[];
+#endif
+extern const BaseApi* act_replace[];
+
+void load_actions()
 {
 #ifdef STATIC_IPS_ACTIONS
-    act_react,
-    act_reject,
+    PluginManager::load_plugins(act_react);
+    PluginManager::load_plugins(act_reject);
 #endif
-    act_replace,
-    nullptr,
-};
+    PluginManager::load_plugins(act_replace);
+}
 

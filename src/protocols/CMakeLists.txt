@@ -1,6 +1,9 @@
 
 set (PROTOCOL_HEADERS
     arp.h
+    bpdu.h
+    cdp.h
+    cisco_meta_data.h
     eapol.h
     eth.h
     icmp4.h
@@ -26,7 +29,7 @@ set (PROTOCOL_HEADERS
     vlan.h
 )
 
-add_library (protocols STATIC
+add_library (protocols OBJECT
     ${PROTOCOL_HEADERS}
     layer.cc
     packet.cc

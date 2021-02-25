@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,51 +21,65 @@
 #ifndef WIZ_MODULE_H
 #define WIZ_MODULE_H
 
-#include <string>
-#include <vector>
+// wizard management interface
+
 #include "framework/module.h"
-#include "main/thread.h"
 
 #define WIZ_NAME "wizard"
 #define WIZ_HELP "inspector that implements port-independent protocol identification"
 
+namespace snort
+{
+class Trace;
+}
+
 extern const PegInfo wiz_pegs[];
 extern THREAD_LOCAL struct WizStats tstats;
-extern THREAD_LOCAL ProfileStats wizPerfStats;
+extern THREAD_LOCAL snort::ProfileStats wizPerfStats;
+extern THREAD_LOCAL const snort::Trace* wizard_trace;
 
 class MagicBook;
+class CurseBook;
 
-class WizardModule : public Module
+class WizardModule : public snort::Module
 {
 public:
     WizardModule();
-    ~WizardModule();
+    ~WizardModule() override;
 
-    bool set(const char*, Value&, SnortConfig*) override;
-    bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
+    bool begin(const char*, int, snort::SnortConfig*) override;
+    bool end(const char*, int, snort::SnortConfig*) override;
 
     const PegInfo* get_pegs() const override;
     PegCount* get_counts() const override;
-    ProfileStats* get_profile() const override;
+    snort::ProfileStats* get_profile() const override;
 
     MagicBook* get_book(bool c2s, bool hex);
+    CurseBook* get_curse_book();
+
+    Usage get_usage() const override
+    { return INSPECT; }
+
+    bool is_bindable() const override
+    { return true; }
+
+    void set_trace(const snort::Trace*) const override;
+    const snort::TraceOption* get_trace_options() const override;
 
 private:
-    void add_spells(MagicBook*, std::string&);
-
-private:
-    bool hex;
-    bool c2s;
-
     std::string service;
-    std::vector<std::string> spells;
+    std::vector<std::string> c2s_patterns;
+    std::vector<std::string> s2c_patterns;
+    bool c2s;
 
     MagicBook* c2s_hexes;
     MagicBook* s2c_hexes;
 
     MagicBook* c2s_spells;
     MagicBook* s2c_spells;
+
+    CurseBook* curses;
 };
 
 #endif

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -29,11 +29,10 @@ class InitState : public ConversionState
 {
 public:
     InitState(Converter&);
-    virtual ~InitState() { }
-    virtual bool convert(std::istringstream& data);
+    bool convert(std::istringstream& data) override;
 };
 
-static inline ConversionState* init_state_ctor(Converter& c)
+inline ConversionState* init_state_ctor(Converter& c)
 {
     return new InitState(c);
 }

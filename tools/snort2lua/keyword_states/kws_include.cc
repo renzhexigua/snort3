@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -19,12 +19,12 @@
 
 #include <sstream>
 #include <vector>
-
 #include "conversion_state.h"
 #include "helpers/converter.h"
 #include "helpers/s2l_util.h"
 #include "helpers/parse_cmd_line.h"
 #include "data/data_types/dt_comment.h"
+#include "keywords_api.h"
 
 namespace keywords
 {
@@ -34,11 +34,7 @@ class Include : public ConversionState
 {
 public:
     Include(Converter& c) : ConversionState(c) { }
-    virtual ~Include() { }
-    virtual bool convert(std::istringstream& data);
-
-private:
-    bool convert_file(std::string file, std::string full_file_name);
+    bool convert(std::istringstream& data) override;
 };
 } // namespace
 
@@ -54,26 +50,30 @@ bool Include::convert(std::istringstream& data_stream)
             std::string full_file = data_api.expand_vars(file);
             std::string tmp = full_file; // for the error message
 
+            //check if the file exists using what was provided
+            //if not use the conf_dir with the file
             if (!util::file_exists(full_file))
                 full_file = parser::get_conf_dir() + full_file;
 
-            // if we still can't find this file, add it as a snort file
-            if (util::file_exists(full_file))
-                return !(cv.parse_include_file(full_file));
+            // make sure its a regular file (not a directory)
+            if (util::is_regular_file(full_file))
+            {
+                return !cv.parse_include_file(full_file);
+            }
+            else
+            { //cant find it .. log error
+                std::string error_string = "Can't find file " + file + ".  "
+                "  Searched locations: [" + tmp + "],  [" + full_file + "]";
 
-            std::string error_string = "Can't find file " + file + ".  "
-                "  Searched locations: " + tmp + ",  " + full_file;
-
-            data_api.failed_conversion(data_stream, error_string);
+                data_api.failed_conversion(data_stream, error_string);
+            }
         }
     }
     else
     {
-        data_api.failed_conversion(data_stream, "include requires a"
-            "'filename' argument");
+        data_api.failed_conversion(data_stream, "include requires a 'filename' argument");
     }
 
-    rule_api.include_rule_file(file);
     return false;
 }
 
@@ -92,4 +92,3 @@ static const ConvertMap keyword_include =
 
 const ConvertMap* include_map = &keyword_include;
 }  // namespace keywords
-

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -23,11 +23,10 @@
 #endif
 
 #include "framework/codec.h"
-#include "packet_io/active.h"
-#include "main/snort_types.h"
-#include "protocols/packet.h"
+#include "main/snort_config.h"
 #include "protocols/teredo.h"
-#include "protocols/protocol_ids.h"
+
+using namespace snort;
 
 #define CD_TEREDO_NAME "teredo"
 #define CD_TEREDO_HELP "support for teredo"
@@ -38,16 +37,15 @@ class TeredoCodec : public Codec
 {
 public:
     TeredoCodec() : Codec(CD_TEREDO_NAME) { }
-    ~TeredoCodec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
 };
 } // anonymous namespace
 
-void TeredoCodec::get_protocol_ids(std::vector<uint16_t>& v)
+void TeredoCodec::get_protocol_ids(std::vector<ProtocolId>& v)
 {
-    v.push_back(PROTO_TEREDO);
+    v.emplace_back(ProtocolId::TEREDO);
 }
 
 bool TeredoCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
@@ -58,7 +56,7 @@ bool TeredoCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort
         return false;
 
     /* Decode indicators. If both are present, Auth always comes before Origin. */
-    if ( ntohs(*(uint16_t*)raw_pkt) == teredo::INDICATOR_AUTH )
+    if ( ntohs(*(const uint16_t*)raw_pkt) == teredo::INDICATOR_AUTH )
     {
         if ( raw.len < teredo::INDICATOR_AUTH_MIN_LEN )
             return false;
@@ -74,7 +72,7 @@ bool TeredoCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort
         codec.lyr_len = (teredo::INDICATOR_AUTH_MIN_LEN + client_id_length + auth_data_length);
     }
 
-    if ( ntohs(*(uint16_t*)raw_pkt) == teredo::INDICATOR_ORIGIN )
+    if ( ntohs(*(const uint16_t*)raw_pkt) == teredo::INDICATOR_ORIGIN )
     {
         if ( raw.len < teredo::INDICATOR_ORIGIN_LEN )
             return false;
@@ -89,13 +87,13 @@ bool TeredoCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort
         codec.proto_bits |= PROTO_BIT__TEREDO;
         codec.codec_flags |= CODEC_TEREDO_SEEN;  // for ipv6 codec
 
-        if ( SnortConfig::tunnel_bypass_enabled(TUNNEL_TEREDO) )
-            Active::set_tunnel_bypass();
+        if ( codec.conf->tunnel_bypass_enabled(TUNNEL_TEREDO) )
+            codec.tunnel_bypass = true;
 
         if ( (!teredo::is_teredo_port(snort.sp)) && (!teredo::is_teredo_port(snort.dp)) )
             codec.codec_flags |= CODEC_ENCAP_LAYER;
 
-        codec.next_prot_id = IPPROTO_IPV6;
+        codec.next_prot_id = ProtocolId::IPV6;
         codec.codec_flags |= CODEC_NON_IP_TUNNEL;
         return true;
     }
@@ -137,11 +135,11 @@ static const CodecApi teredo_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_teredo[] =
+#endif
 {
     &teredo_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_teredo = &teredo_api.base;
-#endif
 

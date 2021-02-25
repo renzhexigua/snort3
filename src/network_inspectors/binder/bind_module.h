@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,10 +21,9 @@
 #ifndef BIND_MODULE_H
 #define BIND_MODULE_H
 
-#include <vector>
+// binder management interface
 
 #include "framework/module.h"
-#include "main/thread.h"
 #include "binding.h"
 
 #define BIND_NAME "binder"
@@ -32,36 +31,51 @@
 
 struct BindStats
 {
-    PegCount packets;
+    PegCount new_flows;
+    PegCount service_changes;
+    PegCount assistant_inspectors;
+    PegCount new_standby_flows;
+    PegCount no_match;
     PegCount verdicts[BindUse::BA_MAX];
 };
 
 extern THREAD_LOCAL BindStats bstats;
-extern THREAD_LOCAL ProfileStats bindPerfStats;
-struct Binding;
+extern THREAD_LOCAL snort::ProfileStats bindPerfStats;
 
-class BinderModule : public Module
+class BinderModule : public snort::Module
 {
 public:
     BinderModule();
-    ~BinderModule();
+    ~BinderModule() override;
 
-    bool set(const char*, Value&, SnortConfig*) override;
-    bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
+    bool begin(const char*, int, snort::SnortConfig*) override;
+    bool end(const char*, int, snort::SnortConfig*) override;
 
+    // used to create default binder
     void add(const char* service, const char* type);
     void add(unsigned proto, const char* type);
 
     const PegInfo* get_pegs() const override;
     PegCount* get_counts() const override;
-    ProfileStats* get_profile() const override;
+    snort::ProfileStats* get_profile() const override;
 
-    std::vector<Binding*>& get_data();
+    std::vector<Binding>& get_bindings();
+    std::vector<Binding>& get_policy_bindings();
+
+    Usage get_usage() const override
+    { return INSPECT; }
 
 private:
-    Binding* work;
-    std::vector<Binding*> bindings;
+    Binding binding;
+    std::vector<Binding> bindings;
+    std::vector<Binding> policy_bindings;
+    std::string policy_filename;
+    std::string policy_type;
+
+    bool add_policy_file(const char* name, const char* type);
+    void commit_binding();
+    void commit_policy_binding();
 };
 
 #endif

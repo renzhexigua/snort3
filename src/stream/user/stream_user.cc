@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,18 +17,18 @@
 //--------------------------------------------------------------------------
 // stream_user.cc author Russ Combs <rucombs@cisco.com>
 
-#include "stream_user.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <assert.h>
+#include "stream_user.h"
+
+#include "log/messages.h"
 
 #include "user_module.h"
 #include "user_session.h"
-#include "log/messages.h"
-#include "protocols/packet.h"
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // helpers
@@ -39,12 +39,6 @@ StreamUserConfig::StreamUserConfig()
     session_timeout = 60;
 }
 
-static void user_show (StreamUserConfig* pc)
-{
-    LogMessage("Stream user config:\n");
-    LogMessage("    Timeout: %d seconds\n", pc->session_timeout);
-}
-
 //-------------------------------------------------------------------------
 // inspector stuff
 //-------------------------------------------------------------------------
@@ -53,11 +47,11 @@ class StreamUser : public Inspector
 {
 public:
     StreamUser(StreamUserConfig*);
-    ~StreamUser();
+    ~StreamUser() override;
 
-    void show(SnortConfig*) override;
+    void show(const SnortConfig*) const override;
 
-    void eval(Packet*) override;
+    NORETURN_ASSERT void eval(Packet*) override;
 
 public:
     StreamUserConfig* config;
@@ -73,12 +67,15 @@ StreamUser::~StreamUser()
     delete config;
 }
 
-void StreamUser::show(SnortConfig*)
+void StreamUser::show(const SnortConfig*) const
 {
-    user_show(config);
+    if ( !config )
+        return;
+
+    ConfigLogger::log_value("session_timeout", config->session_timeout);
 }
 
-void StreamUser::eval(Packet*)
+NORETURN_ASSERT void StreamUser::eval(Packet*)
 {
     // session::process() instead
     assert(false);
@@ -131,7 +128,7 @@ static const InspectApi user_api =
         mod_dtor
     },
     IT_STREAM,
-    (unsigned)PktType::PDU,
+    PROTO_BIT__PDU,
     nullptr, // buffers
     nullptr, // service
     nullptr, // pinit

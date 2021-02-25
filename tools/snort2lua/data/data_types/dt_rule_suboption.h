@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -27,9 +27,9 @@
 class RuleSubOption
 {
 public:
-    RuleSubOption(std::string name);
-    RuleSubOption(std::string name, std::string val);
-    virtual ~RuleSubOption();
+    RuleSubOption(const std::string& name);
+    RuleSubOption(const std::string& name, const std::string& val);
+    virtual ~RuleSubOption() = default;
 
     // overloading operators
     friend std::ostream& operator<<(std::ostream&, const RuleSubOption&);

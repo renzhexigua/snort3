@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -27,7 +27,7 @@
 
 namespace keywords
 {
-const std::vector<std::unique_ptr<const ConvertMap> > ruletype_api;
+const std::vector<std::unique_ptr<const ConvertMap> > ruletype_api = {};
 
 namespace
 {
@@ -49,8 +49,7 @@ public:
         entire_line("ruletype")
     { }
 
-    virtual ~RuleType() { }
-    virtual bool convert(std::istringstream& data);
+    bool convert(std::istringstream& data) override;
 
 private:
     ParseState state;
@@ -80,7 +79,7 @@ bool RuleType::convert(std::istringstream& stream)
             break;
 
         case ParseState::OPEN_BRACKET:
-            if ( val.compare("{") )
+            if ( val != "{" )
             {
                 std::istringstream tmp(entire_line);
                 data_api.failed_conversion(tmp, val);
@@ -90,7 +89,7 @@ bool RuleType::convert(std::istringstream& stream)
             break;
 
         case ParseState::TYPE_KEYWORD:
-            if ( val.compare("type") )
+            if ( val != "type" )
             {
                 std::istringstream tmp(entire_line);
                 data_api.failed_conversion(tmp, val);
@@ -105,7 +104,7 @@ bool RuleType::convert(std::istringstream& stream)
             break;
 
         case ParseState::OUTPUT_OR_BRACKET:
-            if ( !val.compare("}") )
+            if ( val == "}" )
             {
                 cv.end_multiline_parsing();
 
@@ -121,7 +120,7 @@ bool RuleType::convert(std::istringstream& stream)
 
                 if (map)
                 {
-                    // using smart pointer to gaurantee new Map is deleted
+                    // using smart pointer to guarantee new Map is deleted
                     const std::vector<std::unique_ptr<const ConvertMap> >& ruletype_map =
                         ruletype_api;
                     std::unique_ptr<ConvertMap> new_map(new ConvertMap());
@@ -138,7 +137,7 @@ bool RuleType::convert(std::istringstream& stream)
                     return false;
                 }
             }
-            else if (!val.compare("output") )
+            else if (val == "output" )
             {
                 state = ParseState::OUTPUT_ARGS;
             }

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -16,6 +16,9 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 // config_api.cc author Josh Rosenbaum <jrosenba@cisco.com>
+
+#ifndef CONFIG_API_H
+#define CONFIG_API_H
 
 #include "config_states/config_api.h"
 
@@ -49,6 +52,7 @@ extern const ConvertMap* disable_decode_drops_map;
 extern const ConvertMap* disable_inline_init_failopen_map;
 extern const ConvertMap* disable_ipopt_alerts_map;
 extern const ConvertMap* disable_ipopt_drops_map;
+extern const ConvertMap* disable_replace_map;
 extern const ConvertMap* disable_tcpopt_alerts_map;
 extern const ConvertMap* disable_tcpopt_drops_map;
 extern const ConvertMap* disable_tcpopt_experimental_alerts_map;
@@ -67,8 +71,8 @@ extern const ConvertMap* enable_decode_drops_map;
 extern const ConvertMap* enable_decode_oversized_alerts_map;
 extern const ConvertMap* enable_decode_oversized_drops_map;
 extern const ConvertMap* enable_deep_teredo_inspection_map;
-extern const ConvertMap* enable_ipopt_drops_map;
 extern const ConvertMap* enable_gtp_map;
+extern const ConvertMap* enable_ipopt_drops_map;
 extern const ConvertMap* enable_mpls_multicast_map;
 extern const ConvertMap* enable_mpls_overlapping_ip_map;
 extern const ConvertMap* enable_tcpopt_drops_map;
@@ -99,6 +103,7 @@ extern const ConvertMap* max_metadata_services_map;
 extern const ConvertMap* max_mpls_labelchain_len_map;
 extern const ConvertMap* mpls_payload_type_map;
 extern const ConvertMap* min_ttl_map;
+extern const ConvertMap* na_policy_mode_map;
 extern const ConvertMap* new_ttl_map;
 extern const ConvertMap* nolog_map;
 extern const ConvertMap* nopcre_map;
@@ -111,10 +116,11 @@ extern const ConvertMap* pcre_match_limit_recursion_map;
 extern const ConvertMap* pkt_count_map;
 extern const ConvertMap* ppm_map;
 extern const ConvertMap* policy_id_map;
+extern const ConvertMap* policy_uuid_map;
 extern const ConvertMap* policy_mode_map;
-extern const ConvertMap* policy_version_map;
 extern const ConvertMap* profile_preprocs_map;
 extern const ConvertMap* profile_rules_map;
+extern const ConvertMap* protected_content_map;
 extern const ConvertMap* quiet_map;
 extern const ConvertMap* rate_filter_map;
 extern const ConvertMap* react_map;
@@ -124,6 +130,7 @@ extern const ConvertMap* response_map;
 extern const ConvertMap* set_gid_map;
 extern const ConvertMap* set_uid_map;
 extern const ConvertMap* show_year_map;
+extern const ConvertMap* sidechannel_map;
 extern const ConvertMap* snaplen_map;
 extern const ConvertMap* so_rule_memcap_map;
 extern const ConvertMap* stateful_map;
@@ -165,6 +172,7 @@ const std::vector<const ConvertMap*> config_api =
     disable_inline_init_failopen_map,
     disable_ipopt_alerts_map,
     disable_ipopt_drops_map,
+    disable_replace_map,
     disable_tcpopt_alerts_map,
     disable_tcpopt_drops_map,
     disable_tcpopt_experimental_alerts_map,
@@ -183,8 +191,8 @@ const std::vector<const ConvertMap*> config_api =
     enable_decode_oversized_alerts_map,
     enable_decode_oversized_drops_map,
     enable_deep_teredo_inspection_map,
-    enable_ipopt_drops_map,
     enable_gtp_map,
+    enable_ipopt_drops_map,
     enable_mpls_multicast_map,
     enable_mpls_overlapping_ip_map,
     enable_tcpopt_drops_map,
@@ -215,6 +223,7 @@ const std::vector<const ConvertMap*> config_api =
     max_metadata_services_map,
     max_mpls_labelchain_len_map,
     mpls_payload_type_map,
+    na_policy_mode_map,
     new_ttl_map,
     nolog_map,
     nopcre_map,
@@ -227,10 +236,11 @@ const std::vector<const ConvertMap*> config_api =
     pkt_count_map,
     ppm_map,
     policy_id_map,
+    policy_uuid_map,
     policy_mode_map,
-    policy_version_map,
     profile_preprocs_map,
     profile_rules_map,
+    protected_content_map,
     quiet_map,
     rate_filter_map,
     react_map,
@@ -240,6 +250,7 @@ const std::vector<const ConvertMap*> config_api =
     set_gid_map,
     set_uid_map,
     show_year_map,
+    sidechannel_map,
     snaplen_map,
     so_rule_memcap_map,
     stateful_map,
@@ -253,14 +264,5 @@ const std::vector<const ConvertMap*> config_api =
 };
 } // namespace config
 
-#if 0
-
-FIXIT-L J Add this configuration options when we start supporting them in Snort++
-UNSUPPORTED OPTIONS-- these will all be included at a later date.
-
-./src/parser.h : #define CONFIG_OPT__POLICY                          "policy_id"
-./src/parser.h : # define CONFIG_OPT__SIDE_CHANNEL                    "sidechannel"
-./src/parser.h : #define CONFIG_OPT__PROTECTED_CONTENT               "protected_content"
-./src/parser.h : #define CONFIG_OPT__NAP_POLICY_MODE                 "na_policy_mode"
 #endif
 

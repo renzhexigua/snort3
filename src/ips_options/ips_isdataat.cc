@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 1998-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,7 +20,7 @@
 /* sp_isdataat
  *
  * Purpose:
- *    Test a specific byte to see if there is data.  (Basicly, rule keyword
+ *    Test a specific byte to see if there is data.  (Basically, rule keyword
  *    into inBounds)
  *
  * Arguments:
@@ -33,32 +33,23 @@
  *      content:"USER"; isdataat:30,relative; content:!"|0a|"; within:30;)
  */
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <ctype.h>
-#include <errno.h>
 
-#include "snort_types.h"
-#include "snort_bounds.h"
-#include "treenodes.h"
-#include "protocols/packet.h"
-#include "parser.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "mstring.h"
-#include "profiler.h"
-#include "ips_byte_extract.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
-#include "detection_util.h"
+#include <cstdlib>
+
 #include "framework/cursor.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "hash/hash_key_operations.h"
+#include "log/messages.h"
+#include "profiler/profiler.h"
+#include "utils/snort_bounds.h"
+
+#include "extract.h"
+
+using namespace snort;
 
 #define s_name "isdataat"
 
@@ -84,7 +75,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
     IsDataAtData* get_data()
     { return &config; }
@@ -102,28 +93,25 @@ private:
 
 uint32_t IsDataAtOption::hash() const
 {
-    uint32_t a,b,c;
-    const IsDataAtData* data = &config;
-
-    a = data->offset;
-    b = data->flags;
-    c = data->offset_var;
+    uint32_t a = config.offset;
+    uint32_t b = config.flags;
+    uint32_t c = config.offset_var;
 
     mix(a,b,c);
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    a += IpsOption::hash();
 
+    finalize(a,b,c);
     return c;
 }
 
 bool IsDataAtOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    IsDataAtOption& rhs = (IsDataAtOption&)ips;
-    IsDataAtData* left = (IsDataAtData*)&config;
-    IsDataAtData* right = (IsDataAtData*)&rhs.config;
+    const IsDataAtOption& rhs = (const IsDataAtOption&)ips;
+    const IsDataAtData* left = &config;
+    const IsDataAtData* right = &rhs.config;
 
     if (( left->offset == right->offset) &&
         ( left->flags == right->flags) &&
@@ -135,27 +123,24 @@ bool IsDataAtOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int IsDataAtOption::eval(Cursor& c, Packet*)
+IpsOption::EvalStatus IsDataAtOption::eval(Cursor& c, Packet*)
 {
-    IsDataAtData* isdata = &config;
-    int rval = DETECTION_OPTION_NO_MATCH;
-    const uint8_t* start_ptr;
+    RuleProfile profile(isDataAtPerfStats);
+
     int offset;
 
-    PROFILE_VARS;
-    MODULE_PROFILE_START(isDataAtPerfStats);
-
-    /* Get values from byte_extract variables, if present. */
-    if (isdata->offset_var >= 0 && isdata->offset_var < NUM_BYTE_EXTRACT_VARS)
+    // Get values from byte_extract variables, if present.
+    if (config.offset_var != IPS_OPTIONS_NO_VAR && config.offset_var < NUM_IPS_OPTIONS_VARS)
     {
         uint32_t value;
-        GetByteExtractValue(&(value), isdata->offset_var);
+        GetVarValueByIndex(&(value), config.offset_var);
         offset = (int)value;
     }
     else
-        offset = isdata->offset;
+        offset = config.offset;
 
-    if ( isdata->flags & ISDATAAT_RELATIVE_FLAG )
+    const uint8_t* start_ptr;
+    if ( config.flags & ISDATAAT_RELATIVE_FLAG )
     {
         start_ptr = c.start();
     }
@@ -164,21 +149,15 @@ int IsDataAtOption::eval(Cursor& c, Packet*)
         start_ptr = c.buffer();
     }
     start_ptr += offset;
+    EvalStatus rval = NO_MATCH;
 
     if (inBounds(c.buffer(), c.endo(), start_ptr))
-    {
-        DEBUG_WRAP(DebugMessage(DEBUG_PATTERN_MATCH,
-            "[*] IsDataAt succeeded!  there is data...\n"); );
-        rval = DETECTION_OPTION_MATCH;
-    }
+        rval = MATCH;
 
-    if (isdata->flags & ISDATAAT_NOT_FLAG)
-    {
-        rval = !rval;
-    }
+    if (config.flags & ISDATAAT_NOT_FLAG)
+        rval = (rval == MATCH) ? NO_MATCH : MATCH;
 
-    /* otherwise dump */
-    MODULE_PROFILE_END(isDataAtPerfStats);
+    // otherwise dump
     return rval;
 }
 
@@ -188,13 +167,7 @@ int IsDataAtOption::eval(Cursor& c, Packet*)
 
 static void isdataat_parse(const char* data, IsDataAtData* idx)
 {
-    char** toks;
-    int num_toks;
-    char* endp;
-    char* offset;
-
-    toks = mSplit(data, ",", 3, &num_toks, 0);
-    offset = toks[0];
+    const char* offset = data;
 
     if (*offset == '!')
     {
@@ -209,12 +182,14 @@ static void isdataat_parse(const char* data, IsDataAtData* idx)
     /* set how many bytes to process from the packet */
     if (isdigit(offset[0]) || offset[0] == '-')
     {
+        char* endp;
+
+        idx->offset_var = IPS_OPTIONS_NO_VAR;
         idx->offset = strtol(offset, &endp, 10);
-        idx->offset_var = -1;
 
         if (offset == endp)
         {
-            ParseError("unable to parse as byte value %s\n", toks[0]);
+            ParseError("unable to parse as byte value %s", data);
             return;
         }
 
@@ -223,19 +198,16 @@ static void isdataat_parse(const char* data, IsDataAtData* idx)
             ParseError("isdataat offset greater than max IPV4 packet size");
             return;
         }
-        idx->offset_var = BYTE_EXTRACT_NO_VAR;
     }
     else
     {
         idx->offset_var = GetVarByName(offset);
-        if (idx->offset_var == BYTE_EXTRACT_NO_VAR)
+        if (idx->offset_var == IPS_OPTIONS_NO_VAR)
         {
-            ParseError(BYTE_EXTRACT_INVALID_ERR_STR, "isdataat offset", offset);
+            ParseError(INVALID_VAR_ERR_STR, "isdataat offset", offset);
             return;
         }
     }
-
-    mSplitFree(&toks,num_toks);
 }
 
 //-------------------------------------------------------------------------
@@ -267,7 +239,11 @@ public:
     ProfileStats* get_profile() const override
     { return &isDataAtPerfStats; }
 
-    IsDataAtData data;
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    IsDataAtData data = {};
 };
 
 bool IsDataAtModule::begin(const char*, int, SnortConfig*)
@@ -342,11 +318,11 @@ static const IpsApi isdataat_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_isdataat[] =
+#endif
 {
     &isdataat_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_isdataat = &isdataat_api.base;
-#endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,150 +16,116 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-/*
- **
- **  Author(s):  Hui Cao <huica@cisco.com>
- **
- **  NOTES
- **  5.05.2013 - Initial Source Code. Hui Cao
- */
+
+// file_capture.h author Hui Cao <huica@cisco.com>
 
 #ifndef FILE_CAPTURE_H
 #define FILE_CAPTURE_H
 
-#include "file_api.h"
-#include "libs/file_lib.h"
+// There are several steps for file capture:
+// 1) To improve performance, file data are stored in file mempool first by
+//    calling file_capture_process() during file data processing.
+// 2) If file capture is needed, file_capture_reserve() should be called to
+//    allow file data remains in mempool. Even if a session is closed, the file
+//     data will stay in the mempool.
+// 3) Then file data can be read through file_capture_read()
+// 4) Finally, file data must be released from mempool file_capture_release()
 
-struct FileCaptureInfo
+#include <condition_variable>
+#include <mutex>
+#include <queue>
+#include <thread>
+
+#include "file_api.h"
+
+class FileMemPool;
+
+namespace snort
+{
+class FileInfo;
+
+struct FileCaptureBlock
 {
     uint32_t length;
-    bool reserved;
-    FileCaptureInfo* last;  /* last block of file data */
-    FileCaptureInfo* next;  /* next block of file data */
-    uint64_t file_size; /*file_size*/
+    FileCaptureBlock* next;  /* next block of file data */
 };
 
-typedef struct _File_Capture_Stats
+class SO_PUBLIC FileCapture
 {
-    uint64_t files_buffered_total;
-    uint64_t files_released_total;
-    uint64_t files_freed_total;
-    uint64_t files_captured_total;
-    uint64_t file_memcap_failures_total;
-    uint64_t file_memcap_failures_reserve; /*This happens during reserve*/
-    uint64_t file_reserve_failures;        /*This happens during reserve*/
-    uint64_t file_size_exceeded;
-    uint64_t file_size_min;                /*This happens during reserve*/
-    uint64_t file_size_max;                /*This happens during reserve*/
-    uint64_t file_within_packet;
-    uint64_t file_buffers_used_max;   /* maximum buffers used simultaneously*/
-    uint64_t file_buffers_allocated_total;
-    uint64_t file_buffers_freed_total;
-    uint64_t file_buffers_released_total;
-    uint64_t file_buffers_free_errors;
-    uint64_t file_buffers_release_errors;
-} File_Capture_Stats;
+public:
+    FileCapture(int64_t capture_min_size, int64_t capture_max_size);
+    ~FileCapture();
 
-extern File_Capture_Stats file_capture_stats;
+    // this must be called during snort init
+    static void init(int64_t memcap, int64_t block_size);
 
-/*
- * Initialize the file memory pool
- *
- * Arguments:
- *    int64_t max_file_mem: memcap in bytes
- *    int64_t block_size:  file block size
- *
- * Returns: NONE
- */
-void file_capture_init_mempool(int64_t max_file_mem, int64_t block_size);
+    // Capture file data to local buffer
+    // This is the main function call to enable file capture
+    FileCaptureState process_buffer(const uint8_t* file_data, int data_size,
+        FilePosition pos);
 
-/*
- * Capture file data to local buffer
- * This is the main function call to enable file capture
- *
- * Arguments:
- *   FileContext* context: current file context
- *   uint8_t *file_data: current file data
- *   int data_size: current file data size
- *   FilePosition position: position of file data
- *
- * Returns:
- *   0: successful
- *   1: fail to capture the file or file capture is disabled
- */
-int file_capture_process(FileContext* context,
-    uint8_t* file_data, int data_size, FilePosition position);
+    // Preserve the file in memory until it is released
+    FileCaptureState reserve_file(const snort::FileInfo*);
 
-/*
- * Stop file capture, memory resource will be released if not reserved
- *
- * Returns: NONE
- */
-void file_capture_stop(FileContext* context);
+    // Get the file that is reserved in memory, this should be called repeatedly
+    // until nullptr is returned to get the full file
+    // Returns:
+    //   the next memory block
+    //   nullptr: end of file or fail to get file
+    FileCaptureBlock* get_file_data(uint8_t** buff, int* size);
 
-/*
- * Preserve the file in memory until it is released
- *
- * Arguments:
- *   Flow *ssnptr: flow pointer
- *   FileCaptureInfo **file_mem: the pointer to store the memory block
- *       that stores file and its metadata.
- *       It will set  NULL if no memory or fail to store
- *
- * Returns:
- *   FileCaptureState:
- *      FILE_CAPTURE_SUCCESS = 0,
- *      FILE_CAPTURE_MIN,
- *      FILE_CAPTURE_MAX,
- *      FILE_CAPTURE_MEMCAP,
- *      FILE_CAPTURE_FAIL
- */
-FileCaptureState file_capture_reserve(Flow* flow, FileCaptureInfo** file_mem);
+    // Store files on local disk
+    void store_file();
 
-/*
- * Get the file that is reserved in memory
- *
- * Arguments:
- *   FileCaptureInfo *file_mem: the memory block working on
- *   uint8_t **buff: address to store buffer address
- *   int *size: address to store size of file
- *
- * Returns:
- *   the next memory block
- *   NULL: end of file or fail to get file
- */
-FileCaptureInfo* file_capture_read(FileCaptureInfo* file_mem, uint8_t** buff, int* size);
+    // Store file to disk asynchronously
+    void store_file_async();
 
-/*
- * Get the file size captured in the file buffer
- *
- * Arguments:
- *   FileCaptureInfo *file_mem: the first memory block of file buffer
- *
- * Returns:
- *   the size of file
- *   0: no memory or fail to get file
- */
-size_t file_capture_size(FileCaptureInfo* file_mem);
+    // Log file capture mempool usage
+    static void print_mem_usage();
 
-/*
- * Release the file that is reserved in memory, this function might be
- * called in a different thread.
- *
- * Arguments:
- *   FileCaptureInfo *data: the memory block that stores file and its metadata
- */
-void file_capture_release(FileCaptureInfo* data);
+    // Exit file capture, release all file capture memory etc,
+    // this must be called when snort exits
+    static void exit();
 
-/*Log file capture mempool usage*/
+    static FileCaptureState error_capture(FileCaptureState);
 
-void file_capture_mem_usage(void);
+    static int64_t get_block_size() { return capture_block_size; }
 
-/*
- *  Exit file capture, release all file capture memory etc,
- *  this must be called when snort exits
- */
-void file_caputure_close(void);
+    snort::FileInfo* get_file_info() { return file_info; }
+
+    int64_t get_max_file_capture_size() { return capture_max_size; }
+    int64_t get_file_capture_size() { return capture_size; }
+    void get_file_reset() { current_block = head; }
+
+private:
+
+    static void init_mempool(int64_t max_file_mem, int64_t block_size);
+    static void writer_thread();
+    inline FileCaptureBlock* create_file_buffer();
+    inline FileCaptureState save_to_file_buffer(const uint8_t* file_data, int data_size,
+        int64_t max_size);
+    void write_file_data(uint8_t* buf, size_t buf_len, FILE* fh);
+
+    static FileMemPool* file_mempool;
+    static int64_t capture_block_size;
+    static std::mutex capture_mutex;
+    static std::condition_variable capture_cv;
+    static std::thread* file_storer;
+    static std::queue<FileCapture*> files_waiting;
+    static bool running;
+
+    uint64_t capture_size;
+    FileCaptureBlock* last;  /* last block of file data */
+    FileCaptureBlock* head;  /* first block of file data */
+    FileCaptureBlock* current_block = nullptr;  /* current block of file data */
+    const uint8_t* current_data;  /*current file data*/
+    uint32_t current_data_len;
+    FileCaptureState capture_state;
+    snort::FileInfo* file_info = nullptr;
+    int64_t capture_min_size;
+    int64_t capture_max_size;
+};
+}
 
 #endif
 

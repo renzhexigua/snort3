@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,58 +17,51 @@
 //--------------------------------------------------------------------------
 // so_manager.cc author Russ Combs <rucombs@cisco.com>
 
-#include "so_manager.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <assert.h>
-#include <errno.h>
-#include <sys/types.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <unistd.h>
+#include "so_manager.h"
+
 #include <zlib.h>
 
-#include <list>
+#include <cassert>
+#include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
-using namespace std;
 
-#include "snort_types.h"
-#include "plugin_manager.h"
-#include "framework/so_rule.h"
-#include "framework/module.h"
-#include "snort_config.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "parser/parser.h"
 #include "log/messages.h"
+#include "framework/decode_data.h"
+#include "framework/inspector.h"
+#include "framework/module.h"
+#include "main/snort_config.h"
+#include "parser/parse_so_rule.h"
 
-static list<const SoApi*> s_rules;
+using namespace snort;
+using namespace std;
 
 //-------------------------------------------------------------------------
 // plugins
 //-------------------------------------------------------------------------
-
-void SoManager::add_plugin(const SoApi* api)
+SoRules::~SoRules()
 {
-    s_rules.push_back(api);
+    api.clear();
+    handles.clear();
 }
 
-void SoManager::release_plugins()
+void SoManager::add_plugin(const SoApi* api, SnortConfig* sc, SoHandlePtr handle)
 {
-    s_rules.clear();
+    sc->so_rules->api.emplace_back(api);
+    sc->so_rules->handles.emplace_back(handle);
 }
 
 void SoManager::dump_plugins()
 {
     Dumper d("SO Rules");
 
-    for ( auto* p : s_rules )
+    for ( auto* p : SnortConfig::get_conf()->so_rules->api )
         d.dump(p->base.name, p->base.version);
 }
 
@@ -77,35 +70,43 @@ void SoManager::dump_plugins()
 //-------------------------------------------------------------------------
 
 // FIXIT-L eliminate this arbitrary limit on rule text size
+const int window_bits = -9;
 const unsigned max_rule = 128000;
 static uint8_t so_buf[max_rule];
 
 static const uint8_t* compress(const string& text, unsigned& len)
 {
+    len = 0;
     const char* s = text.c_str();
     z_stream stream;
 
-    stream.next_in = (Bytef*)s;
+    stream.zalloc = Z_NULL;
+    stream.zfree = Z_NULL;
+    stream.opaque = Z_NULL;
+    stream.next_in = Z_NULL;
+
+    // v2 avoids the header and trailer
+    int ret = deflateInit2(
+        &stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, window_bits, 1, Z_DEFAULT_STRATEGY);
+
+    if ( ret != Z_OK )
+        return nullptr;
+
+    stream.next_in = const_cast<Bytef*>(reinterpret_cast<const uint8_t*>(s));
     stream.avail_in = text.size();
 
     stream.next_out = so_buf;
     stream.avail_out = max_rule;
 
-    stream.zalloc = nullptr;
-    stream.zfree = nullptr;
+    ret = deflate(&stream, Z_FINISH);
+    (void)deflateEnd(&stream);
 
-    stream.total_in = 0;
-    stream.total_out = 0;
-
-    len = 0;
-
-    if ( deflateInit(&stream, Z_DEFAULT_COMPRESSION) != Z_OK )
+    if ( ret != Z_STREAM_END )
         return nullptr;
 
-    if ( deflate(&stream, Z_FINISH) == Z_STREAM_END )
-        len= stream.total_out;
+    len= stream.total_out;
+    assert(stream.avail_out > 0);
 
-    deflateEnd(&stream);
     return so_buf;
 }
 
@@ -115,22 +116,29 @@ static const char* expand(const uint8_t* data, unsigned len)
 {
     z_stream stream;
 
-    stream.next_in = (Bytef*)data;
+    stream.zalloc = Z_NULL;
+    stream.zfree = Z_NULL;
+    stream.opaque = Z_NULL;
+    stream.next_in = Z_NULL;
+    stream.avail_in = 0;
+
+    if ( inflateInit2(&stream, window_bits) != Z_OK )
+        return nullptr;
+
+    stream.next_in = const_cast<Bytef*>(data);
     stream.avail_in = (uInt)len;
 
     stream.next_out = (Bytef*)so_buf;
     stream.avail_out = (uInt)(max_rule - 1);
 
-    stream.zalloc = nullptr;
-    stream.zfree = nullptr;
+    int ret = inflate(&stream, Z_FINISH);
+    (void)inflateEnd(&stream);
 
-    stream.total_in = 0;
-    stream.total_out = 0;
-
-    if ( inflateInit(&stream) != Z_OK )
+    if ( ret != Z_STREAM_END )
         return nullptr;
 
-    if ( inflate(&stream, Z_SYNC_FLUSH) != Z_STREAM_END )
+    // sanity check
+    if ( stream.avail_in or !stream.avail_out )
         return nullptr;
 
     assert(stream.total_out < max_rule);
@@ -146,19 +154,15 @@ static void strvrt(const string& text, string& data)
     unsigned len = 0;
     const uint8_t* d = compress(text, len);
 
-    // lose the zlib header
-    assert(len > 2 && d[0] == 0x78 && d[1] == 0x9C);
-    d += 2;
-    len -= 2;
+    data.assign((const char*)d, len);
 
-    data.assign((char*)d, len);
+    // generate xor key.  there is no hard core crypto requirement here but
+    // rand() is known to be weak, especially in the lower bits nonetheless
+    // this seems to work as good as the basic C++ 11 default generator and
+    // uniform distribution
 
-    // generate xor key
-    // FIXIT-L there is no hard core crypto requirement here
-    // but rand() is known to be weak, especially in the lower bits
-    // nonetheless this seems to work as good as the basic
-    // C++ 11 default generator and uniform distribution
     uint8_t key = (uint8_t)(rand() >> 16);
+
     if ( !key )
         key = 0xA5;
 
@@ -171,58 +175,43 @@ static void strvrt(const string& text, string& data)
 static const char* revert(const uint8_t* data, unsigned len)
 {
     if ( !len )
-        return (char*)data;
+        return (const char*)data;
 
     uint8_t key = data[--len];
-    string s((char*)data, len);
+    string s((const char*)data, len);
 
-    for ( unsigned i = 0; i < len-1; i++ )
+    for ( unsigned i = 0; i < len; i++ )
         s[i] ^= key;
 
-    // force the zlib header
-    s.insert(0, "\x78\x9C");
-
-    return expand((uint8_t*)s.c_str(), s.size());
+    return expand((const uint8_t*)s.c_str(), s.size());
 }
 
 //-------------------------------------------------------------------------
 
-static const SoApi* get_so_api(const char* soid)
+static const SoApi* get_so_api(const char* soid, SoRules* so_rules)
 {
-    for ( auto* p : s_rules )
+    for ( auto* p : so_rules->api )
         if ( !strcmp(p->base.name, soid) )
             return p;
 
     return nullptr;
 }
 
-const char* SoManager::get_so_options(const char* soid)
+const char* SoManager::get_so_rule(const char* soid, SnortConfig* sc)
 {
-    const SoApi* api = get_so_api(soid);
+    const SoApi* api = get_so_api(soid, sc->so_rules);
 
     if ( !api )
         return nullptr;
 
-    if ( !api->length )
-        return nullptr;
-
     const char* rule = revert(api->rule, api->length);
 
-    if ( !rule )
-        return nullptr;
-
-    // FIXIT-L this approach won't tolerate spaces and might get
-    // fooled by matching content (should it precede this)
-    char opt[32];
-    snprintf(opt, sizeof(opt), "soid:%s;", soid);
-    const char* s = strstr(rule, opt);
-
-    return s ? s + strlen(opt) : nullptr;
+    return rule;
 }
 
-SoEvalFunc SoManager::get_so_eval(const char* soid, const char* so, void** data)
+SoEvalFunc SoManager::get_so_eval(const char* soid, const char* so, void** data, SnortConfig* sc)
 {
-    const SoApi* api = get_so_api(soid);
+    const SoApi* api = get_so_api(soid, sc->so_rules);
 
     if ( !api || !api->ctor )
         return nullptr;
@@ -230,9 +219,11 @@ SoEvalFunc SoManager::get_so_eval(const char* soid, const char* so, void** data)
     return api->ctor(so, data);
 }
 
-void SoManager::delete_so_data(const char* soid, void* pv)
+void SoManager::delete_so_data(const char* soid, void* pv, SoRules* so_rules)
 {
-    const SoApi* api = get_so_api(soid);
+    if (!pv or !so_rules)
+        return;
+    const SoApi* api = get_so_api(soid, so_rules);
 
     if ( api && api->dtor )
         api->dtor(pv);
@@ -240,54 +231,47 @@ void SoManager::delete_so_data(const char* soid, void* pv)
 
 //-------------------------------------------------------------------------
 
-void SoManager::dump_rule_stubs(const char*)
+void SoManager::dump_rule_stubs(const char*, SnortConfig* sc)
 {
     unsigned c = 0;
 
-    for ( auto* p : s_rules )
+    for ( auto* p : sc->so_rules->api )
     {
-        const char* s;
         const char* rule = revert(p->rule, p->length);
 
         if ( !rule )
             continue;
 
-        // FIXIT-L need to properly parse rule to avoid
-        // confusing other text for soid option
-        if ( !(s = strstr(rule, "soid:")) )
+        std::string stub;
+
+        if ( !get_so_stub(rule, stub) )
             continue;
 
-        if ( !(s = strchr(s, ';')) )
-            continue;
+        cout << stub << endl;
 
-        // FIXIT-L strip newlines (optional?)
-        if ( !p->length )
-            cout << rule << endl;
-        else
-        {
-            string stub(rule, ++s-rule);
-            cout << stub << ")" << endl;
-        }
         ++c;
     }
     if ( !c )
         cerr << "no rules to dump" << endl;
 }
 
+static void strip_newline(string& s)
+{
+    if ( s.find_last_of('\n') == s.length()-1 )
+        s.pop_back();
+}
+
 static void get_var(const string& s, string& v)
 {
     v.clear();
-    size_t pos = s.find("soid");
+    size_t pos = s.find("soid:");
 
     if ( pos == string::npos )
         return;
 
-    pos = s.find("|", pos+1);
+    pos += 5;
 
-    if ( pos == string::npos )
-        return;
-
-    size_t end = s.find(";", ++pos);
+    size_t end = s.find(';', pos);
 
     if ( end == string::npos )
         return;
@@ -299,7 +283,9 @@ void SoManager::rule_to_hex(const char*)
 {
     stringstream buffer;
     buffer << cin.rdbuf();
+
     string text = buffer.str();
+    strip_newline(text);
 
     unsigned idx;
     string data;
@@ -308,57 +294,140 @@ void SoManager::rule_to_hex(const char*)
     string var;
     get_var(text, var);
 
-    cout << "const uint8_t rule_" << var;
+    const unsigned hex_per_row = 16;
+
+    std::ios_base::fmtflags f(cout.flags());
+    cout << "static const uint8_t rule_" << var;
     cout << "[] =" << endl;
-    cout << "{" << endl;
+    cout << "{" << endl << "   ";
     cout << hex << uppercase;
 
     for ( idx = 0; idx < data.size(); idx++ )
     {
-        if ( idx && !(idx % 12) )
-            cout << endl;
+        if ( idx && !(idx % hex_per_row) )
+            cout << endl << "   ";
 
         uint8_t u = data[idx];
-        cout << "0x" << setfill('0') << setw(2) << hex << (int)u << ", ";
+        cout << " 0x" << setfill('0') << setw(2) << hex << (int)u << ",";
     }
-    if ( idx % 16 )
+    if ( idx % hex_per_row )
         cout << endl;
 
     cout << dec;
     cout << "};" << endl;
-    cout << "const unsigned rule_" << var << "_len = ";
+    cout << "static const unsigned rule_" << var << "_len = ";
     cout << data.size() << ";" << endl;
+    cout.flags(f);
 }
 
-void SoManager::rule_to_text(const char*)
+void SoManager::rule_to_text(const char* delim)
 {
     stringstream buffer;
     buffer << cin.rdbuf();
-    string text = buffer.str();
 
-    unsigned len = text.size(), idx;
-    const uint8_t* data = (uint8_t*)text.c_str();
+    string text = buffer.str();
+    strip_newline(text);
 
     string var;
     get_var(text, var);
 
-    cout << "const uint8_t rule_" << var;
-    cout << "[] =" << endl;
-    cout << "{" << endl;
-    cout << hex << uppercase;
+    if ( !delim or !*delim )
+        delim = "[Snort_SO_Rule]";
 
-    for ( idx = 0; idx < len; idx++ )
-    {
-        if ( idx && !(idx % 12) )
-            cout << endl;
-        cout << "0x" << setfill('0') << setw(2) << (unsigned)data[idx] << ", ";
-    }
-    if ( idx % 16 )
-        cout << endl;
-
-    cout << dec;
-    cout << "};" << endl;
-    cout << "const unsigned rule_" << var;
-    cout << "_len = 0;" << endl;
+    cout << "static const char* rule_" << var << " = ";
+    cout << "R\"" << delim << "(" << endl;
+    cout << text << endl;
+    cout << ')' << delim << "\";" << endl;
+    cout << endl;
+    cout << "static const unsigned rule_" << var << "_len = 0;" << endl;
 }
 
+//-------------------------------------------------------------------------
+// so_proxy inspector
+//-------------------------------------------------------------------------
+static const char* sp_name = "so_proxy";
+static const char* sp_help = "a proxy inspector to track flow data from SO rules (internal use only)";
+class SoProxy : public Inspector
+{
+public:
+    void eval(Packet*) override { }
+    bool configure(SnortConfig* sc) override
+    {
+        for( auto i : sc->so_rules->handles )
+            handles.emplace_back(i);
+        sc->so_rules->proxy = this;
+        return true;
+    }
+    ~SoProxy() override { handles.clear(); }
+
+private:
+    std::list<SoHandlePtr> handles;
+};
+
+static const Parameter sp_params[] =
+{
+    { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
+};
+
+class SoProxyModule : public Module
+{
+public:
+    SoProxyModule() : Module(sp_name, sp_help, sp_params) { }
+    Usage get_usage() const override
+    { return GLOBAL; }
+};
+
+static Module* mod_ctor()
+{ return new SoProxyModule; }
+
+static void mod_dtor(Module* m)
+{ delete m; }
+
+static Inspector* sp_ctor(Module*)
+{
+    return new SoProxy;
+}
+
+static void sp_dtor(Inspector* p)
+{
+    delete p;
+}
+
+static const InspectApi so_proxy_api
+{
+    {
+        PT_INSPECTOR,
+        sizeof(InspectApi),
+        INSAPI_VERSION,
+        0,
+        API_RESERVED,
+        API_OPTIONS,
+        sp_name,
+        sp_help,
+        mod_ctor,
+        mod_dtor
+    },
+    IT_PASSIVE,
+    PROTO_BIT__NONE,
+    nullptr, // buffers
+    nullptr, // service
+    nullptr, // pinit
+    nullptr, // pterm
+    nullptr, // tinit,
+    nullptr, // tterm,
+    sp_ctor,
+    sp_dtor,
+    nullptr, // ssn
+    nullptr  // reset
+};
+
+const BaseApi* so_proxy_plugins[] =
+{
+    &so_proxy_api.base,
+    nullptr
+};
+
+void SoManager::load_so_proxy()
+{
+    PluginManager::load_plugins(so_proxy_plugins);
+}

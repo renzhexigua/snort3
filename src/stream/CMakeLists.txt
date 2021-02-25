@@ -6,33 +6,25 @@ add_subdirectory(tcp)
 add_subdirectory(udp)
 add_subdirectory(user)
 add_subdirectory(file)
+add_subdirectory(test)
 
 set (STREAM_INCLUDES
     paf.h
-    stream_api.h
+    stream.h
     stream_splitter.h
 )
 
-add_library( stream STATIC
-    flush_bucket.cc
-    flush_bucket.h
-    paf.cc
-    stream.h
-    stream_api.cc
+add_library( stream OBJECT
+    stream.cc
     stream_inspectors.cc
     stream_inspectors.h
     stream_splitter.cc
 )
 
-target_link_libraries( stream
-    stream_base
-    stream_ip
-    stream_icmp
-    stream_tcp
-    stream_udp
-    stream_user
-    stream_file
-    protocols
+add_library( stream_paf OBJECT
+    flush_bucket.cc
+    flush_bucket.h
+    paf.cc
 )
 
 install (FILES ${STREAM_INCLUDES}

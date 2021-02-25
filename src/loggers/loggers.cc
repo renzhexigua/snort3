@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,55 +17,56 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "loggers.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include "framework/logger.h"
+#include "loggers.h"
+
+#include "managers/plugin_manager.h"
+
+using namespace snort;
 
 // to ensure PacketManager::log_protocols() is built into Snort++
-extern const BaseApi* log_codecs;
+extern const BaseApi* log_codecs[];
 
-#ifdef LINUX
-extern const BaseApi* alert_sf_socket;
-#endif
+extern const BaseApi* alert_sf_socket[];
 
 #ifdef STATIC_LOGGERS
-extern const BaseApi* alert_csv;
-extern const BaseApi* alert_fast;
-extern const BaseApi* alert_full;
-extern const BaseApi* alert_syslog;
-extern const BaseApi* alert_unix_sock;
-extern const BaseApi* log_null;
-extern const BaseApi* log_pcap;
-extern const BaseApi* eh_unified2;
+extern const BaseApi* alert_csv[];
+extern const BaseApi* alert_fast[];
+extern const BaseApi* alert_full[];
+extern const BaseApi* alert_json[];
+extern const BaseApi* alert_syslog[];
+extern const BaseApi* alert_talos[];
+extern const BaseApi* alert_unixsock[];
+extern const BaseApi* log_hext[];
+extern const BaseApi* log_pcap[];
+extern const BaseApi* eh_unified2[];
 #endif
 
-const BaseApi* loggers[] =
+void load_loggers()
 {
-#ifdef LINUX
-    alert_sf_socket,
-#endif
+    // loggers
+    PluginManager::load_plugins(log_codecs);
+    PluginManager::load_plugins(alert_sf_socket);
 
 #ifdef STATIC_LOGGERS
     // alerters
-    alert_csv,
-    alert_fast,
-    alert_full,
-    alert_syslog,
-    alert_unix_sock,
+    PluginManager::load_plugins(alert_csv);
+    PluginManager::load_plugins(alert_fast);
+    PluginManager::load_plugins(alert_full);
+    PluginManager::load_plugins(alert_json);
+    PluginManager::load_plugins(alert_syslog);
+    PluginManager::load_plugins(alert_talos);
+    PluginManager::load_plugins(alert_unixsock);
+
     // loggers
-    log_null,
-    log_pcap,
+    PluginManager::load_plugins(log_hext);
+    PluginManager::load_plugins(log_pcap);
 
     // both
-    eh_unified2,
+    PluginManager::load_plugins(eh_unified2);
 #endif
-    // loggers
-    log_codecs,
-    // both
-    nullptr
-};
+}
 

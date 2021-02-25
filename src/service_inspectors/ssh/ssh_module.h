@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,9 +21,9 @@
 #ifndef SSH_MODULE_H
 #define SSH_MODULE_H
 
+// Interface to the SSH service inspector
+
 #include "framework/module.h"
-#include "framework/bits.h"
-#include "main/thread.h"
 #include "ssh_config.h"
 
 #define GID_SSH 128
@@ -39,28 +39,36 @@
 #define SSH_NAME "ssh"
 #define SSH_HELP "ssh inspection"
 
-struct SnortConfig;
+namespace snort
+{struct SnortConfig;
 
-extern THREAD_LOCAL SimpleStats sshstats;
-extern THREAD_LOCAL ProfileStats sshPerfStats;
+}
 
-class SshModule : public Module
+extern THREAD_LOCAL SshStats sshstats;
+extern THREAD_LOCAL snort::ProfileStats sshPerfStats;
+
+class SshModule : public snort::Module
 {
 public:
     SshModule();
-    ~SshModule();
+    ~SshModule() override;
 
-    bool set(const char*, Value&, SnortConfig*) override;
-    bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
+    bool begin(const char*, int, snort::SnortConfig*) override;
 
     unsigned get_gid() const override
     { return GID_SSH; }
 
-    const RuleMap* get_rules() const override;
+    const snort::RuleMap* get_rules() const override;
     const PegInfo* get_pegs() const override;
     PegCount* get_counts() const override;
-    ProfileStats* get_profile() const override;
+    snort::ProfileStats* get_profile() const override;
+
+    Usage get_usage() const override
+    { return INSPECT; }
+
+    bool is_bindable() const override
+    { return true; }
 
     SSH_PROTO_CONF* get_data();
 
@@ -69,4 +77,3 @@ private:
 };
 
 #endif
-

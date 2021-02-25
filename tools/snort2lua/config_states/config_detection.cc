@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,14 +32,14 @@ class Detection : public ConversionState
 {
 public:
     Detection(Converter& c) : ConversionState(c) { }
-    virtual ~Detection() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
 bool Detection::convert(std::istringstream& data_stream)
 {
     bool retval = true;
+    bool split_set = false;
     std::string args;
 
     table_api.open_table("search_engine");
@@ -54,65 +54,67 @@ bool Detection::convert(std::istringstream& data_stream)
         if (!(arg_stream >> keyword)) // impossible to fail. get_string() will return false first.
             tmpval = false;
 
-        else if (!keyword.compare("no_stream_inserts"))
-            tmpval = table_api.add_option("no_stream_inserts", true);
+        else if (keyword == "no_stream_inserts")
+        {
+            table_api.add_diff_option_comment("no_stream_inserts", "detect_raw_tcp");
+            tmpval = table_api.add_option("detect_raw_tcp", false);
+        }
 
-        else if (!keyword.compare("debug"))
+        else if (keyword == "debug")
             tmpval = table_api.add_option("debug", true);
 
-        else if (!keyword.compare("search-optimize"))
+        else if (keyword == "search-optimize")
         {
             table_api.add_diff_option_comment("search-optimize", "search_optimize");
             tmpval = table_api.add_option("search_optimize", true);
         }
-        else if (!keyword.compare("split-any-any"))
+        else if (keyword == "split-any-any")
         {
             table_api.add_diff_option_comment("split-any-any", "split_any_any");
-            tmpval = table_api.add_option("split_any_any", true);
+            split_set = true;
         }
-        else if (!keyword.compare("bleedover-warnings-enabled"))
+        else if (keyword == "bleedover-warnings-enabled")
         {
             table_api.add_diff_option_comment("bleedover-warnings-enabled",
                 "bleedover_warnings_enabled");
             tmpval = table_api.add_option("bleedover_warnings_enabled", true);
         }
-        else if (!keyword.compare("enable-single-rule-group"))
+        else if (keyword == "enable-single-rule-group")
         {
             table_api.add_diff_option_comment("enable-single-rule-group",
                 "enable_single_rule_group");
             tmpval = table_api.add_option("enable_single_rule_group", true);
         }
-        else if (!keyword.compare("debug-print-nocontent-rule-tests"))
+        else if (keyword == "debug-print-nocontent-rule-tests")
         {
             table_api.add_diff_option_comment("debug-print-nocontent-rule-tests",
                 "debug_print_nocontent_rule_tests");
             tmpval = table_api.add_option("debug_print_nocontent_rule_tests", true);
         }
-        else if (!keyword.compare("debug-print-rule-groups-compiled"))
+        else if (keyword == "debug-print-rule-groups-compiled")
         {
             table_api.add_diff_option_comment("debug-print-rule-groups-compiled",
                 "debug_print_rule_groups_compiled");
             tmpval = table_api.add_option("debug_print_rule_groups_compiled", true);
         }
-        else if (!keyword.compare("debug-print-rule-groups-uncompiled"))
+        else if (keyword == "debug-print-rule-groups-uncompiled")
         {
             table_api.add_diff_option_comment("debug-print-rule-groups-uncompiled",
                 "debug_print_rule_groups_uncompiled");
             tmpval = table_api.add_option("debug_print_rule_groups_uncompiled", true);
         }
-        else if (!keyword.compare("debug-print-rule-group-build-details"))
+        else if (keyword == "debug-print-rule-group-build-details")
         {
             table_api.add_diff_option_comment("debug-print-rule-group-build-details",
                 "debug_print_rule_group_build_details");
             tmpval = table_api.add_option("debug_print_rule_group_build_details", true);
         }
-        else if (!keyword.compare("debug-print-fast-pattern"))
+        else if (keyword == "debug-print-fast-pattern")
         {
-            table_api.add_diff_option_comment("debug-print-fast-pattern",
-                "debug_print_fast_pattern");
-            tmpval = table_api.add_option("debug_print_fast_pattern", true);
+            table_api.add_diff_option_comment("debug-print-fast-pattern", "show_fast_patterns");
+            tmpval = table_api.add_option("show_fast_patterns", true);
         }
-        else if (!keyword.compare("max_queue_events"))
+        else if (keyword == "max_queue_events")
         {
             std::string val;
 
@@ -121,7 +123,7 @@ bool Detection::convert(std::istringstream& data_stream)
             else
                 tmpval = false;
         }
-        else if (!keyword.compare("max-pattern-len"))
+        else if (keyword == "max-pattern-len")
         {
             std::string val;
             table_api.add_diff_option_comment("max-pattern-len", "max_pattern_len");
@@ -131,7 +133,7 @@ bool Detection::convert(std::istringstream& data_stream)
             else
                 tmpval = false;
         }
-        else if (!keyword.compare("bleedover-port-limit"))
+        else if (keyword == "bleedover-port-limit")
         {
             std::string val;
             table_api.add_diff_option_comment("bleedover-port-limit", "bleedover_port_limit");
@@ -141,7 +143,7 @@ bool Detection::convert(std::istringstream& data_stream)
             else
                 tmpval = false;
         }
-        else if (!keyword.compare("search-method"))
+        else if (keyword == "search-method")
         {
             table_api.add_diff_option_comment("search-method", "search_method");
             std::string method;
@@ -152,89 +154,84 @@ bool Detection::convert(std::istringstream& data_stream)
                 continue;
             }
 
-            if (!method.compare("mwm"))
+            if (method == "mwm")
                 table_api.add_deleted_comment("mwm");
 
-            else if (!method.compare("ac"))
+            else if (method == "ac")
             {
-                table_api.add_diff_option_comment("ac", "ac_full_q");
-                tmpval = table_api.add_option("search_method", "ac_full_q");
+                table_api.add_diff_option_comment("ac", "ac_full");
+                tmpval = table_api.add_option("search_method", "ac_full");
             }
-            else if (!method.compare("ac-q"))
+            else if (method == "ac-q")
             {
-                table_api.add_diff_option_comment("ac-q", "ac_full_q");
-                tmpval = table_api.add_option("search_method", "ac_full_q");
+                table_api.add_diff_option_comment("ac-q", "ac_full");
+                tmpval = table_api.add_option("search_method", "ac_full");
             }
-            else if (!method.compare("ac-nq"))
+            else if (method == "ac-nq")
             {
                 table_api.add_diff_option_comment("ac-nq", "ac_full");
                 tmpval = table_api.add_option("search_method", "ac_full");
             }
-            else if (!method.compare("ac-bnfa"))
+            else if (method == "ac-bnfa")
             {
-                table_api.add_diff_option_comment("ac-bnfa", "ac_bnfa_q");
-                tmpval = table_api.add_option("search_method", "ac_bnfa_q");
+                table_api.add_diff_option_comment("ac-bnfa", "ac_bnfa");
+                tmpval = table_api.add_option("search_method", "ac_bnfa");
             }
-            else if (!method.compare("ac-bnfa-q"))
+            else if (method == "ac-bnfa-q")
             {
-                table_api.add_diff_option_comment("ac-bnfa-q", "ac_bnfa_q");
-                tmpval = table_api.add_option("search_method", "ac_bnfa_q");
+                table_api.add_diff_option_comment("ac-bnfa-q", "ac_bnfa");
+                tmpval = table_api.add_option("search_method", "ac_bnfa");
             }
-            else if (!method.compare("ac-bnfa-nq"))
+            else if (method == "ac-bnfa-nq")
             {
                 table_api.add_diff_option_comment("ac-bnfa-nq", "ac_bnfa");
                 tmpval = table_api.add_option("search_method", "ac_bnfa");
             }
-            else if (!method.compare("intel-cpm"))
+            else if (method == "intel-cpm")
             {
-                table_api.add_diff_option_comment("intel-cpm", "intel_cpm");
-                tmpval = table_api.add_option("search_method", "intel_cpm");
+                table_api.add_diff_option_comment("intel-cpm", "hyperscan");
+                tmpval = table_api.add_option("search_method", "hyperscan");
             }
-            else if (!method.compare("ac-std"))
+            else if (method == "ac-std")
             {
                 table_api.add_diff_option_comment("ac-std", "ac_std");
                 tmpval = table_api.add_option("search_method", "ac_std");
             }
-            else if (!method.compare("ac-banded"))
+            else if (method == "ac-banded")
             {
                 table_api.add_diff_option_comment("ac-banded", "ac_banded");
                 tmpval = table_api.add_option("search_method", "ac_banded");
             }
-            else if (!method.compare("acs"))
+            else if (method == "acs")
             {
                 table_api.add_diff_option_comment("acs", "ac_sparse");
                 tmpval = table_api.add_option("search_method", "ac_sparse");
             }
-            else if (!method.compare("ac-sparsebands"))
+            else if (method == "ac-sparsebands")
             {
                 table_api.add_diff_option_comment("ac-sparsebands", "ac_sparse_bands");
                 tmpval = table_api.add_option("search_method", "ac_sparse_bands");
             }
-            else if (!method.compare("lowmem"))
+            else if (method == "lowmem")
             {
-                table_api.add_diff_option_comment("lowmem", "lowmem_q");
-                tmpval = table_api.add_option("search_method", "lowmem_q");
+                tmpval = table_api.add_option("search_method", "lowmem");
             }
-            else if (!method.compare("lowmem-q"))
+            else if (method == "lowmem-q")
             {
-                table_api.add_diff_option_comment("lowmem-q", "lowmem_q");
-                tmpval = table_api.add_option("search_method", "lowmem_q");
+                table_api.add_diff_option_comment("lowmem-q", "lowmem");
+                tmpval = table_api.add_option("search_method", "lowmem");
             }
-            else if (!method.compare("lowmem-nq"))
+            else if (method == "lowmem-nq")
             {
                 table_api.add_diff_option_comment("lowmem-nq", "lowmem");
                 tmpval = table_api.add_option("search_method", "lowmem");
             }
-            else if (!method.compare("ac-split"))
+            else if (method == "ac-split")
             {
                 table_api.add_diff_option_comment("ac-split", "split_any_any");
-                table_api.add_diff_option_comment("ac-split", "ac_full_q");
-                bool tmpval2 = table_api.add_option("split_any_any", true);
-                bool tmpval1 = table_api.add_option("search_method", "ac_full_q");
-                tmpval = tmpval1 && tmpval2;
-
-                if (!table_api.add_option("split_any_any", true))
-                    tmpval = false;
+                table_api.add_diff_option_comment("ac-split", "ac_full");
+                tmpval = table_api.add_option("search_method", "ac_full");
+                split_set = true;
             }
             else
             {
@@ -246,6 +243,26 @@ bool Detection::convert(std::istringstream& data_stream)
 
         if (retval && !tmpval)
             retval = false;
+    }
+
+    if ( table_api.option_exists("split_any_any") )
+    {
+        std::string val;
+        table_api.get_option_value("split_any_any", val);
+
+        if ( val == "false" )
+        {
+            if ( !split_set )
+                table_api.add_diff_option_comment("split-any-any", "split_any_any = true by default");
+            table_api.append_option("split_any_any", split_set);
+        }
+    }
+    else
+    {
+        if ( !split_set )
+            table_api.add_diff_option_comment("split-any-any", "split_any_any = true by default");
+
+        retval &= table_api.add_option("split_any_any", split_set);
     }
 
     return retval;

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -23,9 +23,8 @@
 #endif
 
 #include "framework/codec.h"
-#include "protocols/protocol_ids.h"
-#include "main/snort_config.h"
-#include "main/snort_debug.h"
+
+using namespace snort;
 
 #define CD_PPPENCAP_NAME "ppp_encap"
 #define CD_PPPENCAP_HELP "support for point-to-point encapsulation"
@@ -36,52 +35,25 @@ class PppEncap : public Codec
 {
 public:
     PppEncap() : Codec(CD_PPPENCAP_NAME) { }
-    ~PppEncap() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
 };
 
-const static uint16_t PPP_IP = 0x0021;       /* Internet Protocol */
-const static uint16_t PPP_IPV6 = 0x0057;        /* Internet Protocol v6 */
-const static uint16_t PPP_VJ_COMP = 0x002d;        /* VJ compressed TCP/IP */
-const static uint16_t PPP_VJ_UCOMP = 0x002f;        /* VJ uncompressed TCP/IP */
-const static uint16_t PPP_IPX = 0x002b;        /* Novell IPX Protocol */
+static const uint16_t PPP_IP = 0x0021;       /* Internet Protocol */
+static const uint16_t PPP_IPV6 = 0x0057;        /* Internet Protocol v6 */
+static const uint16_t PPP_VJ_COMP = 0x002d;        /* VJ compressed TCP/IP */
+static const uint16_t PPP_VJ_UCOMP = 0x002f;        /* VJ uncompressed TCP/IP */
+static const uint16_t PPP_IPX = 0x002b;        /* Novell IPX Protocol */
 } // namespace
 
-void PppEncap::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(ETHERTYPE_PPP); }
+void PppEncap::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::ETHERTYPE_PPP); }
 
-/*
- * Function: DecodePppPktEncapsulated(Packet *, const uint32_t len, uint8_t*)
- *
- * Purpose: Decode PPP traffic (RFC1661 framing).
- *
- * Arguments: p => pointer to decoded packet struct
- *            len => length of data to process
- *            pkt => pointer to the real live packet data
- *
- * Returns: void function
- */
 bool PppEncap::decode(const RawData& raw, CodecData& codec, DecodeData&)
 {
-    static THREAD_LOCAL bool had_vj = false;
     uint16_t protocol;
 
-    DEBUG_WRAP(DebugMessage(DEBUG_DECODE, "PPP Packet!\n"); );
-
-#ifdef WORDS_MUSTALIGN
-    DEBUG_WRAP(DebugMessage(DEBUG_DECODE, "Packet with PPP header.  "
-        "PPP is only 1 or 2 bytes and will throw off "
-        "alignment on this architecture when decoding IP, "
-        "causing a bus error - stop decoding packet.\n"); );
-    return true;
-
-#endif  /* WORDS_MUSTALIGN */
-
-    /* do a little validation:
-     *
-     */
     if (raw.len < 2)
         return false;
 
@@ -95,7 +67,7 @@ bool PppEncap::decode(const RawData& raw, CodecData& codec, DecodeData&)
     }
     else
     {
-        protocol = ntohs(*((uint16_t*)raw.data));
+        protocol = ntohs(*((const uint16_t*)raw.data));
         codec.lyr_len = 2;
     }
 
@@ -106,35 +78,35 @@ bool PppEncap::decode(const RawData& raw, CodecData& codec, DecodeData&)
     switch (protocol)
     {
     case PPP_VJ_COMP:
-        if (!had_vj)
-            ErrorMessage("PPP link seems to use VJ compression, "
-                "cannot handle compressed packets\n");
-        had_vj = true;
         return false;
+
     case PPP_VJ_UCOMP:
         /* VJ compression modifies the protocol field. It must be set
          * to tcp (only TCP packets can be VJ compressed) */
         if (raw.len < (uint32_t)(codec.lyr_len + ip::IP4_HEADER_LEN))
         {
-            if (SnortConfig::log_verbose())
-                ErrorMessage("PPP VJ min packet length > captured len"
-                    "(%d bytes)\n", raw.len);
+            // PPP VJ min packet length > captured len
             return false;
         }
 
-        ((IP4Hdr*)(raw.data + codec.lyr_len))->set_proto(IPPROTO_TCP);
+        {
+            // FIXIT-M X This is broken - it should not modify the packet data
+            // (which should be const).
+            const ip::IP4Hdr* iph = reinterpret_cast<const ip::IP4Hdr*>(raw.data + codec.lyr_len);
+            const_cast<ip::IP4Hdr*>(iph)->set_proto(IpProtocol::TCP);
+        }
     /* fall through */
 
     case PPP_IP:
-        codec.next_prot_id = ETHERTYPE_IPV4;
+        codec.next_prot_id = ProtocolId::ETHERTYPE_IPV4;
         break;
 
     case PPP_IPV6:
-        codec.next_prot_id = ETHERTYPE_IPV6;
+        codec.next_prot_id = ProtocolId::ETHERTYPE_IPV6;
         break;
 
     case PPP_IPX:
-        codec.next_prot_id = ETHERTYPE_IPX;
+        codec.next_prot_id = ProtocolId::ETHERTYPE_IPX;
         break;
 
     default:
@@ -177,11 +149,11 @@ static const CodecApi pppencap_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_pppencap[] =
+#endif
 {
     &pppencap_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_pppencap = &pppencap_api.base;
-#endif
 

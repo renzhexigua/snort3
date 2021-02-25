@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -30,10 +30,19 @@
 #include "data/data_types/dt_rule_suboption.h"
 
 std::size_t RuleApi::error_count = 0;
-std::string RuleApi::remark = "";
+std::string RuleApi::remark;
 
-RuleApi::RuleApi()
-    :   curr_rule(nullptr),
+std::set<GidSid> RuleApi::address_anomaly_rules =
+{
+    {"116", "403"},
+    {"116", "411"},
+    {"116", "412"},
+    {"129", "9"},
+    {"129", "10"},
+};
+
+RuleApi::RuleApi() :
+    curr_rule(nullptr),
     curr_data_bad(false)
 {
     bad_rules = new Comments(start_bad_rules, 0,
@@ -66,6 +75,14 @@ std::size_t RuleApi::num_errors() const
 bool RuleApi::empty() const
 { return rules.empty(); }
 
+void RuleApi::clear()
+{
+    for (auto r : rules)
+        delete r;
+
+    rules.clear();
+}
+
 void RuleApi::set_remark(const char* s)
 { remark = s; }
 
@@ -87,7 +104,17 @@ void RuleApi::make_rule_a_comment()
     curr_rule->make_comment();
 }
 
-void RuleApi::bad_rule(std::istringstream& stream, std::string bad_option)
+bool RuleApi::enable_addr_anomaly_detection()
+{
+    if (curr_rule != nullptr)
+    {
+        return address_anomaly_rules.count(
+            { curr_rule->get_option("gid"), curr_rule->get_option("sid") }) != 0;
+    }
+    return false;
+}
+
+void RuleApi::bad_rule(std::istringstream& stream, const std::string& bad_option)
 {
     if (!curr_rule)
         begin_rule();
@@ -104,11 +131,11 @@ void RuleApi::bad_rule(std::istringstream& stream, std::string bad_option)
     bad_rules->add_text("^^^^ unknown_option=" + bad_option);
 }
 
-void RuleApi::include_rule_file(std::string file_name)
+void RuleApi::include_rule_file(const std::string& file_name)
 {
     if (curr_rule)
     {
-        DataApi::developer_error("Attempting to include a file while buliding a rule!");
+        DataApi::developer_error("Attempting to include a file while building a rule!");
     }
     else
     {
@@ -119,7 +146,15 @@ void RuleApi::include_rule_file(std::string file_name)
     }
 }
 
-void RuleApi::add_hdr_data(std::string data)
+void RuleApi::set_rule_old_action(const std::string &action)
+{
+    if (!curr_rule)
+        begin_rule();
+
+    curr_rule->set_rule_old_action(action);
+}
+
+void RuleApi::add_hdr_data(const std::string& data)
 {
     if (!curr_rule)
         begin_rule();
@@ -127,7 +162,15 @@ void RuleApi::add_hdr_data(std::string data)
     curr_rule->add_hdr_data(data);
 }
 
-void RuleApi::update_rule_action(std::string new_type)
+std::string& RuleApi::get_rule_old_action()
+{
+    if (!curr_rule)
+        begin_rule();
+
+    return (curr_rule->get_rule_old_action());
+}
+
+void RuleApi::update_rule_action(const std::string& new_type)
 {
     if (!curr_rule)
     {
@@ -140,7 +183,7 @@ void RuleApi::update_rule_action(std::string new_type)
     }
 }
 
-void RuleApi::add_option(std::string opt_name)
+void RuleApi::add_option(const std::string& opt_name)
 {
     if (!curr_rule)
         begin_rule();
@@ -148,7 +191,7 @@ void RuleApi::add_option(std::string opt_name)
     curr_rule->add_option(opt_name);
 }
 
-void RuleApi::add_option(std::string opt_name, std::string val)
+void RuleApi::add_option(const std::string& opt_name, const std::string& val)
 {
     if (!curr_rule)
         begin_rule();
@@ -156,7 +199,23 @@ void RuleApi::add_option(std::string opt_name, std::string val)
     curr_rule->add_option(opt_name, val);
 }
 
-void RuleApi::add_suboption(std::string keyword)
+std::string RuleApi::get_option(const std::string& keyword)
+{
+    if (!curr_rule)
+        return std::string();
+
+    return curr_rule->get_option(keyword);
+}
+
+void RuleApi::update_option(const std::string& keyword, const std::string& val)
+{
+    if (!curr_rule)
+        return;
+
+    curr_rule->update_option(keyword, val);
+}
+
+void RuleApi::add_suboption(const std::string& keyword)
 {
     if (curr_rule)
         curr_rule->add_suboption(keyword);
@@ -164,8 +223,8 @@ void RuleApi::add_suboption(std::string keyword)
         DataApi::developer_error("Add some header data before adding content!!");
 }
 
-void RuleApi::add_suboption(std::string keyword,
-    std::string val)
+void RuleApi::add_suboption(const std::string& keyword,
+    const std::string& val)
 {
     if (curr_rule)
         curr_rule->add_suboption(keyword, val);
@@ -173,20 +232,50 @@ void RuleApi::add_suboption(std::string keyword,
         DataApi::developer_error("Add some header data before adding content!!");
 }
 
-void RuleApi::set_curr_options_buffer(std::string buffer)
+void RuleApi::reset_sticky(void)
 {
     if (curr_rule)
-        curr_rule->set_curr_options_buffer(buffer);
+        curr_rule->reset_sticky();
+    else
+        DataApi::developer_error("Add a rule before resetting the sticky buffer!!");
+}
+
+void RuleApi::set_curr_options_buffer(const std::string& buffer, bool add_option)
+{
+    if (curr_rule)
+        curr_rule->set_curr_options_buffer(buffer, add_option);
     else
         DataApi::developer_error("Add some header data before adding content!!");
 }
 
-void RuleApi::add_comment(std::string comment)
+void RuleApi::add_comment(const std::string& comment)
 {
     if (!curr_rule)
         begin_rule();
 
     curr_rule->add_comment(comment);
+}
+
+void RuleApi::old_http_rule()
+{
+    if (!curr_rule)
+        begin_rule();
+
+    curr_rule->set_old_http_rule();
+}
+
+bool RuleApi::is_old_http_rule()
+{
+    if (!curr_rule)
+        return false;
+
+    return curr_rule->is_old_http_rule();
+}
+
+void RuleApi::resolve_pcre_buffer_options()
+{
+    if (curr_rule)
+        curr_rule->resolve_pcre_buffer_options();
 }
 
 std::ostream& operator<<(std::ostream& out, const RuleApi& data)
@@ -208,6 +297,9 @@ std::ostream& operator<<(std::ostream& out, const RuleApi& data)
 
 void RuleApi::print_rules(std::ostream& out, bool in_rule_file)
 {
+    if ( empty() )
+        return;
+
     if (!in_rule_file)
         out << "local_rules =\n[[\n";
 

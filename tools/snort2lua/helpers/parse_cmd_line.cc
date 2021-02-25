@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,17 +20,14 @@
 #include "config.h"
 #endif
 
-#include <syslog.h>
-#include <iostream>
-#include <string>
-#include <string.h>
+#include "parse_cmd_line.h"
+
+#include <cstring>
 #include <iomanip>
 
-#include "helpers/parse_cmd_line.h"
-#include "data/dt_data.h"
-#include "helpers/converter.h"
-#include "helpers/s2l_util.h"
-#include "helpers/s2l_markup.h"
+#include "converter.h"
+#include "s2l_markup.h"
+#include "s2l_util.h"
 
 namespace parser
 {
@@ -71,7 +68,6 @@ const std::string get_rule_file()
 { return rule_file.empty() ? get_out_file() : rule_file; }
 
 static void help_args(const char* pfx, const char* /*val*/);
-static void print_args(const char* pfx, const char* /*val*/);
 
 //-------------------------------------------------------------------------
 // arg foo
@@ -87,7 +83,6 @@ public:
     { idx = 0; arg = nullptr; }
 
     bool get_arg(const char*& key, const char*& val);
-    void dump();
 
 private:
     char** argv;
@@ -96,13 +91,7 @@ private:
     std::string buf;
 };
 
-void ArgList::dump()
-{
-    for ( int i = 0; i < argc; ++i )
-        printf("argv[%d]='%s'\n", i, argv[i]);
-}
-
-// FIXIT this chokes on -n -4 because it thinks
+// FIXIT-L this chokes on -n -4 because it thinks
 // -4 is another arg instead of an option to -n
 bool ArgList::get_arg(const char*& key, const char*& val)
 {
@@ -170,7 +159,7 @@ bool ArgList::get_arg(const char*& key, const char*& val)
     return false;
 }
 
-static void help_usage()
+[[noreturn]] static void help_usage()
 {
     std::cout << "usage:\n";
     std::cout << "    -?: list options\n";
@@ -195,14 +184,9 @@ static void parse_config_file(const char* key, const char* val)
     else
     {
         conf_file = std::string(val);
+        std::size_t path_sep = conf_file.find_last_of('/');
 
-#ifndef WIN32
-        std::size_t path_sep = conf_file.find_last_of("/");
-#else
-        std::size_t path_sep = conf_file.find_last_of("\\");
-#endif
-
-        /* is there a directory seperator in the filename */
+        /* is there a directory separator in the filename */
         if (path_sep != std::string::npos)
         {
             path_sep++;  /* include path separator */
@@ -260,6 +244,15 @@ static void parse_rule_file(const char* key, const char* val)
 static void add_remark(const char* /*key*/, const char* val)
 { RuleApi::set_remark(val); }
 
+static void bind_wizard(const char* /*key*/, const char* /*val*/)
+{ Converter::set_bind_wizard(true); }
+
+static void bind_port(const char* /*key*/, const char* /*val*/)
+{
+    Converter::set_bind_port(true);
+    Converter::set_bind_wizard(false);
+}
+
 static void print_all(const char* /*key*/, const char* /*val*/)
 { DataApi::set_default_print(); }
 
@@ -281,12 +274,28 @@ static void dont_parse_includes(const char* /*key*/, const char* /*val*/)
 static void enable_markup(const char* /*key*/, const char* /*val*/)
 { Markup::enable(true); }
 
+static void set_ips_pattern(const char* /*key*/, const char* val)
+{ Converter::set_ips_pattern(val); }
+
 static void print_version(const char* /*key*/, const char* /*val*/)
 {
     std::cout << "Snort2Lua\t0.2.0";
 }
 
-static void help(const char* key, const char* val)
+static void dont_convert_max_session(const char* /*key*/, const char* /*val*/)
+{
+    Converter::unset_convert_max_session();
+}
+
+#ifdef REG_TEST
+[[noreturn]] static void print_binder_order(const char* /*key*/, const char* /*val*/)
+{
+    print_binder_priorities();
+    exit(0);
+}
+#endif
+
+[[noreturn]] static void help(const char* key, const char* val)
 {
     std::cout << Markup::head(3) << "Usage: snort2lua [OPTIONS]... -c <snort_conf> ...\n";
     std::cout << "\n";
@@ -315,7 +324,7 @@ static void help(const char* key, const char* val)
     exit(0);
 }
 
-static void print_args(const char* key, const char* val)
+[[noreturn]] static void print_args(const char* key, const char* val)
 {
     help_args(key, val);
     exit(0);
@@ -353,21 +362,27 @@ static ConfigFunc basic_opts[] =
       "output the new Snort++ lua configuration to <out_file>" },
 
     { "q", print_quiet, "",
-      "quiet mode. Only output valid confiration information to the <out_file>" },
+      "quiet mode. Only output valid configuration information to the <out_file>" },
 
     { "r", parse_rule_file, "<rule_file>",
       "output any converted rule to <rule_file>" },
 
     { "s", sing_rule_files, "",
       "when parsing <include_file>, write <include_file>'s rules to "
-      "<rule_file>. Meaningles if '-i' provided" },
+      "<rule_file>. Meaningless if '-i' provided" },
 
     { "t", sing_conf_files, "",
       "when parsing <include_file>, write <include_file>'s information, "
-      "excluding rules, to <out_file>. Meaningles if '-i' provided" },
+      "excluding rules, to <out_file>. Meaningless if '-i' provided" },
 
     { "V", print_version, "",
       "Print the current Snort2Lua version" },
+
+    { "bind-wizard", bind_wizard, "",
+      "Add default wizard to bindings" },
+
+    { "bind-port", bind_port, "",
+      "Convert port bindings" },
 
     { "conf-file", parse_config_file, "",
       "Same as '-c'. A Snort <snort_conf> file which will be converted" },
@@ -376,11 +391,17 @@ static ConfigFunc basic_opts[] =
       "Same as '-p'. if <snort_conf> file contains any <include_file> or <policy_file> "
       "(i.e. 'include path/to/conf/other_conf'), do NOT parse those files" },
 
+    { "dont-convert-max-sessions", dont_convert_max_session, "",
+      "do not convert max_tcp, max_udp, max_icmp, max_ip to max_session" },
+
     { "error-file", parse_error_file, "<error_file>",
       "Same as '-e'. output all errors to <error_file>" },
 
     { "help", help, "",
       "Same as '-h'. this overview of snort2lua" },
+
+    { "ips-policy-pattern", set_ips_pattern, "",
+      "Convert config bindings matching this path to ips policy bindings" },
 
     { "markup", enable_markup, "",
       "print help in asciidoc compatible format" },
@@ -391,12 +412,17 @@ static ConfigFunc basic_opts[] =
     { "print-all", print_all, "",
       "Same as '-a'. default option.  print all data" },
 
+#ifdef REG_TEST
+    { "print-binding-order", print_binder_order, "",
+      "Print sorting priority used when generating binder table" },
+#endif
+
     { "print-differences", print_differences, "",
       "Same as '-d'. output the differences, and only the differences, "
       "between the Snort and Snort++ configurations to the <out_file>" },
 
     { "quiet", print_quiet, "",
-      "Same as '-q'. quiet mode. Only output valid confiration information to the <out_file>" },
+      "Same as '-q'. quiet mode. Only output valid configuration information to the <out_file>" },
 
     { "remark", add_remark, "",
       "same as '-m'.  add a remark to the end of every converted rule" },
@@ -473,30 +499,30 @@ static void help_args(const char* /*pfx*/, const char* /*val*/)
             if (name.size() > name_field_len)
                 std::cout << "\n" << std::left << std::setw(name_field_len) << " ";
 
-            std::string help = p->help;
+            std::string help_str = p->help;
             bool first_line = true;
 
-            while (!help.empty())
+            while (!help_str.empty())
             {
-                std::size_t len = util::get_substr_length(help, data_field_len);
+                std::size_t len = util::get_substr_length(help_str, data_field_len);
 
                 if (first_line)
                     first_line = false;
                 else
                     std::cout << "\n" << std::setw(name_field_len) << " ";
 
-                std::cout << std::left << Markup::escape(help.substr(0, len));
+                std::cout << std::left << help_str.substr(0, len);
 
-                if (len < help.size())
-                    help = help.substr(len + 1);
+                if (len < help_str.size())
+                    help_str = help_str.substr(len + 1);
                 else
                     break;
             }
 
-            std::cout << *(Markup::add_newline()) << std::endl;
+            std::cout << Markup::add_newline() << std::endl;
         }
         ++p;
     }
+    std::cout << std::resetiosflags(std::ios::adjustfield);
 }
 } // namespace parser
-

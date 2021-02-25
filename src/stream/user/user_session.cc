@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,22 +17,25 @@
 //--------------------------------------------------------------------------
 // user_session.cc author Russ Combs <rucombs@cisco.com>
 
-#include "user_session.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
+#include "user_session.h"
+
+#include "detection/detection_engine.h"
+#include "detection/rules.h"
+#include "main/analyzer.h"
+#include "main/snort_debug.h"
+#include "memory/memory_cap.h"
+#include "profiler/profiler_defs.h"
+#include "protocols/packet.h"
+#include "utils/util.h"
+
 #include "stream_user.h"
 #include "user_module.h"
-#include "stream/stream.h"
-#include "stream/stream_splitter.h"
-#include "stream/paf.h"
-#include "perf_monitor/perf.h"
-#include "flow/flow_control.h"
-#include "sfip/sf_ip.h"
-#include "time/profiler.h"
-#include "main/snort.h"
+
+using namespace snort;
 
 THREAD_LOCAL ProfileStats user_perf_stats;
 
@@ -52,11 +55,12 @@ THREAD_LOCAL ProfileStats user_perf_stats;
 UserSegment* UserSegment::init(const uint8_t* p, unsigned n)
 {
     unsigned bucket = (n > BUCKET) ? n : BUCKET;
-    UserSegment* us = (UserSegment*)malloc(sizeof(*us)+bucket-1);
+    unsigned size = sizeof(UserSegment) + bucket -1;
 
-    if ( !us )
-        return nullptr;
+    memory::MemoryCap::update_allocations(size);
+    UserSegment* us = (UserSegment*)snort_alloc(size);
 
+    us->size = size;
     us->len = 0;
     us->offset = 0;
     us->used = 0;
@@ -67,7 +71,8 @@ UserSegment* UserSegment::init(const uint8_t* p, unsigned n)
 
 void UserSegment::term(UserSegment* us)
 {
-    free(us);
+    memory::MemoryCap::update_deallocations(us->size);
+    snort_free(us);
 }
 
 unsigned UserSegment::avail()
@@ -133,30 +138,36 @@ void UserTracker::init()
 
 void UserTracker::term()
 {
-    delete splitter;
-    splitter = nullptr;
+    if ( splitter )
+    {
+        delete splitter;
+        splitter = nullptr;
+    }
+
+    for ( auto* p : seg_list )
+        snort_free(p);
+
+    seg_list.clear();
 }
 
-void UserTracker::detect(const Packet* p, const StreamBuffer* sb, uint32_t flags)
+void UserTracker::detect(
+    const Packet* p, const StreamBuffer& sb, uint32_t flags, Packet* up)
 {
-    Packet up;
-    up.reset();
+    up->pkth = p->pkth;
+    up->ptrs = p->ptrs;
+    up->flow = p->flow;
+    up->data = sb.data;
+    up->dsize = sb.length;
 
-    up.pkth = p->pkth;
-    up.ptrs = p->ptrs;
-    up.flow = p->flow;
-    up.data = sb->data;
-    up.dsize = sb->length;
+    up->proto_bits = p->proto_bits;
+    up->pseudo_type = PSEUDO_PKT_USER;
 
-    up.proto_bits = p->proto_bits;
-    up.application_protocol_ordinal = p->application_protocol_ordinal;
+    up->packet_flags = flags | PKT_REBUILT_STREAM | PKT_PSEUDO;
+    up->packet_flags |= (p->packet_flags & (PKT_FROM_CLIENT|PKT_FROM_SERVER));
+    up->packet_flags |= (p->packet_flags & (PKT_STREAM_EST|PKT_STREAM_UNEST_UNI));
 
-    up.packet_flags = flags | PKT_REBUILT_STREAM;
-    up.packet_flags |= (p->packet_flags & (PKT_FROM_CLIENT|PKT_FROM_SERVER));
-    up.packet_flags |= (p->packet_flags & (PKT_STREAM_EST|PKT_STREAM_UNEST_UNI));
-
-    //printf("user detect[%d] %*s\n", up.dsize, up.dsize, (char*)up.data);
-    Snort::detect_rebuilt_packet(&up);
+    debug_logf(stream_user_trace, up, "detect[%d]\n", up->dsize);
+    Analyzer::get_local_analyzer()->inspect_rebuilt(up);
 }
 
 int UserTracker::scan(Packet* p, uint32_t& flags)
@@ -175,10 +186,10 @@ int UserTracker::scan(Packet* p, uint32_t& flags)
 
         flags = p->packet_flags & (PKT_FROM_CLIENT|PKT_FROM_SERVER);
         unsigned len = us->get_unused_len();
-        //printf("user scan[%d] '%*s'\n", len, len, us->get_unused_data());
+        debug_logf(stream_user_trace, p, "scan[%d]\n", len);
 
         int32_t flush_amt = paf_check(
-            splitter, &paf_state, p->flow, us->get_unused_data(), len,
+            splitter, &paf_state, p, us->get_unused_data(), len,
             total, paf_state.seq, &flags);
 
         if ( flush_amt >= 0 )
@@ -200,42 +211,46 @@ int UserTracker::scan(Packet* p, uint32_t& flags)
 void UserTracker::flush(Packet* p, unsigned flush_amt, uint32_t flags)
 {
     unsigned bytes_flushed = 0;
-    const StreamBuffer* sb = nullptr;
-    //printf("user flush[%d]\n", flush_amt);
+    debug_logf(stream_user_trace, p, "flush[%d]\n", flush_amt);
     uint32_t rflags = flags & ~PKT_PDU_TAIL;
+    Packet* up = DetectionEngine::set_next_packet(p);
 
-    while ( !seg_list.empty() and flush_amt )
+    while ( !seg_list.empty() and bytes_flushed < flush_amt )
     {
         UserSegment* us = seg_list.front();
         const uint8_t* data = us->get_data();
         unsigned len = us->get_len();
         unsigned bytes_copied = 0;
 
-        if ( len == flush_amt )
-            rflags |= (flags & PKT_PDU_TAIL);
+        if ( len + bytes_flushed > flush_amt )
+            len = flush_amt - bytes_flushed;
 
-        //printf("user reassemble[%d]\n", len);
-        sb = splitter->reassemble(
+        if ( len + bytes_flushed == flush_amt )
+        {
+            rflags |= (flags & PKT_PDU_TAIL);
+            len = flush_amt;
+        }
+
+        debug_logf(stream_user_trace, p, "reassemble[%d]\n", len);
+        StreamBuffer sb = splitter->reassemble(
             p->flow, flush_amt, bytes_flushed, data, len, rflags, bytes_copied);
 
         bytes_flushed += bytes_copied;
+        total -= bytes_copied;
+
         rflags &= ~PKT_PDU_HEAD;
 
-        if ( sb )
-            detect(p, sb, flags);
+        if ( sb.data )
+            detect(p, sb, flags, up);
 
-        if ( len == bytes_copied )
+        if ( bytes_copied == us->get_len() )
         {
-            total -= len;
-            flush_amt -= len;
             seg_list.pop_front();
             UserSegment::term(us);
         }
         else
         {
-            total -= bytes_copied;
             us->shift(bytes_copied);
-            flush_amt = 0;
         }
     }
 }
@@ -261,8 +276,8 @@ void UserTracker::process(Packet* p)
 
 void UserTracker::add_data(Packet* p)
 {
-    //printf("user add[%d]\n", p->dsize);
-   unsigned avail = 0;
+    debug_logf(stream_user_trace, p, "add[%d]\n", p->dsize);
+    unsigned avail = 0;
 
     if ( !seg_list.empty() )
     {
@@ -280,28 +295,23 @@ void UserTracker::add_data(Packet* p)
     if ( avail < p->dsize )
     {
         UserSegment* us = UserSegment::init(p->data+avail, p->dsize-avail);
-
-        if ( !us )
-            return;
-
-        seg_list.push_back(us);
+        seg_list.emplace_back(us);
     }
     total += p->dsize;
     process(p);
 }
-
 
 //-------------------------------------------------------------------------
 // private user session methods
 // may need additional refactoring
 //-------------------------------------------------------------------------
 
-void UserSession::start(Packet* p, Flow* flow)
+void UserSession::start(Packet* p, Flow* f)
 {
-    Inspector* ins = flow->gadget;
+    Inspector* ins = f->gadget;
 
     if ( !ins )
-        ins = flow->clouseau;
+        ins = f->clouseau;
 
     if ( ins )
     {
@@ -315,49 +325,43 @@ void UserSession::start(Packet* p, Flow* flow)
     }
 
     {
-        flow->protocol = p->type();
+        f->pkt_type = p->type();
+        f->ip_proto = (uint8_t)p->get_ip_proto_next();
 
-        if (flow->ssn_state.session_flags & SSNFLAG_RESET)
-            flow->ssn_state.session_flags &= ~SSNFLAG_RESET;
+        if (f->ssn_state.session_flags & SSNFLAG_RESET)
+            f->ssn_state.session_flags &= ~SSNFLAG_RESET;
 
-        if ( (flow->ssn_state.session_flags & SSNFLAG_CLIENT_SWAP) &&
-            !(flow->ssn_state.session_flags & SSNFLAG_CLIENT_SWAPPED) )
+        if ( (f->ssn_state.session_flags & SSNFLAG_CLIENT_SWAP) &&
+            !(f->ssn_state.session_flags & SSNFLAG_CLIENT_SWAPPED) )
         {
-            sfip_t ip = flow->client_ip;
-            uint16_t port = flow->client_port;
+            f->swap_roles();
 
-            flow->client_ip = flow->server_ip;
-            flow->server_ip = ip;
-
-            flow->client_port = flow->server_port;
-            flow->server_port = port;
-
-            if ( !flow->two_way_traffic() )
+            if ( !f->two_way_traffic() )
             {
-                if ( flow->ssn_state.session_flags & SSNFLAG_SEEN_CLIENT )
+                if ( f->ssn_state.session_flags & SSNFLAG_SEEN_CLIENT )
                 {
-                    flow->ssn_state.session_flags ^= SSNFLAG_SEEN_CLIENT;
-                    flow->ssn_state.session_flags |= SSNFLAG_SEEN_SERVER;
+                    f->ssn_state.session_flags ^= SSNFLAG_SEEN_CLIENT;
+                    f->ssn_state.session_flags |= SSNFLAG_SEEN_SERVER;
                 }
-                else if ( flow->ssn_state.session_flags & SSNFLAG_SEEN_SERVER )
+                else if ( f->ssn_state.session_flags & SSNFLAG_SEEN_SERVER )
                 {
-                    flow->ssn_state.session_flags ^= SSNFLAG_SEEN_SERVER;
-                    flow->ssn_state.session_flags |= SSNFLAG_SEEN_CLIENT;
+                    f->ssn_state.session_flags ^= SSNFLAG_SEEN_SERVER;
+                    f->ssn_state.session_flags |= SSNFLAG_SEEN_CLIENT;
                 }
             }
-            flow->ssn_state.session_flags |= SSNFLAG_CLIENT_SWAPPED;
+            f->ssn_state.session_flags |= SSNFLAG_CLIENT_SWAPPED;
         }
 #if 0
-        // FIXIT-L TBD
-        //flow->set_expire(p, dstPolicy->session_timeout);
+        // FIXIT-M implement stream_user perf stats
+        //f->set_expire(p, dstPolicy->session_timeout);
 
         // add user flavor to perf stats?
         AddStreamSession(
-            &sfBase, flow->session_state & STREAM_STATE_MIDSTREAM ? SSNFLAG_MIDSTREAM : 0);
+            &sfBase, f->session_state & STREAM_STATE_MIDSTREAM ? SSNFLAG_MIDSTREAM : 0);
 
         StreamUpdatePerfBaseState(&sfBase, tmp->flow, TCP_STATE_SYN_SENT);
 
-        EventInternal(INTERNAL_EVENT_SESSION_ADD);
+        EventInternal(SESSION_EVENT_SETUP);
 #endif
     }
 }
@@ -371,36 +375,35 @@ void UserSession::end(Packet*, Flow*)
     server.splitter = nullptr;
 }
 
-void UserSession::update(Packet* p, Flow* flow)
+void UserSession::update(Packet* p, Flow* f)
 {
     if ( p->ptrs.sp and p->ptrs.dp )
         p->packet_flags |= PKT_STREAM_EST;
     else
         p->packet_flags |= PKT_STREAM_UNEST_UNI;
 
-    if ( !(flow->ssn_state.session_flags & SSNFLAG_ESTABLISHED) )
+    if ( !(f->ssn_state.session_flags & SSNFLAG_ESTABLISHED) )
     {
-        if ( p->packet_flags & PKT_FROM_CLIENT )
-            flow->ssn_state.session_flags |= SSNFLAG_SEEN_CLIENT;
+        if ( p->is_from_client() )
+            f->ssn_state.session_flags |= SSNFLAG_SEEN_CLIENT;
         else
-            flow->ssn_state.session_flags |= SSNFLAG_SEEN_SERVER;
+            f->ssn_state.session_flags |= SSNFLAG_SEEN_SERVER;
 
-        if ( (flow->ssn_state.session_flags & SSNFLAG_SEEN_CLIENT) &&
-             (flow->ssn_state.session_flags & SSNFLAG_SEEN_SERVER) )
+        if ( (f->ssn_state.session_flags & SSNFLAG_SEEN_CLIENT) &&
+            (f->ssn_state.session_flags & SSNFLAG_SEEN_SERVER) )
         {
-            flow->ssn_state.session_flags |= SSNFLAG_ESTABLISHED;
+            f->ssn_state.session_flags |= SSNFLAG_ESTABLISHED;
 
-            flow->set_ttl(p, false);
+            f->set_ttl(p, false);
         }
     }
 
-    StreamUserConfig* pc = get_user_cfg(flow->ssn_server);
-    flow->set_expire(p, pc->session_timeout);
+    f->set_expire(p, f->default_session_timeout);
 }
 
 void UserSession::restart(Packet* p)
 {
-    bool c2s = p->packet_flags & PKT_FROM_CLIENT;
+    bool c2s = p->is_from_client();
     UserTracker& ut = c2s ? server : client;
     std::list<UserSegment*>::iterator it;
     ut.total = 0;
@@ -419,22 +422,22 @@ void UserSession::restart(Packet* p)
 // UserSession methods
 //-------------------------------------------------------------------------
 
-UserSession::UserSession(Flow* flow) : Session(flow) { }
+UserSession::UserSession(Flow* f) : Session(f)
+{ memory::MemoryCap::update_allocations(sizeof(*this)); }
 
-UserSession::~UserSession() { }
+UserSession::~UserSession()
+{ memory::MemoryCap::update_deallocations(sizeof(*this)); }
 
 bool UserSession::setup(Packet*)
 {
     client.init();
     server.init();
 
-#ifdef ENABLE_EXPECTED_USER
-    if ( flow_con->expected_session(flow, p))
-    {
-        MODULE_PROFILE_END(user_perf_stats);
+    StreamUserConfig* pc = get_user_cfg(flow->ssn_server);
+    flow->set_default_session_timeout(pc->session_timeout, false);
+
+    if ( flow->ssn_state.ignore_direction != SSN_DIR_NONE )
         return false;
-    }
-#endif
     return true;
 }
 
@@ -442,7 +445,6 @@ void UserSession::clear()
 {
     client.term();
     server.term();
-    flow->restart();
 }
 
 void UserSession::set_splitter(bool c2s, StreamSplitter* ss)
@@ -460,42 +462,35 @@ void UserSession::set_splitter(bool c2s, StreamSplitter* ss)
 
 StreamSplitter* UserSession::get_splitter(bool c2s)
 {
-    UserTracker& ut = c2s ? server : client;
+    const UserTracker& ut = c2s ? server : client;
     return ut.splitter;
 }
 
 int UserSession::process(Packet* p)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(user_perf_stats);
+    Profile profile(user_perf_stats);
 
-    if ( stream.expired_session(flow, p) )
+    if ( Stream::expired_flow(flow, p) )
     {
         flow->restart();
-        // FIXIT count user session timeouts here
+        // FIXIT-M count user session timeouts here
 
 #ifdef ENABLE_EXPECTED_USER
-        if ( flow_con->expected_session(flow, p))
-        {
-            MODULE_PROFILE_END(user_perf_stats);
+        if ( Stream::expected_flow(flow, p))
             return 0;
-        }
 #endif
     }
 
     flow->set_direction(p);
 
-    if ( stream.blocked_session(flow, p) || stream.ignored_session(flow, p) )
-    {
-        MODULE_PROFILE_END(user_perf_stats);
+    if ( Stream::blocked_flow(p) || Stream::ignored_flow(flow, p) )
         return 0;
-    }
 
     update(p, flow);
 
-    UserTracker& ut = p->from_client() ? server : client;
+    UserTracker& ut = p->is_from_client() ? server : client;
 
-    if ( p->ptrs.decode_flags & DECODE_SOF or !ut.splitter )
+    if ( !ut.splitter or p->ptrs.decode_flags & DECODE_SOF )
         start(p, flow);
 
     if ( p->data && p->dsize )
@@ -504,17 +499,14 @@ int UserSession::process(Packet* p)
     if ( p->ptrs.decode_flags & DECODE_EOF )
         end(p, flow);
 
-    MODULE_PROFILE_END(user_perf_stats);
     return 0;
 }
 
 //-------------------------------------------------------------------------
 // UserSession methods
-// FIXIT-L these are TBD after tcp is updated
+// FIXIT-M these are TBD after tcp is updated
 // some will be deleted, some refactored, some implemented
 //-------------------------------------------------------------------------
-
-void UserSession::update_direction(char /*dir*/, const sfip_t*, uint16_t /*port*/) { }
 
 bool UserSession::add_alert(Packet*, uint32_t /*gid*/, uint32_t /*sid*/) { return true; }
 bool UserSession::check_alerted(Packet*, uint32_t /*gid*/, uint32_t /*sid*/) { return false; }
@@ -523,14 +515,6 @@ int UserSession::update_alert(
     Packet*, uint32_t /*gid*/, uint32_t /*sid*/,
     uint32_t /*event_id*/, uint32_t /*event_second*/)
 { return 0; }
-
-void UserSession::flush_client(Packet*) { }
-void UserSession::flush_server(Packet*) { }
-void UserSession::flush_talker(Packet*) { }
-void UserSession::flush_listener(Packet*) { }
-
-void UserSession::set_extra_data(Packet*, uint32_t /*flag*/) { }
-void UserSession::clear_extra_data(Packet*, uint32_t /*flag*/) { }
 
 uint8_t UserSession::get_reassembly_direction()
 { return SSN_DIR_NONE; }

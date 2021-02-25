@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2005 Martin Roesch <roesch@sourcefire.com>
 //
@@ -21,62 +21,56 @@
 #ifndef SNORT_H
 #define SNORT_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+// Snort is the top-level application class.
+#include <daq_common.h>
 
-#include <assert.h>
-#include <sys/types.h>
-#include <stdio.h>
+#include "main/snort_types.h"
 
-extern "C" {
-#include <daq.h>
-}
+class ContextSwitcher;
 
+namespace snort
+{
 class Flow;
+class SFDAQInstance;
 struct Packet;
 struct SnortConfig;
-
-typedef void (* MainHook_f)(Packet*);
 
 class Snort
 {
 public:
-    static SnortConfig* get_reload_config();
+    static SnortConfig* get_reload_config(const char* fname, const char* plugin_path,
+        const SnortConfig* old);
+    static SnortConfig* get_updated_policy(SnortConfig*, const char* fname, const char* iname);
+    static SnortConfig* get_updated_module(SnortConfig*, const char* name);
     static void setup(int argc, char* argv[]);
+    static bool drop_privileges();
+    static void do_pidfile();
     static void cleanup();
 
     static bool is_starting();
-    static bool is_reloading();
-
-    static void thread_init(const char* intf);
-    static void thread_term();
-
-    static void thread_idle();
-    static void thread_rotate();
-
-    static void capture_packet();
-    static void decode_rebuilt_packet(Packet*, const DAQ_PktHdr_t*, const uint8_t* pkt, Flow*);
-    static void detect_rebuilt_packet(Packet*);
-
-    static DAQ_Verdict process_packet(
-        Packet*, const DAQ_PktHdr_t*, const uint8_t* pkt, bool is_frag=false);
-
-    static DAQ_Verdict fail_open(void*, const DAQ_PktHdr_t*, const uint8_t*);
-    static DAQ_Verdict packet_callback(void*, const DAQ_PktHdr_t*, const uint8_t*);
-
-    static void set_main_hook(MainHook_f);
+    static bool has_dropped_privileges();
+    SO_PUBLIC static bool is_reloading();
 
 private:
     static void init(int, char**);
-    static void unprivileged_init();
     static void term();
     static void clean_exit(int);
+    static void reload_failure_cleanup(SnortConfig*);
 
 private:
     static bool initializing;
     static bool reloading;
+    static bool privileges_dropped;
 };
+
+// RAII-style mechanism for removal and reinstallation of Snort's crash handler
+class SO_PUBLIC OopsHandlerSuspend
+{
+public:
+    OopsHandlerSuspend();
+    ~OopsHandlerSuspend();
+};
+}
 
 #endif
 

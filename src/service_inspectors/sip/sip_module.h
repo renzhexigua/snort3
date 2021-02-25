@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,14 +21,14 @@
 #ifndef SIP_MODULE_H
 #define SIP_MODULE_H
 
+// Interface to the SIP service inspector
+
 #include "framework/module.h"
-#include "framework/bits.h"
-#include "main/thread.h"
 #include "sip_config.h"
 
 #define GID_SIP 140
 
-#define SIP_EVENT_MAX_SESSIONS        1
+//#define SIP_EVENT_MAX_SESSIONS      1   // deprecated
 #define SIP_EVENT_EMPTY_REQUEST_URI   2
 #define SIP_EVENT_BAD_URI             3
 #define SIP_EVENT_EMPTY_CALL_ID       4
@@ -59,28 +59,36 @@
 #define SIP_NAME "sip"
 #define SIP_HELP "sip inspection"
 
+namespace snort
+{
 struct SnortConfig;
+}
 
-extern THREAD_LOCAL SimpleStats sipstats;
-extern THREAD_LOCAL ProfileStats sipPerfStats;
+extern THREAD_LOCAL snort::ProfileStats sipPerfStats;
 
-class SipModule : public Module
+class SipModule : public snort::Module
 {
 public:
     SipModule();
-    ~SipModule();
+    ~SipModule() override;
 
-    bool set(const char*, Value&, SnortConfig*) override;
-    bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
+    bool begin(const char*, int, snort::SnortConfig*) override;
+    bool end(const char*, int, snort::SnortConfig*) override;
 
     unsigned get_gid() const override
     { return GID_SIP; }
 
-    const RuleMap* get_rules() const override;
+    const snort::RuleMap* get_rules() const override;
     const PegInfo* get_pegs() const override;
     PegCount* get_counts() const override;
-    ProfileStats* get_profile() const override;
+    snort::ProfileStats* get_profile() const override;
+
+    Usage get_usage() const override
+    { return INSPECT; }
+
+    bool is_bindable() const override
+    { return true; }
 
     SIP_PROTO_CONF* get_data();
 

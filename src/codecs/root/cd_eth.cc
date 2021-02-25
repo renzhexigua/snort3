@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,13 +22,16 @@
 #include "config.h"
 #endif
 
-#include <pcap.h>
+#include <daq_dlt.h>
+
 #include "codecs/codec_module.h"
 #include "framework/codec.h"
-#include "protocols/packet.h"
+#include "log/text_log.h"
+#include "main/snort_config.h"
 #include "protocols/eth.h"
 #include "protocols/packet_manager.h"
-#include "log/text_log.h"
+
+using namespace snort;
 
 #define CD_ETH_NAME "eth"
 #define CD_ETH_HELP_STR "support for ethernet protocol"
@@ -38,16 +41,16 @@ namespace
 {
 static const RuleMap eth_rules[] =
 {
-    { DECODE_ETH_HDR_TRUNC, "truncated eth header" },
+    { DECODE_ETH_HDR_TRUNC, "truncated ethernet header" },
     { 0, nullptr }
 };
 
-class EthModule : public CodecModule
+class EthModule : public BaseCodecModule
 {
 public:
-    EthModule() : CodecModule(CD_ETH_NAME, CD_ETH_HELP) { }
+    EthModule() : BaseCodecModule(CD_ETH_NAME, CD_ETH_HELP) { }
 
-    const RuleMap* get_rules() const
+    const RuleMap* get_rules() const override
     { return eth_rules; }
 };
 
@@ -55,55 +58,32 @@ class EthCodec : public Codec
 {
 public:
     EthCodec() : Codec(CD_ETH_NAME) { }
-    ~EthCodec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>&) override;
+    void get_protocol_ids(std::vector<ProtocolId>&) override;
     void get_data_link_type(std::vector<int>&) override;
     void log(TextLog* const, const uint8_t* pkt, const uint16_t len) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
     bool encode(const uint8_t* const raw_in, const uint16_t raw_len,
-        EncState&, Buffer&) override;
+        EncState&, Buffer&, Flow*) override;
     void format(bool reverse, uint8_t* raw_pkt, DecodeData& snort) override;
     void update(const ip::IpApi&, const EncodeFlags, uint8_t* raw_pkt,
         uint16_t lyr_len, uint32_t& updated_len) override;
 };
 } // namespace
 
-#ifndef DLT_PPP_ETHER
-// For PPP over Eth, the first layer is ethernet.
-constexpr int DLT_PPP_ETHER = 51;
-#endif
-
 void EthCodec::get_data_link_type(std::vector<int>& v)
 {
-    v.push_back(DLT_PPP_ETHER);
-    v.push_back(DLT_EN10MB);
+    v.emplace_back(DLT_PPP_ETHER);
+    v.emplace_back(DLT_EN10MB);
 }
 
-void EthCodec::get_protocol_ids(std::vector<uint16_t>& v)
+void EthCodec::get_protocol_ids(std::vector<ProtocolId>& v)
 {
-    v.push_back(PROTO_ETHERNET_802_3);
+    v.emplace_back(ProtocolId::ETHERNET_802_3);
 }
 
-//--------------------------------------------------------------------
-// decode.c::Ethernet
-//--------------------------------------------------------------------
-
-/*
- * Function: DecodeEthPkt(Packet *, char *, DAQ_PktHdr_t*, uint8_t*)
- *
- * Purpose: Decode those fun loving ethernet packets, one at a time!
- *
- * Arguments: p => pointer to the decoded packet struct
- *            user => Utility pointer (unused)
- *            pkthdr => ptr to the packet header
- *            pkt => pointer to the real live packet data
- *
- * Returns: void function
- */
 bool EthCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
 {
-    /* do a little validation */
     if (raw.len < eth::ETH_HEADER_LEN)
     {
         codec_event(codec, DECODE_ETH_HDR_TRUNC);
@@ -113,13 +93,14 @@ bool EthCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
     /* lay the ethernet structure over the packet data */
     const eth::EtherHdr* eh = reinterpret_cast<const eth::EtherHdr*>(raw.data);
 
-    uint16_t next_prot = eh->ethertype();
-    if ( next_prot <= eth::MIN_ETHERTYPE )
+    ProtocolId next_prot = eh->ethertype();
+    if ( to_utype(next_prot) <= to_utype(ProtocolId::ETHERTYPE_MINIMUM) )
     {
-        codec.next_prot_id = PROTO_ETHERNET_LLC;
+        codec.next_prot_id = ProtocolId::ETHERNET_LLC;
         codec.lyr_len = eth::ETH_HEADER_LEN;
+        codec.proto_bits |= PROTO_BIT__ETH;
     }
-    else if ( next_prot == ETHERTYPE_FPATH )
+    else if ( next_prot == ProtocolId::ETHERTYPE_FPATH )
     {
         /*  If this is FabricPath, the first 16 bytes are FabricPath data
          *  rather than Ethernet data.  So, set the length to zero and
@@ -154,12 +135,12 @@ void EthCodec::log(TextLog* const text_log, const uint8_t* raw_pkt,
         eh->ether_dst[1], eh->ether_dst[2], eh->ether_dst[3],
         eh->ether_dst[4], eh->ether_dst[5]);
 
-    const uint16_t prot = ntohs(eh->ether_type);
+    const ProtocolId prot_id = eh->ethertype();
 
-    if (prot <= eth::MIN_ETHERTYPE)
-        TextLog_Print(text_log, "  len:0x%04X", prot);
+    if (to_utype(prot_id) <= to_utype(ProtocolId::ETHERTYPE_MINIMUM))
+        TextLog_Print(text_log, "  len:0x%04X", prot_id);
     else
-        TextLog_Print(text_log, "  type:0x%04X", prot);
+        TextLog_Print(text_log, "  type:0x%04X", prot_id);
 }
 
 //-------------------------------------------------------------------------
@@ -167,27 +148,16 @@ void EthCodec::log(TextLog* const text_log, const uint8_t* raw_pkt,
 //-------------------------------------------------------------------------
 
 bool EthCodec::encode(const uint8_t* const raw_in, const uint16_t /*raw_len*/,
-    EncState& enc, Buffer& buf)
+    EncState& enc, Buffer& buf, Flow*)
 {
     const eth::EtherHdr* hi = reinterpret_cast<const eth::EtherHdr*>(raw_in);
 
-    if (hi->ethertype() == ETHERTYPE_FPATH)
+    if (hi->ethertype() == ProtocolId::ETHERTYPE_FPATH)
         return true;
 
     // not raw ip -> encode layer 2
     bool raw = ( enc.flags & ENC_FLAG_RAW );
 
-    // if not raw ip AND out buf is empty
-    if ( !raw && (buf.size() == 0) )
-    {
-        // for alignment
-        if (!buf.allocate(SPARC_TWIDDLE))
-            return false;
-
-        buf.off = SPARC_TWIDDLE;
-    }
-
-    // if not raw ip OR out buf is not empty
     if ( !raw || (buf.size() != 0) )
     {
         // we get here for outer-most layer when not raw ip
@@ -196,32 +166,33 @@ bool EthCodec::encode(const uint8_t* const raw_in, const uint16_t /*raw_len*/,
             return false;
 
         eth::EtherHdr* ho = reinterpret_cast<eth::EtherHdr*>(buf.data());
-        ho->ether_type = enc.ethertype_set() ? ntohs(enc.next_ethertype) : hi->ether_type;
+        ho->ether_type = enc.ethertype_set() ?
+            htons(to_utype(enc.next_ethertype)) : hi->ether_type;
 
-        uint8_t* dst_mac = PacketManager::encode_get_dst_mac();
+        const SnortConfig* sc = SnortConfig::get_conf();
 
         if ( enc.forward() )
         {
             memcpy(ho->ether_src, hi->ether_src, sizeof(ho->ether_src));
-            /*If user configured remote MAC address, use it*/
-            if (nullptr != dst_mac)
-                memcpy(ho->ether_dst, dst_mac, sizeof(ho->ether_dst));
+
+            if ( sc->eth_dst )
+                memcpy(ho->ether_dst, sc->eth_dst, sizeof(ho->ether_dst));
             else
                 memcpy(ho->ether_dst, hi->ether_dst, sizeof(ho->ether_dst));
         }
         else
         {
             memcpy(ho->ether_src, hi->ether_dst, sizeof(ho->ether_src));
-            /*If user configured remote MAC address, use it*/
-            if (nullptr != dst_mac)
-                memcpy(ho->ether_dst, dst_mac, sizeof(ho->ether_dst));
+
+            if ( sc->eth_dst )
+                memcpy(ho->ether_dst, sc->eth_dst, sizeof(ho->ether_dst));
             else
                 memcpy(ho->ether_dst, hi->ether_src, sizeof(ho->ether_dst));
         }
     }
 
-    enc.next_ethertype = 0;
-    enc.next_proto = ENC_PROTO_UNSET;
+    enc.next_ethertype = ProtocolId::ETHERTYPE_NOT_SET;
+    enc.next_proto = IpProtocol::PROTO_NOT_SET;
     return true;
 }
 
@@ -230,7 +201,7 @@ void EthCodec::format(bool reverse, uint8_t* raw_pkt, DecodeData&)
     eth::EtherHdr* ch = reinterpret_cast<eth::EtherHdr*>(raw_pkt);
 
     // If the ethertype is FabricPath, then this is not Ethernet Data.
-    if ( reverse &&  (ch->ethertype() != ETHERTYPE_FPATH) )
+    if ( reverse &&  (ch->ethertype() != ProtocolId::ETHERTYPE_FPATH) )
     {
         uint8_t tmp_addr[6];
 
@@ -245,7 +216,7 @@ void EthCodec::update(const ip::IpApi&, const EncodeFlags, uint8_t* raw_pkt,
 {
     const eth::EtherHdr* const eth = reinterpret_cast<eth::EtherHdr*>(raw_pkt);
 
-    if ( eth->ethertype() != ETHERTYPE_FPATH )
+    if ( eth->ethertype() != ProtocolId::ETHERTYPE_FPATH )
         updated_len += lyr_len;
 }
 
@@ -289,11 +260,11 @@ static const CodecApi eth_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_eth[] =
+#endif
 {
     &eth_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_eth = &eth_api.base;
-#endif
 

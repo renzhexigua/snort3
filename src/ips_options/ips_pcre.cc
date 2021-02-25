@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 // Copyright (C) 2003 Brian Caswell <bmc@snort.org>
 // Copyright (C) 2003 Michael J. Pomraning <mjp@securepipe.com>
@@ -19,32 +19,29 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "ips_pcre.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <sys/types.h>
 #include <pcre.h>
 
-#include "snort_types.h"
-#include "snort_bounds.h"
-#include "treenodes.h"
-#include "snort_debug.h"
-#include "protocols/packet.h"
-#include "parser.h"
-#include "util.h"
-#include "sfhashfcn.h"
-#include "snort_config.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
-#include "detection_util.h"
+#include <cassert>
+
+#include "detection/ips_context.h"
 #include "framework/cursor.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "framework/parameter.h"
+#include "hash/hash_key_operations.h"
+#include "helpers/scratch_allocator.h"
+#include "log/messages.h"
+#include "main/snort_config.h"
+#include "managers/ips_manager.h"
+#include "managers/module_manager.h"
+#include "profiler/profiler.h"
+#include "utils/util.h"
+
+using namespace snort;
 
 #ifndef PCRE_STUDY_JIT_COMPILE
 #define PCRE_STUDY_JIT_COMPILE 0
@@ -66,24 +63,28 @@
 #define SNORT_OVERRIDE_MATCH_LIMIT  0x00080 // Override default limits on match & match recursion
 
 #define s_name "pcre"
+#define mod_regex_name "regex"
 
-/*
- * we need to specify the vector length for our pcre_exec call.  we only care
- * about the first vector, which if the match is successful will include the
- * offset to the end of the full pattern match.  If we decide to store other
- * matches, make *SURE* that this is a multiple of 3 as pcre requires it.
- */
-// the wrong size caused the pcre lib to segfault but that has since been
-// fixed.  it may be that with the updated lib, the need to get the size
-// exactly correct is obviated and thus the need to reload as well.
+struct PcreData
+{
+    pcre* re;           /* compiled regex */
+    pcre_extra* pe;     /* studied regex foo */
+    bool free_pe;
+    int options;        /* sp_pcre specific options (relative & inverse) */
+    char* expression;
+};
 
-/* Since SO rules are loaded 1 time at startup, regardless of
- * configuraton, we won't pcre_capture count again, so save the max.  */
-static int s_ovector_max = 0;
+// we need to specify the vector length for our pcre_exec call.  we only care
+// about the first vector, which if the match is successful will include the
+// offset to the end of the full pattern match.  if we decide to store other
+// matches, make *SURE* that this is a multiple of 3 as pcre requires it.
 
 // this is a temporary value used during parsing and set in snort conf
 // by verify; search uses the value in snort conf
-static int s_ovector_size = 0;
+static int s_ovector_max = -1;
+
+static unsigned scratch_index;
+static ScratchAllocator* scratcher = nullptr;
 
 static THREAD_LOCAL ProfileStats pcrePerfStats;
 
@@ -99,8 +100,8 @@ static void pcre_capture(
     pcre_fullinfo((const pcre*)code, (const pcre_extra*)extra,
         PCRE_INFO_CAPTURECOUNT, &tmp_ovector_size);
 
-    if (tmp_ovector_size > s_ovector_size)
-        s_ovector_size = tmp_ovector_size;
+    if (tmp_ovector_size > s_ovector_max)
+        s_ovector_max = tmp_ovector_size;
 }
 
 static void pcre_check_anchored(PcreData* pcre_data)
@@ -108,7 +109,7 @@ static void pcre_check_anchored(PcreData* pcre_data)
     int rc;
     unsigned long int options = 0;
 
-    if ((pcre_data == NULL) || (pcre_data->re == NULL) || (pcre_data->pe == NULL))
+    if ((pcre_data == nullptr) || (pcre_data->re == nullptr) || (pcre_data->pe == nullptr))
         return;
 
     rc = pcre_fullinfo(pcre_data->re, pcre_data->pe, PCRE_INFO_OPTIONS, (void*)&options);
@@ -145,7 +146,7 @@ static void pcre_check_anchored(PcreData* pcre_data)
 
     if ((options & PCRE_ANCHORED) && !(options & PCRE_MULTILINE))
     {
-        /* This means that this pcre rule option shouldn't be reevaluted
+        /* This means that this pcre rule option shouldn't be EvalStatus
          * even if any of it's relative children should fail to match.
          * It is anchored to the cursor set by the previous cursor setting
          * rule option */
@@ -153,7 +154,7 @@ static void pcre_check_anchored(PcreData* pcre_data)
     }
 }
 
-static void pcre_parse(const char* data, PcreData* pcre_data)
+static void pcre_parse(const SnortConfig* sc, const char* data, PcreData* pcre_data)
 {
     const char* error;
     char* re, * free_me;
@@ -162,13 +163,13 @@ static void pcre_parse(const char* data, PcreData* pcre_data)
     int erroffset;
     int compile_flags = 0;
 
-    if (data == NULL)
+    if (data == nullptr)
     {
         ParseError("pcre requires a regular expression");
         return;
     }
 
-    free_me = SnortStrdup(data);
+    free_me = snort_strdup(data);
     re = free_me;
 
     /* get rid of starting and ending whitespace */
@@ -211,11 +212,11 @@ static void pcre_parse(const char* data, PcreData* pcre_data)
     else if (*re != delimit)
         goto syntax;
 
-    pcre_data->expression = SnortStrdup(re);
+    pcre_data->expression = snort_strdup(re);
 
     /* find ending delimiter, trim delimit chars */
     opts = strrchr(re, delimit);
-    if (opts == NULL)
+    if (opts == nullptr)
         goto syntax;
 
     if (!((opts - re) > 1)) /* empty regex(m||) or missing delim not OK */
@@ -245,7 +246,10 @@ static void pcre_parse(const char* data, PcreData* pcre_data)
          * these are snort specific don't work with pcre or perl
          */
         case 'R':  pcre_data->options |= SNORT_PCRE_RELATIVE; break;
-        case 'O':  pcre_data->options |= SNORT_OVERRIDE_MATCH_LIMIT; break;
+        case 'O':
+            if ( sc->pcre_override )
+                pcre_data->options |= SNORT_OVERRIDE_MATCH_LIMIT;
+            break;
 
         default:
             ParseError("unknown/extra pcre option encountered");
@@ -255,10 +259,9 @@ static void pcre_parse(const char* data, PcreData* pcre_data)
     }
 
     /* now compile the re */
-    DEBUG_WRAP(DebugMessage(DEBUG_PATTERN_MATCH, "pcre: compiling %s\n", re); );
-    pcre_data->re = pcre_compile(re, compile_flags, &error, &erroffset, NULL);
+    pcre_data->re = pcre_compile(re, compile_flags, &error, &erroffset, nullptr);
 
-    if (pcre_data->re == NULL)
+    if (pcre_data->re == nullptr)
     {
         ParseError(": pcre compile of '%s' failed at offset "
             "%d : %s", re, erroffset, error);
@@ -270,63 +273,50 @@ static void pcre_parse(const char* data, PcreData* pcre_data)
 
     if (pcre_data->pe)
     {
-        if ((SnortConfig::get_pcre_match_limit() != -1) &&
+        if ((sc->get_pcre_match_limit() != 0) &&
             !(pcre_data->options & SNORT_OVERRIDE_MATCH_LIMIT))
         {
-            if (pcre_data->pe->flags & PCRE_EXTRA_MATCH_LIMIT)
-            {
-                pcre_data->pe->match_limit = SnortConfig::get_pcre_match_limit();
-            }
-            else
-            {
+            if ( !(pcre_data->pe->flags & PCRE_EXTRA_MATCH_LIMIT) )
                 pcre_data->pe->flags |= PCRE_EXTRA_MATCH_LIMIT;
-                pcre_data->pe->match_limit = SnortConfig::get_pcre_match_limit();
-            }
+
+            pcre_data->pe->match_limit = sc->get_pcre_match_limit();
         }
 
-#ifdef PCRE_EXTRA_MATCH_LIMIT_RECURSION
-        if ((SnortConfig::get_pcre_match_limit_recursion() != -1) &&
+        if ((sc->get_pcre_match_limit_recursion() != 0) &&
             !(pcre_data->options & SNORT_OVERRIDE_MATCH_LIMIT))
         {
-            if (pcre_data->pe->flags & PCRE_EXTRA_MATCH_LIMIT_RECURSION)
-            {
-                pcre_data->pe->match_limit_recursion =
-                    SnortConfig::get_pcre_match_limit_recursion();
-            }
-            else
-            {
+            if ( !(pcre_data->pe->flags & PCRE_EXTRA_MATCH_LIMIT_RECURSION) )
                 pcre_data->pe->flags |= PCRE_EXTRA_MATCH_LIMIT_RECURSION;
-                pcre_data->pe->match_limit_recursion =
-                    SnortConfig::get_pcre_match_limit_recursion();
-            }
+
+            pcre_data->pe->match_limit_recursion =
+                sc->get_pcre_match_limit_recursion();
         }
-#endif
     }
     else
     {
         if (!(pcre_data->options & SNORT_OVERRIDE_MATCH_LIMIT) &&
-            ((SnortConfig::get_pcre_match_limit() != -1) ||
-             (SnortConfig::get_pcre_match_limit_recursion() != -1)))
+            ((sc->get_pcre_match_limit() != 0) ||
+             (sc->get_pcre_match_limit_recursion() != 0)))
         {
-            pcre_data->pe = (pcre_extra*)SnortAlloc(sizeof(pcre_extra));
-            if (SnortConfig::get_pcre_match_limit() != -1)
+            pcre_data->pe = (pcre_extra*)snort_calloc(sizeof(pcre_extra));
+            pcre_data->free_pe = true;
+
+            if (sc->get_pcre_match_limit() != 0)
             {
                 pcre_data->pe->flags |= PCRE_EXTRA_MATCH_LIMIT;
-                pcre_data->pe->match_limit = SnortConfig::get_pcre_match_limit();
+                pcre_data->pe->match_limit = sc->get_pcre_match_limit();
             }
 
-#ifdef PCRE_EXTRA_MATCH_LIMIT_RECURSION
-            if (SnortConfig::get_pcre_match_limit_recursion() != -1)
+            if (sc->get_pcre_match_limit_recursion() != 0)
             {
                 pcre_data->pe->flags |= PCRE_EXTRA_MATCH_LIMIT_RECURSION;
                 pcre_data->pe->match_limit_recursion =
-                    SnortConfig::get_pcre_match_limit_recursion();
+                    sc->get_pcre_match_limit_recursion();
             }
-#endif
         }
     }
 
-    if (error != NULL)
+    if (error != nullptr)
     {
         ParseError("pcre study failed : %s", error);
         return;
@@ -335,65 +325,47 @@ static void pcre_parse(const char* data, PcreData* pcre_data)
     pcre_capture(pcre_data->re, pcre_data->pe);
     pcre_check_anchored(pcre_data);
 
-    free(free_me);
+    snort_free(free_me);
     return;
 
 syntax:
-    free(free_me);
+    snort_free(free_me);
 
     // ensure integrity from parse error to fatal error
     if ( !pcre_data->expression )
-        pcre_data->expression = SnortStrdup("");
+        pcre_data->expression = snort_strdup("");
 
-    ParseError("unable to parse pcre regex %s", data);
+    ParseError("unable to parse pcre %s", data);
 }
 
-/**
+/*
  * Perform a search of the PCRE data.
- *
- * @param pcre_data structure that options and patterns are passed in
- * @param buf buffer to search
- * @param len size of buffer
- * @param found_offset pointer to an integer so that we know where the search ended
- *
- * *found_offset will be set to -1 when the find is unsucessful OR the routine is inverted
- *
- * @return 1 when we find the string, 0 when we don't (unless we've been passed a flag to invert)
+ * found_offset will be set to -1 when the find is unsuccessful OR the routine is inverted
  */
 static bool pcre_search(
+    Packet* p,
     const PcreData* pcre_data,
     const uint8_t* buf,
-    int len,
-    int start_offset,
-    int* found_offset)
+    unsigned len,
+    unsigned start_offset,
+    int& found_offset)
 {
     bool matched;
-    int result;
 
-    if (pcre_data == NULL
-        || buf == NULL
-        || len <= 0
-        || found_offset == NULL)
-    {
-        DEBUG_WRAP(DebugMessage(DEBUG_PATTERN_MATCH,
-            "Returning 0 because we didn't have the required parameters!\n"); );
-        return false;
-    }
+    found_offset = -1;
 
-    *found_offset = -1;
+    std::vector<void *> ss = p->context->conf->state[get_instance_id()];
+    assert(ss[scratch_index]);
 
-    SnortState* ss = snort_conf->state + get_instance_id();
-    assert(ss->pcre_ovector);
-
-    result = pcre_exec(
+    int result = pcre_exec(
         pcre_data->re,  /* result of pcre_compile() */
         pcre_data->pe,  /* result of pcre_study()   */
         (const char*)buf, /* the subject string */
         len,            /* the length of the subject string */
         start_offset,   /* start at offset 0 in the subject */
         0,              /* options(handled at compile time */
-        ss->pcre_ovector,      /* vector for substring information */
-        snort_conf->pcre_ovector_size); /* number of elements in the vector */
+        (int*)ss[scratch_index], /* vector for substring information */
+        p->context->conf->pcre_ovector_size); /* number of elements in the vector */
 
     if (result >= 0)
     {
@@ -418,15 +390,25 @@ static bool pcre_search(
          * and a single int for scratch space.
          */
 
-        *found_offset = ss->pcre_ovector[1];
+        found_offset = ((int*)ss[scratch_index])[1];
     }
     else if (result == PCRE_ERROR_NOMATCH)
     {
         matched = false;
     }
+    else if (result == PCRE_ERROR_MATCHLIMIT)
+    {
+        pc.pcre_match_limit++;
+        matched = false;
+    }
+    else if (result == PCRE_ERROR_RECURSIONLIMIT)
+    {
+        pc.pcre_recursion_limit++;
+        matched = false;
+    }
     else
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_PATTERN_MATCH, "pcre_exec error : %d \n", result); );
+        pc.pcre_error++;
         return false;
     }
 
@@ -447,18 +429,22 @@ class PcreOption : public IpsOption
 {
 public:
     PcreOption(PcreData* c) :
-        IpsOption(s_name, RULE_OPTION_TYPE_PCRE)
+        IpsOption(s_name, RULE_OPTION_TYPE_CONTENT)
     { config = c; }
 
-    ~PcreOption();
+    ~PcreOption() override;
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
+    CursorActionType get_cursor_type() const override
+    { return CAT_ADJUST; }
+
     bool is_relative() override
     { return (config->options & SNORT_PCRE_RELATIVE) != 0; }
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
+    bool retry(Cursor&, const Cursor&) override;
 
     PcreData* get_data()
     { return config; }
@@ -475,37 +461,40 @@ PcreOption::~PcreOption()
     if ( !config )
         return;
 
-    if (config->expression)
-        free(config->expression);
+    if ( config->expression )
+        snort_free(config->expression);
 
-    if (config->pe)
-        pcre_release(config->pe);
+    if ( config->pe )
+    {
+        if ( config->free_pe )
+            snort_free(config->pe);
+        else
+            pcre_release(config->pe);
+    }
 
-    if (config->re)
-        free(config->re);
+    if ( config->re )
+        free(config->re);  // external allocation
 
-    free(config);
+    snort_free(config);
 }
 
 uint32_t PcreOption::hash() const
 {
-    int i,j,k,l,expression_len;
-    uint32_t a,b,c,tmp;
-    const PcreData* data = config;
-
-    expression_len = strlen(data->expression);
-    a = b = c = 0;
+    uint32_t a = 0, b = 0, c = 0;
+    int expression_len = strlen(config->expression);
+    int i, j;
 
     for (i=0,j=0; i<expression_len; i+=4)
     {
-        tmp = 0;
-        k = expression_len - i;
+        uint32_t tmp = 0;
+        int k = expression_len - i;
+
         if (k > 4)
             k=4;
 
-        for (l=0; l<k; l++)
+        for (int l=0; l<k; l++)
         {
-            tmp |= *(data->expression + i + l) << l*8;
+            tmp |= *(config->expression + i + l) << l*8;
         }
 
         switch (j)
@@ -534,20 +523,21 @@ uint32_t PcreOption::hash() const
         mix(a,b,c);
     }
 
-    a += data->options;
+    a += config->options;
+    b += IpsOption::hash();
 
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool PcreOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    PcreOption& rhs = (PcreOption&)ips;
+    const PcreOption& rhs = (const PcreOption&)ips;
     PcreData* left = config;
     PcreData* right = rhs.config;
 
@@ -560,55 +550,36 @@ bool PcreOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int PcreOption::eval(Cursor& c, Packet*)
+IpsOption::EvalStatus PcreOption::eval(Cursor& c, Packet* p)
 {
-    PcreData* pcre_data = config;
-    int found_offset = -1;  /* where is the ending location of the pattern */
-    bool matched = false;
+    RuleProfile profile(pcrePerfStats);
 
-    PROFILE_VARS;
-    MODULE_PROFILE_START(pcrePerfStats);
-
-    //short circuit this for testing pcre performance impact
-    if (SnortConfig::no_pcre())
-    {
-        MODULE_PROFILE_END(pcrePerfStats);
-        return DETECTION_OPTION_NO_MATCH;
-    }
+    // short circuit this for testing pcre performance impact
+    if ( p->context->conf->no_pcre() )
+        return NO_MATCH;
 
     unsigned pos = c.get_delta();
-
-    if ( !pos && is_relative() )
-        pos = c.get_pos();
+    unsigned adj = 0;
 
     if ( pos > c.size() )
-        return 0;
+        return NO_MATCH;
 
-    matched = pcre_search(pcre_data, c.buffer(), c.size(), pos, &found_offset);
+    if ( !pos && is_relative() )
+        adj = c.get_pos();
 
-    if (matched)
+    int found_offset = -1; // where is the ending location of the pattern
+
+    if ( pcre_search(p, config, c.buffer()+adj, c.size()-adj, pos, found_offset) )
     {
         if ( found_offset > 0 )
         {
             c.set_pos(found_offset);
             c.set_delta(found_offset);
         }
-        MODULE_PROFILE_END(pcrePerfStats);
-        return DETECTION_OPTION_MATCH;
+        return MATCH;
     }
 
-    MODULE_PROFILE_END(pcrePerfStats);
-    return DETECTION_OPTION_NO_MATCH;
-}
-
-//-------------------------------------------------------------------------
-// public methods
-//-------------------------------------------------------------------------
-
-PcreData* pcre_get_data(void* pv)
-{
-    PcreOption* opt = (PcreOption*)pv;
-    return opt->get_data();
+    return NO_MATCH;
 }
 
 // we always advance by found_offset so no adjustments to cursor are done
@@ -622,36 +593,13 @@ PcreData* pcre_get_data(void* pv)
 // using content, but more advanced pcre won't work for the relative /
 // overlap case.
 
-bool pcre_next(PcreData* pcre)
+bool PcreOption::retry(Cursor&, const Cursor&)
 {
-    if ((pcre->options & (SNORT_PCRE_INVERT | SNORT_PCRE_ANCHORED)))
+    if ((config->options & (SNORT_PCRE_INVERT | SNORT_PCRE_ANCHORED)))
     {
         return false; // no go
     }
-
     return true;  // continue
-}
-
-void pcre_setup(SnortConfig* sc)
-{
-    for ( unsigned i = 0; i < sc->num_slots; ++i )
-    {
-        SnortState* ss = sc->state + i;
-        ss->pcre_ovector = (int*)SnortAlloc(s_ovector_max*sizeof(int));
-    }
-}
-
-void pcre_cleanup(SnortConfig* sc)
-{
-    for ( unsigned i = 0; i < sc->num_slots; ++i )
-    {
-        SnortState* ss = sc->state + i;
-
-        if ( ss->pcre_ovector )
-            free(ss->pcre_ovector);
-
-        ss->pcre_ovector = nullptr;
-    }
 }
 
 //-------------------------------------------------------------------------
@@ -660,34 +608,81 @@ void pcre_cleanup(SnortConfig* sc)
 
 static const Parameter s_params[] =
 {
-    { "~regex", Parameter::PT_STRING, nullptr, nullptr,
+    { "~re", Parameter::PT_STRING, nullptr, nullptr,
       "Snort regular expression" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
 
+struct PcreStats
+{
+    PegCount pcre_rules;
+#ifdef HAVE_HYPERSCAN
+    PegCount pcre_to_hyper;
+#endif
+    PegCount pcre_native;
+    PegCount pcre_negated;
+};
+
+const PegInfo pcre_pegs[] =
+{
+    { CountType::SUM, "pcre_rules", "total rules processed with pcre option" },
+#ifdef HAVE_HYPERSCAN
+    { CountType::SUM, "pcre_to_hyper", "total pcre rules by hyperscan engine" },
+#endif
+    { CountType::SUM, "pcre_native", "total pcre rules compiled by pcre engine" },
+    { CountType::SUM, "pcre_negated", "total pcre rules using negation syntax" },
+    { CountType::END, nullptr, nullptr }
+};
+
+PcreStats pcre_stats;
+
 #define s_help \
-    "rule option for matching payload data with regex"
+    "rule option for matching payload data with pcre"
 
 class PcreModule : public Module
 {
 public:
     PcreModule() : Module(s_name, s_help, s_params)
-    { data = nullptr; }
+    {
+        data = nullptr;
+        scratcher = new SimpleScratchAllocator(scratch_setup, scratch_cleanup);
+        scratch_index = scratcher->get_id();
+    }
 
-    ~PcreModule()
-    { delete data; }
+    ~PcreModule() override
+    {
+        delete data;
+        delete scratcher;
+    }
 
+#ifdef HAVE_HYPERSCAN
     bool begin(const char*, int, SnortConfig*) override;
+#endif
     bool set(const char*, Value&, SnortConfig*) override;
+    bool end(const char*, int, SnortConfig*) override;
 
     ProfileStats* get_profile() const override
     { return &pcrePerfStats; }
 
+    const PegInfo* get_pegs() const override;
+    PegCount* get_counts() const override;
+
     PcreData* get_data();
+
+    Usage get_usage() const override
+    { return DETECT; }
+
+    Module* get_mod_regex() const
+    { return mod_regex; }
 
 private:
     PcreData* data;
+    Module* mod_regex = nullptr;
+    std::string re;
+
+    static bool scratch_setup(SnortConfig*);
+    static void scratch_cleanup(SnortConfig*);
 };
 
 PcreData* PcreModule::get_data()
@@ -697,21 +692,86 @@ PcreData* PcreModule::get_data()
     return tmp;
 }
 
-bool PcreModule::begin(const char*, int, SnortConfig*)
+const PegInfo* PcreModule::get_pegs() const
+{ return pcre_pegs; }
+
+PegCount* PcreModule::get_counts() const
+{ return (PegCount*)&pcre_stats; }
+
+#ifdef HAVE_HYPERSCAN
+bool PcreModule::begin(const char* name, int v, SnortConfig* sc)
 {
-    data = (PcreData*)SnortAlloc(sizeof(*data));
+    if ( sc->pcre_to_regex )
+    {
+        if ( !mod_regex )
+            mod_regex = ModuleManager::get_module(mod_regex_name);
+
+        if( mod_regex )
+            mod_regex = mod_regex->begin(name, v, sc) ? mod_regex : nullptr;
+    }
     return true;
 }
+#endif
 
-bool PcreModule::set(const char*, Value& v, SnortConfig*)
+bool PcreModule::set(const char* name, Value& v, SnortConfig* sc)
 {
-    if ( v.is("~regex") )
-        pcre_parse(v.get_string(), data);
+    if ( v.is("~re") )
+    {
+        re = v.get_string();
 
+        if( mod_regex )
+            mod_regex = mod_regex->set(name, v, sc) ? mod_regex : nullptr;
+    }
     else
         return false;
 
     return true;
+}
+
+bool PcreModule::end(const char* name, int v, SnortConfig* sc)
+{
+    if( mod_regex )
+        mod_regex = mod_regex->end(name, v, sc) ? mod_regex : nullptr;
+
+    if ( !mod_regex )
+    {
+        data = (PcreData*)snort_calloc(sizeof(*data));
+        pcre_parse(sc, re.c_str(), data);
+    }
+
+    return true;
+}
+
+bool PcreModule::scratch_setup(SnortConfig* sc)
+{
+    if ( s_ovector_max < 0 )
+        return false;
+
+    // The pcre_fullinfo() function can be used to find out how many
+    // capturing subpatterns there are in a compiled pattern. The
+    // smallest size for ovector that will allow for n captured
+    // substrings, in addition to the offsets of the substring matched
+    // by the whole pattern is 3(n+1).
+
+    sc->pcre_ovector_size = 3 * (s_ovector_max + 1);
+    s_ovector_max = -1;
+
+    for ( unsigned i = 0; i < sc->num_slots; ++i )
+    {
+        std::vector<void *>& ss = sc->state[i];
+        ss[scratch_index] = snort_calloc(sc->pcre_ovector_size, sizeof(int));
+    }
+    return true;
+}
+
+void PcreModule::scratch_cleanup(SnortConfig* sc)
+{
+    for ( unsigned i = 0; i < sc->num_slots; ++i )
+    {
+        std::vector<void *>& ss = sc->state[i];
+        snort_free(ss[scratch_index]);
+        ss[scratch_index] = nullptr;
+    }
 }
 
 //-------------------------------------------------------------------------
@@ -719,43 +779,37 @@ bool PcreModule::set(const char*, Value& v, SnortConfig*)
 //-------------------------------------------------------------------------
 
 static Module* mod_ctor()
-{
-    return new PcreModule;
-}
+{ return new PcreModule; }
 
 static void mod_dtor(Module* m)
-{
-    delete m;
-}
+{ delete m; }
 
-static IpsOption* pcre_ctor(Module* p, OptTreeNode*)
+static IpsOption* pcre_ctor(Module* p, OptTreeNode* otn)
 {
+    pcre_stats.pcre_rules++;
     PcreModule* m = (PcreModule*)p;
-    PcreData* d = m->get_data();
-    return new PcreOption(d);
+
+#ifdef HAVE_HYPERSCAN
+    Module* mod_regex = m->get_mod_regex();
+    if ( mod_regex )
+    {
+        pcre_stats.pcre_to_hyper++;
+        const IpsApi* opt_api = IpsManager::get_option_api(mod_regex_name);
+        return opt_api->ctor(mod_regex, otn);
+    }
+    else
+#else
+    UNUSED(otn);
+#endif
+    {
+        pcre_stats.pcre_native++;
+        PcreData* d = m->get_data();
+        return new PcreOption(d);
+    }
 }
 
 static void pcre_dtor(IpsOption* p)
-{
-    delete p;
-}
-
-static void pcre_verify(SnortConfig* sc)
-{
-    /* The pcre_fullinfo() function can be used to find out how many
-     * capturing subpatterns there are in a compiled pattern. The
-     * smallest size for ovector that will allow for n captured
-     * substrings, in addition to the offsets of the substring matched
-     * by the whole pattern, is (n+1)*3.  */
-    s_ovector_size += 1;
-    s_ovector_size *= 3;
-
-    if (s_ovector_size > s_ovector_max)
-        s_ovector_max = s_ovector_size;
-
-    sc->pcre_ovector_size = s_ovector_size;
-    s_ovector_size = 0;
-}
+{ delete p; }
 
 static const IpsApi pcre_api =
 {
@@ -779,8 +833,15 @@ static const IpsApi pcre_api =
     nullptr,
     pcre_ctor,
     pcre_dtor,
-    pcre_verify
+    nullptr
 };
 
-const BaseApi* ips_pcre = &pcre_api.base;
-
+#ifdef BUILDING_SO
+SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_pcre[] =
+#endif
+{
+    &pcre_api.base,
+    nullptr
+};

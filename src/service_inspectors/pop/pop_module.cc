@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -18,44 +18,53 @@
 
 // pop_module.cc author Bhagyashree Bantwal <bbantwal@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "pop_module.h"
-#include <assert.h>
-#include <sstream>
-#include "main/snort_config.h"
 
+#include <cassert>
+
+#include "log/messages.h"
+
+using namespace snort;
 using namespace std;
-
-#define POP_UNKNOWN_CMD_STR                 "Unknown POP3 command"
-#define POP_UNKNOWN_RESP_STR                "Unknown POP3 response"
-#define POP_B64_DECODING_FAILED_STR         "Base64 Decoding failed."
-#define POP_QP_DECODING_FAILED_STR          "Quoted-Printable Decoding failed."
-#define POP_UU_DECODING_FAILED_STR          "Unix-to-Unix Decoding failed."
 
 static const Parameter s_params[] =
 {
-    { "b64_decode_depth", Parameter::PT_INT, "-1:65535", "1460",
-      " base64 decoding depth" },
+    { "b64_decode_depth", Parameter::PT_INT, "-1:65535", "-1",
+      "base64 decoding depth (-1 no limit)" },
 
-    { "bitenc_decode_depth", Parameter::PT_INT, "-1:65535", "1460",
-      " Non-Encoded MIME attachment extraction depth" },
+    { "bitenc_decode_depth", Parameter::PT_INT, "-1:65535", "-1",
+      "Non-Encoded MIME attachment extraction depth (-1 no limit)" },
 
-    { "qp_decode_depth", Parameter::PT_INT, "-1:65535", "1460",
-      " Quoted Printable decoding depth" },
+    { "decompress_pdf", Parameter::PT_BOOL, nullptr, "false",
+      "decompress pdf files in MIME attachments" },
 
-    { "uu_decode_depth", Parameter::PT_INT, "-1:65535", "1460",
-      " Unix-to-Unix decoding depth" },
+    { "decompress_swf", Parameter::PT_BOOL, nullptr, "false",
+      "decompress swf files in MIME attachments" },
+
+    { "decompress_zip", Parameter::PT_BOOL, nullptr, "false",
+      "decompress zip files in MIME attachments" },
+
+    { "qp_decode_depth", Parameter::PT_INT, "-1:65535", "-1",
+      "Quoted Printable decoding depth (-1 no limit)" },
+
+    { "uu_decode_depth", Parameter::PT_INT, "-1:65535", "-1",
+      "Unix-to-Unix decoding depth (-1 no limit)" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
 
 static const RuleMap pop_rules[] =
 {
-    { POP_UNKNOWN_CMD, POP_UNKNOWN_CMD_STR },
-    { POP_UNKNOWN_RESP, POP_UNKNOWN_RESP_STR },
-    { POP_B64_DECODING_FAILED, POP_B64_DECODING_FAILED_STR },
-    { POP_QP_DECODING_FAILED, POP_QP_DECODING_FAILED_STR },
-    { POP_UU_DECODING_FAILED, POP_UU_DECODING_FAILED_STR },
-
+    { POP_UNKNOWN_CMD, "unknown POP3 command" },
+    { POP_UNKNOWN_RESP, "unknown POP3 response" },
+    { POP_B64_DECODING_FAILED, "base64 decoding failed" },
+    { POP_QP_DECODING_FAILED, "quoted-printable decoding failed" },
+    { POP_UU_DECODING_FAILED, "Unix-to-Unix decoding failed" },
+    { POP_FILE_DECOMP_FAILED, "file decompression failed" },
     { 0, nullptr }
 };
 
@@ -78,7 +87,7 @@ const RuleMap* PopModule::get_rules() const
 { return pop_rules; }
 
 const PegInfo* PopModule::get_pegs() const
-{ return simple_pegs; }
+{ return pop_peg_names; }
 
 PegCount* PopModule::get_counts() const
 { return (PegCount*)&popstats; }
@@ -88,31 +97,29 @@ ProfileStats* PopModule::get_profile() const
 
 bool PopModule::set(const char*, Value& v, SnortConfig*)
 {
-    if ( v.is("b64_decode_depth") )
-    {
-        int decode_depth = v.get_long();
+    const int32_t value = v.get_int32();
+    const int32_t mime_value = (value > 0) ? value : -(value+1); // flip 0 and -1 for MIME use
 
-        if ((decode_depth > 0) && (decode_depth & 3))
-        {
-            decode_depth += 4 - (decode_depth & 3);
-            if (decode_depth > 65535 )
-            {
-                decode_depth = decode_depth - 4;
-            }
-            LogMessage("WARNING: POP: 'b64_decode_depth' is not a multiple of 4. "
-                "Rounding up to the next multiple of 4. The new 'b64_decode_depth' is %d.\n",
-                decode_depth);
-        }
-        config->decode_conf.b64_depth = decode_depth;
-    }
+    if ( v.is("b64_decode_depth") )
+        config->decode_conf.set_b64_depth(mime_value);
+
     else if ( v.is("bitenc_decode_depth") )
-        config->decode_conf.bitenc_depth = v.get_long();
+        config->decode_conf.set_bitenc_depth(mime_value);
+
+    else if ( v.is("decompress_pdf") )
+        config->decode_conf.set_decompress_pdf(v.get_bool());
+
+    else if ( v.is("decompress_swf") )
+        config->decode_conf.set_decompress_swf(v.get_bool());
+
+    else if ( v.is("decompress_zip") )
+        config->decode_conf.set_decompress_zip(v.get_bool());
 
     else if ( v.is("qp_decode_depth") )
-        config->decode_conf.qp_depth = v.get_long();
+        config->decode_conf.set_qp_depth(mime_value);
 
     else if ( v.is("uu_decode_depth") )
-        config->decode_conf.uu_depth = v.get_long();
+        config->decode_conf.set_uu_depth(mime_value);
 
     else
         return false;
@@ -129,10 +136,8 @@ POP_PROTO_CONF* PopModule::get_data()
 
 bool PopModule::begin(const char*, int, SnortConfig*)
 {
+    assert(!config);
     config = new POP_PROTO_CONF;
-    file_api->set_mime_decode_config_defauts(&(config->decode_conf));
-    file_api->set_mime_log_config_defauts(&(config->log_config));
-
     return true;
 }
 

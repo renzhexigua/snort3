@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -27,13 +27,20 @@
 class Option
 {
 public:
-    Option(std::string name, int val, int depth);
-    Option(std::string name, bool val, int depth);
-    Option(std::string name, std::string val, int depth);
-    virtual ~Option();
+    Option(std::string val, int depth);
+    Option(const std::string& name, int val, int depth);
+    Option(const std::string& name, bool val, int depth);
+    Option(const std::string& name, std::string val, int depth);
+    virtual ~Option() = default;
 
-    inline std::string get_name()
+    inline const std::string& get_name()
     { return name; }
+
+    inline const std::string& get_value()
+    { return value; }
+
+    void set_print_whitespace(bool w)
+    { print_whitespace = w; }
 
     // overloading operators
     friend std::ostream& operator<<(std::ostream&, const Option&);
@@ -46,6 +53,7 @@ private:
     std::string name;
     std::string value;
     int depth;
+    bool print_whitespace = false;
     OptionType type;
 };
 

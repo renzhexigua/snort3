@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,40 +17,86 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "stats.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <timersub.h>
+#include "stats.h"
 
-#include "snort_config.h"
-#include "util.h"
-#include "helpers/process.h"
-#include "packet_io/sfdaq.h"
-#include "packet_io/active.h"
-#include "packet_io/trough.h"
-#include "target_based/sftarget_reader.h"
-#include "managers/module_manager.h"
-#include "protocols/packet_manager.h"
-#include "managers/codec_manager.h"
-#include "detection/fp_create.h"
-#include "filters/sfthreshold.h"
-#include "time/ppm.h"
-#include "time/profiler.h"
+#include <cassert>
+
+#include "detection/detection_engine.h"
 #include "file_api/file_stats.h"
+#include "filters/sfthreshold.h"
+#include "framework/module.h"
+#include "helpers/process.h"
+#include "log/messages.h"
+#include "main/snort_config.h"
+#include "managers/module_manager.h"
+#include "packet_io/active.h"
+#include "packet_io/sfdaq.h"
+#include "packet_io/trough.h"
+#include "profiler/profiler.h"
+#include "protocols/packet_manager.h"
+#include "time/timersub.h"
+
+#include "util.h"
 
 #define STATS_SEPARATOR \
     "--------------------------------------------------"
 
-static DAQ_Stats_t g_daq_stats;
-static PacketCount gpc;
-static AuxCount gaux;
+ProcessCount proc_stats;
+
+namespace snort
+{
 
 THREAD_LOCAL PacketCount pc;
-THREAD_LOCAL AuxCount aux_counts;
-ProcessCount proc_stats;
+
+//-------------------------------------------------------------------------
+
+static inline void LogSeparator(FILE* fh = stdout)
+{
+    LogMessage(fh, "%s\n", STATS_SEPARATOR);
+}
+
+void LogLabel(const char* s, FILE* fh)
+{
+    if ( *s == ' ' )
+    {
+        LogMessage(fh, "%s\n", s);
+    }
+    else
+    {
+        LogSeparator(fh);
+        LogMessage(fh, "%s\n", s);
+    }
+}
+
+void LogValue(const char* s, const char* v, FILE* fh)
+{
+    LogMessage(fh, "%25.25s: %s\n", s, v);
+}
+
+void LogCount(const char* s, uint64_t c, FILE* fh)
+{
+    if ( c )
+        LogMessage(fh, "%25.25s: " STDu64 "\n", s, c);
+}
+
+void LogStat(const char* s, uint64_t n, uint64_t tot, FILE* fh)
+{
+    if ( n )
+        LogMessage(fh, "%25.25s: " FMTu64("-12") "\t(%7.3f%%)\n", s, n, CalcPct(n, tot));
+}
+
+void LogStat(const char* s, double d, FILE* fh)
+{
+    if ( d )
+        LogMessage(fh, "%25.25s: %g\n", s, d);
+}
+}
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 
@@ -74,56 +120,16 @@ double CalcPct(uint64_t cnt, uint64_t total)
 
 //-------------------------------------------------------------------------
 
-static inline void LogSeparator()
-{
-    LogMessage("%s\n", STATS_SEPARATOR);
-}
-
-void LogLabel(const char* s)
-{
-    if ( *s == ' ' )
-    {
-        LogMessage("%s\n", s);
-    }
-    else
-    {
-        LogSeparator();
-        LogMessage("%s\n", s);
-    }
-}
-
-void LogCount(const char* s, uint64_t c)
-{
-    if ( c )
-        LogMessage("%25.25s: " STDu64 "\n", s, c);
-}
-
-void LogStat(const char* s, uint64_t n, uint64_t tot)
-{
-#ifdef VALGRIND_TESTING
-    LogMessage("%25.25s: " FMTu64("-12") "\n", s, n);
-#else
-    LogMessage("%25.25s: " FMTu64("-12") "\t(%7.3f%%)\n", s, n, CalcPct(n, tot));
-#endif
-}
-
-void LogStat(const char* s, double d)
-{
-    LogMessage("%25.25s: %g\n", s, d);
-}
-
-//-------------------------------------------------------------------------
-
 static struct timeval starttime, endtime;
 
-void TimeStart(void)
+void TimeStart()
 {
-    gettimeofday(&starttime, NULL);
+    gettimeofday(&starttime, nullptr);
 }
 
-void TimeStop(void)
+void TimeStop()
 {
-    gettimeofday(&endtime, NULL);
+    gettimeofday(&endtime, nullptr);
 }
 
 static void timing_stats()
@@ -146,217 +152,113 @@ static void timing_stats()
 
     LogMessage("%25.25s: %02d:%02d:%02d\n", "runtime", hrs, mins, secs);
 
-    LogMessage("%25.25s: %lu.%lu\n", "seconds",
+    LogMessage("%25.25s: %lu.%06lu\n", "seconds",
         (unsigned long)difftime.tv_sec, (unsigned long)difftime.tv_usec);
 
-    LogMessage("%25.25s: " STDu64 "\n", "packets", gpc.total_from_daq);
+    Module* daq = ModuleManager::get_module("daq");
+    assert(daq);
 
-    uint64_t pps = (gpc.total_from_daq / total_secs);
-    LogMessage("%25.25s: " STDu64 "\n", "pkts/sec", pps);
+    uint64_t num_pkts = (uint64_t)daq->get_global_count("analyzed");
+    uint64_t num_byts = (uint64_t)daq->get_global_count("rx_bytes");
+
+    if ( uint64_t pps = (num_pkts / total_secs) )
+        LogMessage("%25.25s: " STDu64 "\n", "pkts/sec", pps);
+
+    if ( uint64_t mbps = 8 * num_byts / total_secs / 1024 / 1024 )
+        LogMessage("%25.25s: " STDu64 "\n", "Mbits/sec", mbps);
 }
 
 //-------------------------------------------------------------------------
-// FIXIT-L 2.0.4 introduces the retry verdict
-// no way to reliably optionally leverage this with dynamic loaded daqs
-
-// FIXIT-L daq stats should be moved to sfdaq
-
-#define MAX_SFDAQ_VERDICT 6
-
-struct DAQStats
-{
-    PegCount pcaps;
-    PegCount received;
-    PegCount analyzed;
-    PegCount dropped;
-    PegCount filtered;
-    PegCount outstanding;
-    PegCount injected;
-    PegCount verdicts[MAX_SFDAQ_VERDICT];
-    PegCount internal_blacklist;
-    PegCount internal_whitelist;
-    PegCount skipped;
-    PegCount fail_open;
-    PegCount idle;
-};
-
-//-------------------------------------------------------------------------
-// FIXIT-L need better encapsulation of these counts by their modules
-
-const PegInfo daq_names[] =
-{
-    { "pcaps", "total files and interfaces processed" },
-    { "received", "total packets received from DAQ" },
-    { "analyzed", "total packets analyzed from DAQ" },
-    { "dropped", "packets dropped" },
-    { "filtered", "packets filtered out" },
-    { "outstanding", "packets unprocessed" },
-    { "injected", "active responses or replacements" },
-    { "allow", "total allow verdicts" },
-    { "block", "total block verdicts" },
-    { "replace", "total replace verdicts" },
-    { "whitelist", "total whitelist verdicts" },
-    { "blacklist", "total blacklist verdicts" },
-    { "ignore", "total ignore verdicts" },
-
-    // FIXIT-L these are not exactly DAQ counts - but they are related
-    { "internal blacklist", "packets blacklisted internally due to lack of DAQ support" },
-    { "internal whitelist", "packets whitelisted internally due to lack of DAQ support" },
-    { "skipped", "packets skipped at startup" },
-    { "fail open", "packets passed during initialization" },
-    { "idle", "attempts to acquire from DAQ without available packets" },
-    { nullptr, nullptr }
-};
 
 const PegInfo pc_names[] =
 {
-    { "analyzed", "packets sent to detection" },
-    { "slow searches", "non-fast pattern rule evaluations" },
-    { "raw searches", "fast pattern searches in raw packet data" },
-    { "cooked searches", "fast pattern searches in cooked packet data" },
-    { "pkt searches", "fast pattern searches in packet data" },
-    { "alt searches", "alt fast pattern searches in packet data" },
-    { "key searches", "fast pattern searches in key buffer" },
-    { "header searches", "fast pattern searches in header buffer" },
-    { "body searches", "fast pattern searches in body buffer" },
-    { "file searches", "fast pattern searches in file buffer" },
-    { "alerts", "alerts not including IP reputation" },
-    { "total alerts", "alerts including IP reputation" },
-    { "logged", "logged packets" },
-    { "passed", "passed packets" },
-    { "match limit", "fast pattern matches not processed" },
-    { "queue limit", "events not queued because queue full" },
-    { "log limit", "events queued but not logged" },
-    { "event limit", "events filtered" },
-    { "alert limit", "events previously triggered on same PDU" },
-    { nullptr, nullptr }
+    { CountType::NOW, "analyzed", "total packets processed" },
+    { CountType::SUM, "hard_evals", "non-fast pattern rule evaluations" },
+    { CountType::SUM, "raw_searches", "fast pattern searches in raw packet data" },
+    { CountType::SUM, "cooked_searches", "fast pattern searches in cooked packet data" },
+    { CountType::SUM, "pkt_searches", "fast pattern searches in packet data" },
+    { CountType::SUM, "alt_searches", "alt fast pattern searches in packet data" },
+    { CountType::SUM, "key_searches", "fast pattern searches in key buffer" },
+    { CountType::SUM, "header_searches", "fast pattern searches in header buffer" },
+    { CountType::SUM, "body_searches", "fast pattern searches in body buffer" },
+    { CountType::SUM, "file_searches", "fast pattern searches in file buffer" },
+    { CountType::SUM, "raw_key_searches", "fast pattern searches in raw key buffer" },
+    { CountType::SUM, "raw_header_searches", "fast pattern searches in raw header buffer" },
+    { CountType::SUM, "method_searches", "fast pattern searches in method buffer" },
+    { CountType::SUM, "stat_code_searches", "fast pattern searches in status code buffer" },
+    { CountType::SUM, "stat_msg_searches", "fast pattern searches in status message buffer" },
+    { CountType::SUM, "cookie_searches", "fast pattern searches in cookie buffer" },
+    { CountType::SUM, "offloads", "fast pattern searches that were offloaded" },
+    { CountType::SUM, "alerts", "alerts not including IP reputation" },
+    { CountType::SUM, "total_alerts", "alerts including IP reputation" },
+    { CountType::SUM, "logged", "logged packets" },
+    { CountType::SUM, "passed", "passed packets" },
+    { CountType::SUM, "match_limit", "fast pattern matches not processed" },
+    { CountType::SUM, "queue_limit", "events not queued because queue full" },
+    { CountType::SUM, "log_limit", "events queued but not logged" },
+    { CountType::SUM, "event_limit", "events filtered" },
+    { CountType::SUM, "alert_limit", "events previously triggered on same PDU" },
+    { CountType::SUM, "context_stalls", "times processing stalled to wait for an available context" },
+    { CountType::SUM, "offload_busy", "times offload was not available" },
+    { CountType::SUM, "onload_waits", "times processing waited for onload to complete" },
+    { CountType::SUM, "offload_fallback", "fast pattern offload search fallback attempts" },
+    { CountType::SUM, "offload_failures", "fast pattern offload search failures" },
+    { CountType::SUM, "offload_suspends", "fast pattern search suspends due to offload context chains" },
+    { CountType::SUM, "pcre_match_limit", "total number of times pcre hit the match limit" },
+    { CountType::SUM, "pcre_recursion_limit", "total number of times pcre hit the recursion limit" },
+    { CountType::SUM, "pcre_error", "total number of times pcre returns error" },
+    { CountType::END, nullptr, nullptr }
 };
 
 const PegInfo proc_names[] =
 {
-    { "local commands", "total local commands processed" },
-    { "remote commands", "total remote commands processed" },
-    { "signals", "total signals processed" },
-    { "conf reloads", "number of times configuration was reloaded" },
-    { "attribute table reloads", "number of times hosts table was reloaded" },
-    { "attribute table hosts", "total number of hosts in table" },
-    { nullptr, nullptr }
+    { CountType::SUM, "local_commands", "total local commands processed" },
+    { CountType::SUM, "remote_commands", "total remote commands processed" },
+    { CountType::SUM, "signals", "total signals processed" },
+    { CountType::SUM, "conf_reloads", "number of times configuration was reloaded" },
+    { CountType::SUM, "policy_reloads", "number of times policies were reloaded" },
+    { CountType::SUM, "inspector_deletions", "number of times inspectors were deleted" },
+    { CountType::SUM, "daq_reloads", "number of times daq configuration was reloaded" },
+    { CountType::SUM, "attribute_table_reloads", "number of times hosts attribute table was reloaded" },
+    { CountType::SUM, "attribute_table_hosts", "number of hosts added to the attribute table" },
+    { CountType::SUM, "attribute_table_overflow", "number of host additions that failed due to attribute table full" },
+    { CountType::END, nullptr, nullptr }
 };
 
 //-------------------------------------------------------------------------
 
-void pc_sum()
-{
-    // must sum explicitly; can't zero; daq stats are cuumulative ...
-    const DAQ_Stats_t* daq_stats = DAQ_GetStats();
-
-    g_daq_stats.hw_packets_received += daq_stats->hw_packets_received;
-    g_daq_stats.hw_packets_dropped += daq_stats->hw_packets_dropped;
-    g_daq_stats.packets_received += daq_stats->packets_received;
-    g_daq_stats.packets_filtered += daq_stats->packets_filtered;
-    g_daq_stats.packets_injected += daq_stats->packets_injected;
-
-    for ( unsigned i = 0; i < MAX_SFDAQ_VERDICT; i++ )
-        g_daq_stats.verdicts[i] += daq_stats->verdicts[i];
-
-    sum_stats((PegCount*)&gpc, (PegCount*)&pc, array_size(pc_names)-1);
-    memset(&pc, 0, sizeof(pc));
-
-    sum_stats((PegCount*)&gaux, (PegCount*)&aux_counts, sizeof(aux_counts)/sizeof(PegCount));
-    memset(&aux_counts, 0, sizeof(aux_counts));
-}
-
-//-------------------------------------------------------------------------
-
-static void get_daq_stats(DAQStats& daq_stats)
-{
-    uint64_t pkts_recv = g_daq_stats.hw_packets_received;
-    uint64_t pkts_drop = g_daq_stats.hw_packets_dropped;
-    uint64_t pkts_inj = g_daq_stats.packets_injected + Active::get_injects();
-
-    uint64_t pkts_out = 0;
-
-    if ( pkts_recv > g_daq_stats.packets_filtered + g_daq_stats.packets_received )
-        pkts_out = pkts_recv - g_daq_stats.packets_filtered - g_daq_stats.packets_received;
-
-    daq_stats.pcaps = Trough_GetFileCount();
-    daq_stats.received = pkts_recv;
-    daq_stats.analyzed = g_daq_stats.packets_received;
-    daq_stats.dropped =  pkts_drop;
-    daq_stats.filtered =  g_daq_stats.packets_filtered;
-    daq_stats.outstanding =  pkts_out;
-    daq_stats.injected =  pkts_inj;
-
-    for ( unsigned i = 0; i < MAX_SFDAQ_VERDICT; i++ )
-        daq_stats.verdicts[i] = g_daq_stats.verdicts[i];
-
-    daq_stats.internal_blacklist = gaux.internal_blacklist;
-    daq_stats.internal_whitelist = gaux.internal_whitelist;
-    daq_stats.skipped = snort_conf->pkt_skip;
-    daq_stats.fail_open = gaux.total_fail_open;
-    daq_stats.idle = gaux.idle;
-}
-
 void DropStats()
 {
     LogLabel("Packet Statistics");
-
-    DAQStats daq_stats;
-    get_daq_stats(daq_stats);
-    show_stats((PegCount*)&daq_stats, daq_names, array_size(daq_names)-1, "daq");
+    ModuleManager::get_module("daq")->show_stats();
 
     PacketManager::dump_stats();
-    //mpse_print_qinfo();
 
     LogLabel("Module Statistics");
-    const char* exclude = "daq detection snort";
-    ModuleManager::dump_stats(snort_conf, exclude);
-
-    // ensure proper counting of log_limit
-    SnortEventqResetCounts();
-
-    // FIXIT-L alert_pkts excludes rep hits
-    if ( gpc.total_alert_pkts == gpc.alert_pkts )
-        gpc.total_alert_pkts = 0;
-
-    //LogLabel("File Statistics");
-    print_file_stats();
+    const char* exclude = "daq snort";
+    ModuleManager::dump_stats(exclude, false);
+    ModuleManager::dump_stats(exclude, true);
 
     LogLabel("Summary Statistics");
-    show_stats((PegCount*)&gpc, pc_names, array_size(pc_names)-1, "detection");
-
-#ifdef PPM_MGR
-    PPM_PRINT_SUMMARY(snort_conf->ppm_cfg);
-#endif
-    proc_stats.attribute_table_hosts = SFAT_NumberOfHosts();
     show_stats((PegCount*)&proc_stats, proc_names, array_size(proc_names)-1, "process");
-
-    if ( SnortConfig::log_verbose() )
-        log_malloc_info();
 }
 
 //-------------------------------------------------------------------------
 
-void PrintStatistics(void)
+void PrintStatistics()
 {
     DropStats();
     timing_stats();
 
-    // FIXIT-L below stats need to be made consistent with above
-    fpShowEventStats(snort_conf);
-    print_thresholding(snort_conf->threshold_config, 1);
+    // FIXIT-L can do flag saving with RAII (much cleaner)
+    bool origin_log_quiet = SnortConfig::log_quiet();
+    SnortConfig::set_log_quiet(false);
 
-#ifdef PERF_PROFILING
-    {
-        int save_quiet_flag = snort_conf->logging_flags & LOGGING_FLAG__QUIET;
+    // once more for the main thread
+    Profiler::consolidate_stats();
+    Profiler::show_stats();
 
-        snort_conf->logging_flags &= ~LOGGING_FLAG__QUIET;
-
-        ShowAllProfiles();
-
-        snort_conf->logging_flags |= save_quiet_flag;
-    }
-#endif
+    SnortConfig::set_log_quiet(origin_log_quiet);
 }
 
 //-------------------------------------------------------------------------
@@ -371,27 +273,48 @@ void sum_stats(
     }
 }
 
+static bool show_stat(
+    bool head, PegCount count, const char* name, const char* module_name,
+    FILE* fh = stdout)
+{
+    if ( !count )
+        return head;
+
+    if ( module_name && !head )
+    {
+        LogLabel(module_name, fh);
+        head = true;
+    }
+
+    LogCount(name, count, fh);
+    return head;
+}
+
+void show_stats(PegCount* pegs, const PegInfo* info, const char* module_name)
+{
+    bool head = false;
+
+    for ( unsigned i = 0; info->name[i]; ++i )
+        head = show_stat(head, pegs[i], info[i].name, module_name);
+}
+
 void show_stats(
     PegCount* pegs, const PegInfo* info, unsigned n, const char* module_name)
 {
     bool head = false;
 
     for ( unsigned i = 0; i < n; ++i )
-    {
-        PegCount c = pegs[i];
-        const char* s = info[i].name;
+        head = show_stat(head, pegs[i], info[i].name, module_name);
+}
 
-        if ( !c )
-            continue;
+void show_stats(
+    PegCount* pegs, const PegInfo* info,
+    const IndexVec& peg_idxs, const char* module_name, FILE* fh)
+{
+    bool head = false;
 
-        if ( module_name && !head )
-        {
-            LogLabel(module_name);
-            head = true;
-        }
-
-        LogCount(s, c);
-    }
+    for ( auto& i : peg_idxs)
+        head = show_stat(head, pegs[i], info[i].name, module_name, fh);
 }
 
 void show_percent_stats(
@@ -413,7 +336,6 @@ void show_percent_stats(
             head = true;
         }
 
-        LogStat(s, c, pegs[0]);
+        LogStat(s, c, pegs[0], stdout);
     }
 }
-

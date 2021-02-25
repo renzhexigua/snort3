@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class EventTrace : public ConversionState
 {
 public:
     EventTrace(Converter& c) : ConversionState(c) { }
-    virtual ~EventTrace() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -51,10 +50,10 @@ bool EventTrace::convert(std::istringstream& data_stream)
     {
         bool tmpval = true;
 
-        if (!keyword.compare("file"))
-            tmpval = table_api.add_option("file", arg);
+        if (keyword == "file")
+            table_api.add_deleted_comment("file");
 
-        else if (!keyword.compare("max_data"))
+        else if (keyword == "max_data")
             tmpval = table_api.add_option("max_data", std::stoi(arg));
 
         else

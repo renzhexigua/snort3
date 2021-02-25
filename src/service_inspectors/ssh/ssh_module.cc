@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -18,24 +18,29 @@
 
 // ssh_module.cc author Bhagyashree Bantwal <bbantwal@cisco.com>
 
-#include "ssh_module.h"
-#include <assert.h>
-#include <sstream>
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
+#include "ssh_module.h"
+
+#include <cassert>
+
+using namespace snort;
 using namespace std;
 
 #define SSH_EVENT_RESPOVERFLOW_STR \
-    "Challenge-Response Overflow exploit"
+    "challenge-response overflow exploit"
 #define SSH_EVENT_CRC32_STR \
     "SSH1 CRC32 exploit"
 #define SSH_EVENT_SECURECRT_STR \
-    "Server version string overflow"
+    "server version string overflow"
 #define SSH_EVENT_WRONGDIR_STR \
-    "Bad message direction"
+    "bad message direction"
 #define SSH_PAYLOAD_SIZE_STR \
-    "Payload size incorrect for the given payload"
+    "payload size incorrect for the given payload"
 #define SSH_VERSION_STR \
-    "Failed to detect SSH version string"
+    "failed to detect SSH version string"
 
 static const Parameter s_params[] =
 {
@@ -63,6 +68,15 @@ static const RuleMap ssh_rules[] =
     { 0, nullptr }
 };
 
+const PegInfo ssh_pegs[] =
+{
+    { CountType::SUM, "packets", "total packets" },
+    { CountType::SUM, "total_bytes", "total number of bytes processed" },
+    { CountType::NOW, "concurrent_sessions", "total concurrent ssh sessions" },
+    { CountType::MAX, "max_concurrent_sessions", "maximum concurrent ssh sessions" },
+    { CountType::END, nullptr, nullptr }
+};
+
 //-------------------------------------------------------------------------
 // ssh module
 //-------------------------------------------------------------------------
@@ -82,7 +96,7 @@ const RuleMap* SshModule::get_rules() const
 { return ssh_rules; }
 
 const PegInfo* SshModule::get_pegs() const
-{ return simple_pegs; }
+{ return ssh_pegs; }
 
 PegCount* SshModule::get_counts() const
 { return (PegCount*)&sshstats; }
@@ -93,13 +107,13 @@ ProfileStats* SshModule::get_profile() const
 bool SshModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("max_encrypted_packets") )
-        conf->MaxEncryptedPackets = v.get_long();
+        conf->MaxEncryptedPackets = v.get_uint16();
 
     else if ( v.is("max_client_bytes") )
-        conf->MaxClientBytes = v.get_long();
+        conf->MaxClientBytes = v.get_uint16();
 
     else if ( v.is("max_server_version_len") )
-        conf->MaxServerVersionLen = v.get_long();
+        conf->MaxServerVersionLen = v.get_uint8();
 
     else
         return false;
@@ -116,15 +130,8 @@ SSH_PROTO_CONF* SshModule::get_data()
 
 bool SshModule::begin(const char*, int, SnortConfig*)
 {
+    assert(!conf);
     conf = new SSH_PROTO_CONF;
-    conf->MaxClientBytes = SSH_DEFAULT_MAX_CLIENT_BYTES;
-    conf->MaxEncryptedPackets = SSH_DEFAULT_MAX_ENC_PKTS;
-    conf->MaxServerVersionLen = SSH_DEFAULT_MAX_SERVER_VERSION_LEN;
-    return true;
-}
-
-bool SshModule::end(const char*, int, SnortConfig*)
-{
     return true;
 }
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,35 +17,23 @@
 //--------------------------------------------------------------------------
 // event_manager.cc author Russ Combs <rucombs@cisco.com>
 
-#include "event_manager.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <assert.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <errno.h>
+#include "event_manager.h"
 
+#include <cassert>
 #include <list>
-using namespace std;
 
-#include "main/snort_types.h"
-#include "main/snort_config.h"
-#include "main/snort_debug.h"
-#include "utils/util.h"
 #include "framework/logger.h"
-#include "framework/module.h"
-#include "loggers/loggers.h"
-#include "parser/parser.h"
 #include "log/messages.h"
+#include "main/snort_config.h"
 
-#include "plugin_manager.h"
 #include "module_manager.h"
+
+using namespace snort;
+using namespace std;
 
 struct Output
 {
@@ -63,7 +51,6 @@ typedef list<Output*> OutputList;
 static OutputList s_outputs;
 
 typedef list<Logger*> EHList;
-static EHList s_handlers;
 
 struct OutputSet
 {
@@ -83,7 +70,7 @@ void EventManager::add_plugin(const LogApi* api)
 {
     // can't assert - alert_sf_socket operates differently
     //assert(api->flags & (OUTPUT_TYPE_FLAG__ALERT | OUTPUT_TYPE_FLAG__LOG));
-    s_outputs.push_back(new Output(api));
+    s_outputs.emplace_back(new Output(api));
 }
 
 void EventManager::release_plugins()
@@ -157,7 +144,7 @@ void EventManager::add_output(OutputSet** ofn, Logger* eh)
     if ( !*ofn )
         *ofn = new OutputSet;
 
-    (*ofn)->outputs.push_back(eh);
+    (*ofn)->outputs.emplace_back(eh);
 }
 
 void EventManager::copy_outputs(OutputSet* dst, OutputSet* src)
@@ -169,7 +156,7 @@ void EventManager::copy_outputs(OutputSet* dst, OutputSet* src)
 // configuration
 
 void EventManager::instantiate(
-    Output* p, Module* mod, SnortConfig* sc)
+    Output* p, Module* mod, SnortConfig*)
 {
     bool enabled = false;
 
@@ -182,11 +169,11 @@ void EventManager::instantiate(
     if ( !enabled )
         return;
 
-    p->handler = p->api->ctor(sc, mod);
+    p->handler = p->api->ctor(mod);
     assert(p->handler);
 
     p->handler->set_api(p->api);
-    s_loggers.outputs.push_back(p->handler);
+    s_loggers.outputs.emplace_back(p->handler);
 }
 
 // command line outputs
@@ -196,14 +183,13 @@ void EventManager::instantiate(
     // override prior outputs
     // (last cmdline option wins)
     s_loggers.outputs.clear();
-    string tmp = name;
 
     const char* pfx = (sc->output_flags & OUTPUT_FLAG__ALERTS) ? "alert_" : "log_";
     Output* p = get_out(name, pfx);
 
     if ( !p )
     {
-        ParseError("unknown logger %s\n", name);
+        ParseError("unknown logger %s", name);
         return;
     }
 
@@ -212,7 +198,7 @@ void EventManager::instantiate(
     if ( p->handler )
     {
         // configured by conf
-        s_loggers.outputs.push_back(p->handler);
+        s_loggers.outputs.emplace_back(p->handler);
         return;
     }
     Module* mod = ModuleManager::get_default_module(name, sc);
@@ -246,7 +232,7 @@ void EventManager::close_outputs()
 }
 
 void EventManager::call_alerters(
-    OutputSet* idx, Packet* pkt, const char* message, Event* event)
+    OutputSet* idx, Packet* pkt, const char* message, const Event& event)
 {
     if ( idx )
     {
@@ -270,4 +256,33 @@ void EventManager::call_loggers(
     for ( auto p : s_loggers.outputs )
         p->log(pkt, message, event);
 }
+
+#ifdef PIGLET
+
+//-------------------------------------------------------------------------
+// piglet breach
+//-------------------------------------------------------------------------
+static const LogApi* find_api(const char* name)
+{
+    for ( auto out : s_outputs )
+        if ( !strcmp(out->api->base.name, name) )
+            return out->api;
+
+    return nullptr;
+}
+
+LoggerWrapper* EventManager::instantiate(const char* name, Module* m, SnortConfig*)
+{
+    auto api = find_api(name);
+    if ( !api || !api->ctor )
+        return nullptr;
+
+    auto p = api->ctor(m);
+    if ( !p )
+        return nullptr;
+
+    return new LoggerWrapper(api, p);
+}
+
+#endif
 

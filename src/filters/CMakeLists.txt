@@ -1,9 +1,12 @@
 
-set (FILTER_INCLUDES
-    sfrf.h 
-)
+if ( ENABLE_UNIT_TESTS )
+    set(TEST_FILES
+        sfrf_test.cc
+        sfthd_test.cc
+    )
+endif()
 
-add_library (filter STATIC
+add_library (filter OBJECT
     detection_filter.cc
     detection_filter.h
     rate_filter.cc
@@ -11,13 +14,9 @@ add_library (filter STATIC
     sfthreshold.cc
     sfthreshold.h
     sfrf.cc
+    sfrf.h
     sfthd.cc
     sfthd.h
-    ${FILTER_INCLUDES}
-)
-
-
-install(FILES ${FILTER_INCLUDES}
-    DESTINATION "${INCLUDE_INSTALL_PATH}/filters"
+    ${TEST_FILES}
 )
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,63 +17,76 @@
 //--------------------------------------------------------------------------
 // stream_splitter.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "stream_splitter.h"
 
-#include <assert.h>
-#include <string.h>
+#include <algorithm>
 
-#include "flush_bucket.h"
+#include "detection/detection_engine.h"
+#include "main/snort_config.h"
 #include "protocols/packet.h"
 
-static THREAD_LOCAL uint8_t pdu_buf[65536];
-static THREAD_LOCAL StreamBuffer str_buf;
+#include "flush_bucket.h"
+#include "stream.h"
 
-unsigned StreamSplitter::max_pdu = 16384;
-
-void StreamSplitter::set_max(unsigned m)
-{ max_pdu = m; }
+using namespace snort;
 
 unsigned StreamSplitter::max(Flow*)
-{ return max_pdu; }
+{ return SnortConfig::get_conf()->max_pdu; }
 
-const StreamBuffer* StreamSplitter::reassemble(
+uint16_t StreamSplitter::get_flush_bucket_size()
+{ return FlushBucket::get_size(); }
+
+const StreamBuffer StreamSplitter::reassemble(
     Flow*, unsigned, unsigned offset, const uint8_t* p,
     unsigned n, uint32_t flags, unsigned& copied)
 {
-    assert(offset + n < sizeof(pdu_buf));
-    memcpy(pdu_buf+offset, p, n);
     copied = n;
+    if (n == 0)
+        return { nullptr, 0 };
+
+    unsigned max;
+    uint8_t* pdu_buf = DetectionEngine::get_next_buffer(max);
+
+    assert(offset + n < max);
+    memcpy(pdu_buf+offset, p, n);
 
     if ( flags & PKT_PDU_TAIL )
-    {
-        str_buf.data = pdu_buf;
-        str_buf.length = offset + n;
-        return &str_buf;
-    }
-    return nullptr;
+        return { pdu_buf, offset + n };
+
+    return { nullptr, 0 };
 }
 
 //--------------------------------------------------------------------------
 // atom splitter
 //--------------------------------------------------------------------------
 
-AtomSplitter::AtomSplitter(bool b, uint32_t sz) : StreamSplitter(b)
+AtomSplitter::AtomSplitter(bool b, uint16_t sz) : StreamSplitter(b)
 {
     reset();
     base = sz;
-    min = base + FlushBucket::get_size();
+    min = base + get_flush_bucket_size();
 }
 
-AtomSplitter::~AtomSplitter() { }
+unsigned AtomSplitter::adjust_to_fit(unsigned len)
+{
+    return std::min(SnortConfig::get_conf()->max_pdu - bytes_scanned, len);
+}
 
 StreamSplitter::Status AtomSplitter::scan(
-    Flow*, const uint8_t*, uint32_t len, uint32_t, uint32_t* fp
-    )
+    Packet*, const uint8_t*, uint32_t len, uint32_t, uint32_t* fp)
 {
-    bytes += len;
+    bytes_scanned += len;
     segs++;
 
-    if ( segs >= 2 && bytes >= min )
+    if ( bytes_scanned < scan_footprint
+        && bytes_scanned < SnortConfig::get_conf()->max_pdu )
+        return SEARCH;
+
+    if ( segs >= 2 && bytes_scanned >= min )
     {
         *fp = len;
         return FLUSH;
@@ -82,42 +95,13 @@ StreamSplitter::Status AtomSplitter::scan(
 }
 
 void AtomSplitter::reset()
-{
-    bytes = segs = 0;
-}
+{  segs = scan_footprint = bytes_scanned = 0; }
 
 void AtomSplitter::update()
 {
     reset();
-    min = base + FlushBucket::get_size();
+    min = base + get_flush_bucket_size();
 }
-
-#if 0
-// FIXIT-M this should be part of a new splitter
-static inline int CheckFlushCoercion(
-    Packet* p, FlushMgr* fm, uint16_t flush_factor
-    )
-{
-    if ( !flush_factor )
-        return 0;
-
-    if (
-        p->dsize &&
-        (p->dsize < fm->last_size) &&
-        (fm->last_count >= flush_factor) )
-    {
-        fm->last_size = 0;
-        fm->last_count = 0;
-        return 1;
-    }
-    if ( p->dsize > fm->last_size )
-        fm->last_size = p->dsize;
-
-    fm->last_count++;
-    return 0;
-}
-
-#endif
 
 //--------------------------------------------------------------------------
 // log splitter
@@ -125,11 +109,34 @@ static inline int CheckFlushCoercion(
 
 LogSplitter::LogSplitter(bool b) : StreamSplitter(b) { }
 
-StreamSplitter::Status LogSplitter::scan(
-    Flow*, const uint8_t*, uint32_t len, uint32_t, uint32_t* fp
-    )
+StreamSplitter::Status LogSplitter::scan(Packet*, const uint8_t*, uint32_t len, uint32_t,
+    uint32_t* fp)
 {
     *fp = len;
     return FLUSH;
 }
 
+//--------------------------------------------------------------------------
+// stop-and-wait splitter
+//--------------------------------------------------------------------------
+
+StreamSplitter::Status StopAndWaitSplitter::scan(Packet* pkt, const uint8_t*, uint32_t len,
+    uint32_t, uint32_t*)
+{
+    assert(pkt);
+    StopAndWaitSplitter* peer = (StopAndWaitSplitter*)Stream::get_splitter(pkt->flow, !to_server());
+
+    if ( peer and peer->saw_data() )
+    {
+        Packet* p = DetectionEngine::get_current_packet();
+
+        if ( to_server() )
+            Stream::flush_client(p);
+        else
+            Stream::flush_server(p);
+
+        peer->reset();
+    }
+    byte_count += len;
+    return StreamSplitter::SEARCH;
+}

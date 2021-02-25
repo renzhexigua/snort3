@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,31 +32,40 @@ class Table
 {
 public:
     Table(int depth);
-    Table(std::string name, int depth);
+    Table(const std::string& name, int depth);
+    Table(const std::string& name, const std::string& key, int depth);
     virtual ~Table();
 
-    inline std::string get_name() { return name; }
+    inline const std::string& get_name() { return name; }
+    void set_one_line(bool o) { one_line = o; }
+    void set_print_whitespace(bool w) { print_whitespace = w; }
     bool has_differences();
     Table* open_table();
-    Table* open_table(std::string);
-    bool add_option(std::string, int val);
-    bool add_option(std::string, bool val);
-    bool add_option(std::string, std::string val);
-    bool add_list(std::string, std::string next_elem);
-    void add_comment(std::string comment);
-    bool has_option(const std::string);
+    Table* open_table(const std::string&);
+    bool add_option(const std::string& val);
+    bool add_option(const std::string&, int val);
+    bool add_option(const std::string&, bool val);
+    bool add_option(const std::string&, const std::string& val);
+    bool add_list(const std::string&, const std::string& next_elem);
+    void add_comment(const std::string& comment);
+    bool has_option(const std::string&);
+    bool get_option(const std::string& opt_name, std::string& value);
 
     /*  emit options after table has finished printing.
         These options will be appended to the previous table as supposed
         to overwriting the entire table */
-    void append_option(std::string opt_name, int val);
-    void append_option(std::string opt_name, bool val);
-    void append_option(std::string opt_name, std::string val);
+    void append_option(const std::string& opt_name, int val);
+    void append_option(const std::string& opt_name, bool val);
+    void append_option(const std::string& opt_name, const std::string& val);
 
     friend std::ostream& operator<<(std::ostream&, const Table&);
 
 private:
     std::string name;
+    std::string key;
+    bool one_line = false;
+    bool print_whitespace = true;
+
     int depth;
     Comments* comments;
     std::vector<Table*> tables;
@@ -64,10 +73,10 @@ private:
     std::vector<Variable*> lists;
     std::vector<Option*> append_options;
 
-    bool has_option(std::string name, int val);
-    bool has_option(std::string name, bool val);
-    bool has_option(std::string name, std::string val);
-    bool has_option(Option o);
+    bool has_option(const std::string& name, int val);
+    bool has_option(const std::string& name, bool val);
+    bool has_option(const std::string& name, const std::string& val);
+    bool has_option(const Option& o);
 };
 
 #endif

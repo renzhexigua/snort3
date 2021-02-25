@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,19 +17,24 @@
 //--------------------------------------------------------------------------
 // mpse_manager.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "mpse_manager.h"
 
+#include <cassert>
 #include <list>
-using namespace std;
 
-#include "snort_types.h"
-#include "snort_config.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "module_manager.h"
+#include "detection/fp_config.h"
 #include "framework/mpse.h"
-#include "parser/parser.h"
 #include "log/messages.h"
+#include "main/snort_config.h"
+
+#include "module_manager.h"
+
+using namespace snort;
+using namespace std;
 
 typedef list<const MpseApi*> EngineList;
 static EngineList s_engines;
@@ -40,7 +45,7 @@ static EngineList s_engines;
 
 void MpseManager::add_plugin(const MpseApi* api)
 {
-    s_engines.push_back(api);
+    s_engines.emplace_back(api);
 }
 
 void MpseManager::release_plugins()
@@ -77,35 +82,17 @@ const MpseApi* MpseManager::get_search_api(const char* name)
 {
     const MpseApi* api = ::get_api(name);
 
-    if ( api )
+    if ( api and api->init )
         api->init();
 
     return api;
 }
 
 Mpse* MpseManager::get_search_engine(
-    SnortConfig* sc,
-    const MpseApi* api,
-    bool use_gc,
-    void (* user_free)(void*),
-    void (* tree_free)(void**),
-    void (* list_free)(void**))
+    const SnortConfig* sc, const MpseApi* api, const MpseAgent* agent)
 {
     Module* mod = ModuleManager::get_module(api->base.name);
-    Mpse* eng = api->ctor(sc, mod, use_gc, user_free, tree_free, list_free);
-    eng->set_api(api);
-    return eng;
-}
-
-Mpse* MpseManager::get_search_engine(const char* type)
-{
-    const MpseApi* api = get_search_api(type);
-
-    if ( !api )
-        return nullptr;
-
-    Module* mod = ModuleManager::get_module(api->base.name);
-    Mpse* eng = api->ctor(nullptr, mod, false, nullptr, nullptr, nullptr);
+    Mpse* eng = api->ctor(sc, mod, agent);
     eng->set_api(api);
     return eng;
 }
@@ -121,36 +108,61 @@ void MpseManager::delete_search_engine(Mpse* eng)
 // the summary info is totaled by type for all instances
 void MpseManager::print_mpse_summary(const MpseApi* api)
 {
+    assert(api);
+    if ( api->print )
     api->print();
 }
 
 void MpseManager::activate_search_engine(const MpseApi* api, SnortConfig* sc)
 {
+    assert(api);
     if ( api->activate )
         api->activate(sc);
 }
 
 void MpseManager::setup_search_engine(const MpseApi* api, SnortConfig* sc)
 {
+    assert(api);
     if ( api->setup )
         api->setup(sc);
 }
 
 void MpseManager::start_search_engine(const MpseApi* api)
 {
+    assert(api);
     if ( api->start )
         api->start();
 }
 
 void MpseManager::stop_search_engine(const MpseApi* api)
 {
+    assert(api);
     if ( api->stop )
         api->stop();
 }
 
-bool MpseManager::search_engine_trim(const MpseApi* api)
+bool MpseManager::is_async_capable(const MpseApi* api)
 {
-    return api->trim;
+    assert(api);
+    return (api->flags & MPSE_ASYNC) != 0;
+}
+
+bool MpseManager::is_regex_capable(const MpseApi* api)
+{
+    assert(api);
+    return (api->flags & MPSE_REGEX) != 0;
+}
+
+bool MpseManager::is_poll_capable(const MpseApi* api)
+{
+    assert(api);
+    return (api->poll);
+}
+
+bool MpseManager::parallel_compiles(const MpseApi* api)
+{
+    assert(api);
+    return (api->flags & MPSE_MTBLD) != 0;
 }
 
 // was called during drop stats but actually commented out
@@ -159,15 +171,25 @@ bool MpseManager::search_engine_trim(const MpseApi* api)
 void MpseManager::print_qinfo()
 {
     sfksearch_print_qinfo();
-    bnfa_print_qinfo();
     acsmx2_print_qinfo();
 }
+#endif
 
-// this is commented out of snort.cc
-// combine with above?
-void MpseManager::print_search_engine_stats()
+#ifdef PIGLET
+
+MpseWrapper* MpseManager::instantiate(const char* name, Module* m, SnortConfig* sc)
 {
-    IntelPmPrintBufferStats();
+    auto api = ::get_api(name);
+
+    if ( !api || !api->ctor )
+        return nullptr;
+
+    auto p = api->ctor(sc, m, nullptr);
+
+    if ( !p )
+        return nullptr;
+
+    return new MpseWrapper(api, p);
 }
 
 #endif

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,38 +22,40 @@
 #ifndef PORT_OBJECT2_H
 #define PORT_OBJECT2_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
 #include "framework/bits.h"
-#include "hash/sfghash.h"
 #include "utils/sflsq.h"
 
 //-------------------------------------------------------------------------
 // PortObject2 is similar to PortObject
 //-------------------------------------------------------------------------
 
+namespace snort
+{
+class GHash;
+}
+
 struct PortObject;
 
 struct PortObject2
 {
-    char* name;                 /* user name - always use strdup or malloc for this*/
+    // FIXIT-L convert char* to C++ string
+    // prefix of this struct must match first 3 items in PortObject
+    char* name;                 /* user name */
     int id;                     /* internal tracking - compiling sets this value */
 
     SF_LIST* item_list;         /* list of port and port-range items */
-    SFGHASH* rule_hash;         /* hash of rule (rule-indexes) in use */
+    snort::GHash* rule_hash;         /* hash of rule (rule-indexes) in use */
+
+    PortBitSet* port_list;      /* for collecting ports that use this object */
+    struct PortGroup* group;    /* PortGroup based on rule_hash  */
 
     int port_cnt;               /* count of ports using this object */
-    PortBitSet* port_list;      /* for collecting ports that use this object */
-
-    void* data;                 /* user data, PortGroup based on rule_hash  */
-    void (* data_free)(void*);
 };
 
 PortObject2* PortObject2New(int nrules /*guess at this */);
-void PortObject2Free(void* p);
-PortObject2* PortObject2Dup(PortObject* po);
+void PortObject2Free(PortObject2*);
+void PortObject2Finalize(PortObject2*);
+PortObject2* PortObject2Dup(PortObject&);
 
 typedef void (*PortObjectIterator)(int port, void*);
 void PortObject2Iterate(PortObject2*, PortObjectIterator, void*);

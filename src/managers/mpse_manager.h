@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,45 +20,70 @@
 #ifndef MPSE_MANAGER_H
 #define MPSE_MANAGER_H
 
-#ifdef HAVE_CONFIG_H
-# include "config.h"
+// Factory for Mpse.  The same Mpse type is used for rule matching as well
+// as searching by inspectors with a SearchTool.  Runtime use of the Mpse
+// is by the fast pattern detection module.
+
+#include "framework/module.h"
+
+#ifdef PIGLET
+#include "framework/mpse.h"
 #endif
 
-#include "snort_types.h"
-#include "framework/base_api.h"
-
+namespace snort
+{
 struct MpseApi;
 class Mpse;
 struct SnortConfig;
+}
 
 //-------------------------------------------------------------------------
+
+#ifdef PIGLET
+struct MpseWrapper
+{
+    MpseWrapper(const snort::MpseApi* a, snort::Mpse* p) :
+        api { a }, instance { p } { }
+
+    ~MpseWrapper()
+    {
+        if ( api && instance && api->dtor )
+            api->dtor(instance);
+    }
+
+    const snort::MpseApi* api;
+    snort::Mpse* instance;
+};
+#endif
 
 class MpseManager
 {
 public:
-    static void add_plugin(const MpseApi*);
+    static void add_plugin(const snort::MpseApi*);
     static void release_plugins();
     static void dump_plugins();
 
-    static void instantiate(const MpseApi*, Module*, SnortConfig*);
-    static const MpseApi* get_search_api(const char* type);
-    static void delete_search_engine(Mpse*);
+    static void instantiate(const snort::MpseApi*, snort::Module*, snort::SnortConfig*);
+    static const snort::MpseApi* get_search_api(const char* type);
+    static void delete_search_engine(snort::Mpse*);
 
-    static Mpse* get_search_engine(const char*);
-    static Mpse* get_search_engine(
-        SnortConfig* sc,const MpseApi* api,
-        bool use_gc,
-        void (* user_ree)(void*),
-        void (* tree_free)(void**),
-        void (* list_free)(void**));
+    static snort::Mpse* get_search_engine(
+        const snort::SnortConfig* sc,const snort::MpseApi* api, const struct MpseAgent*);
 
-    static void activate_search_engine(const MpseApi*, SnortConfig*);
-    static void setup_search_engine(const MpseApi*, SnortConfig*);
-    static void start_search_engine(const MpseApi*);
-    static void stop_search_engine(const MpseApi*);
-    static bool search_engine_trim(const MpseApi*);
-    static void print_mpse_summary(const MpseApi*);
+    static void activate_search_engine(const snort::MpseApi*, snort::SnortConfig*);
+    static void setup_search_engine(const snort::MpseApi*, snort::SnortConfig*);
+    static void start_search_engine(const snort::MpseApi*);
+    static void stop_search_engine(const snort::MpseApi*);
+    static bool is_async_capable(const snort::MpseApi*);
+    static bool is_regex_capable(const snort::MpseApi*);
+    static bool parallel_compiles(const snort::MpseApi*);
+    static bool is_poll_capable(const snort::MpseApi* api);
+    static void print_mpse_summary(const snort::MpseApi*);
     static void print_search_engine_stats();
+
+#ifdef PIGLET
+    static MpseWrapper* instantiate(const char*, snort::Module*, snort::SnortConfig*);
+#endif
 };
 
 #endif

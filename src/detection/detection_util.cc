@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -18,37 +18,25 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "detection_util.h"
 
-#include <time.h>
-#include <string>
-
-#include "snort_config.h"
+#include "events/event.h"
 #include "log/text_log.h"
-#include "actions/actions.h"
+#include "protocols/packet.h"
 #include "utils/stats.h"
 
-THREAD_LOCAL DataPointer g_alt_data;
-THREAD_LOCAL DataPointer g_file_data;
+#include "ips_context.h"
+#include "treenodes.h"
 
-const char* http_buffer_name[HTTP_BUFFER_MAX] =
-{
-    "error/unset",
-    "http_client_body",
-    "http_cookie",
-    "http_header",
-    "http_method",
-    "http_raw_cookie",
-    "http_raw_header",
-    "http_raw_uri",
-    "http_stat_code",
-    "http_stat_msg",
-    "http_uri"
-};
+using namespace snort;
 
 #define LOG_CHARS 16
 
-static THREAD_LOCAL TextLog* tlog = NULL;
+static THREAD_LOCAL TextLog* tlog = nullptr;
 static THREAD_LOCAL unsigned nEvents = 0;
 
 static void LogBuffer(const char* s, const uint8_t* p, unsigned n)
@@ -60,8 +48,10 @@ static void LogBuffer(const char* s, const uint8_t* p, unsigned n)
     if ( !p )
         return;
 
-    if ( n > snort_conf->event_trace_max )
-        n = snort_conf->event_trace_max;
+    const SnortConfig* sc = SnortConfig::get_conf();
+
+    if ( n > sc->event_trace_max )
+        n = sc->event_trace_max;
 
     for ( idx = 0; idx < n; idx++)
     {
@@ -84,22 +74,21 @@ static void LogBuffer(const char* s, const uint8_t* p, unsigned n)
     }
 }
 
-void EventTrace_Log(const Packet* p, OptTreeNode* otn, int action)
+void EventTrace_Log(const Packet* p, const OptTreeNode* otn, int action)
 {
-    const char* acts = get_action_string((RuleType)action);
+    const char* acts = Actions::get_string((Actions::Type)action);
 
     if ( !tlog )
         return;
 
     TextLog_Print(tlog,
         "\nEvt=%u, Gid=%u, Sid=%u, Rev=%u, Act=%s\n",
-        event_id, otn->sigInfo.generator,
-        otn->sigInfo.id, otn->sigInfo.rev, acts);
+        event_id, otn->sigInfo.gid, otn->sigInfo.sid, otn->sigInfo.rev, acts);
 
     TextLog_Print(tlog,
-        "Pkt=%lu, Sec=%u.%6u, Len=%u, Cap=%u\n",
-        pc.total_from_daq, p->pkth->ts.tv_sec, p->pkth->ts.tv_usec,
-        p->pkth->pktlen, p->pkth->caplen);
+        "Pkt=" STDu64 ", Sec=%lu.%6lu, Len=%u, Cap=%u\n",
+        p->context->packet_number, (long)p->pkth->ts.tv_sec, (long)p->pkth->ts.tv_usec,
+        p->pkth->pktlen, p->pktlen);
 
     TextLog_Print(tlog,
         "Pkt Bits: Flags=0x%X, Proto=0x%X, Err=0x%X\n",
@@ -109,33 +98,33 @@ void EventTrace_Log(const Packet* p, OptTreeNode* otn, int action)
         "Pkt Cnts: Dsz=%u, Alt=%u\n",
         (unsigned)p->dsize, (unsigned)p->alt_dsize);
 
-    LogBuffer("Packet", p->data, p->alt_dsize);
+    uint16_t n = p->alt_dsize > 0 ? p->alt_dsize : p->dsize;
+    LogBuffer("Packet", p->data, n);
 
     nEvents++;
 }
 
-void EventTrace_Init(void)
+void EventTrace_Init()
 {
-    if ( snort_conf->event_trace_max > 0 )
+    const SnortConfig* sc = SnortConfig::get_conf();
+
+    if ( sc->event_trace_max > 0 )
     {
-        time_t now = time(NULL);
+        time_t now = time(nullptr);
         char time_buf[26];
         ctime_r(&now, time_buf);
 
-        std::string fname;
-        get_instance_file(fname, "event_trace.txt");
-
-        tlog = TextLog_Init (fname.c_str(), 128, 8*1024*1024);
+        tlog = TextLog_Init ("event_trace.txt", 4*1024, 8*1024*1024);
         TextLog_Print(tlog, "\nTrace started at %s", time_buf);
-        TextLog_Print(tlog, "Trace max_data is %u bytes\n", snort_conf->event_trace_max);
+        TextLog_Print(tlog, "Trace max_data is %u bytes\n", sc->event_trace_max);
     }
 }
 
-void EventTrace_Term(void)
+void EventTrace_Term()
 {
     if ( tlog )
     {
-        time_t now = time(NULL);
+        time_t now = time(nullptr);
         char time_buf[26];
         ctime_r(&now, time_buf);
 

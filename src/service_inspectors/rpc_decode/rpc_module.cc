@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -18,8 +18,13 @@
 
 // rpc_module.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "rpc_module.h"
-#include <assert.h>
+
+using namespace snort;
 
 #define RPC_FRAG_TRAFFIC_STR \
     "fragmented RPC records"
@@ -55,6 +60,15 @@ static const RuleMap rpc_rules[] =
 #define s_name "rpc_decode"
 #define s_help "RPC inspector"
 
+static const PegInfo rpc_pegs[] =
+{
+    { CountType::SUM, "total_packets", "total packets" },
+    { CountType::NOW, "concurrent_sessions", "total concurrent rpc sessions" },
+    { CountType::MAX, "max_concurrent_sessions", "maximum concurrent rpc sessions" },
+
+    { CountType::END, nullptr, nullptr }
+};
+
 RpcDecodeModule::RpcDecodeModule() : Module(s_name, s_help, s_params)
 { }
 
@@ -62,7 +76,7 @@ const RuleMap* RpcDecodeModule::get_rules() const
 { return rpc_rules; }
 
 const PegInfo* RpcDecodeModule::get_pegs() const
-{ return simple_pegs; }
+{ return rpc_pegs; }
 
 PegCount* RpcDecodeModule::get_counts() const
 { return (PegCount*)&rdstats; }

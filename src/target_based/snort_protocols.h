@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2006-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,46 +22,73 @@
 #ifndef SNORT_PROTOCOLS_H
 #define SNORT_PROTOCOLS_H
 
-#include "snort_types.h"
+#include <string>
+#include <vector>
+#include <unordered_map>
 
-// FIXIT-L use logical type instead of int16_t
-// for all reference protocols
+#include "main/snort_types.h"
+
+using SnortProtocolId = uint16_t;
 
 // these protocols are always defined because
 // they are used as consts in switch statements
 // other protos are added dynamically as used
-enum SnortProtocols
+enum SnortProtocols : SnortProtocolId
 {
+    //  The is_*_protocol functions depend on the order of these enums.
     SNORT_PROTO_IP = 1,
     SNORT_PROTO_ICMP,
     SNORT_PROTO_TCP,
     SNORT_PROTO_UDP,
-    SNORT_PROTO_USER,
     SNORT_PROTO_FILE,
     SNORT_PROTO_MAX
 };
 
-static inline bool is_network_protocol(int16_t proto)
+constexpr SnortProtocolId UNKNOWN_PROTOCOL_ID = 0;
+constexpr SnortProtocolId INVALID_PROTOCOL_ID = 0xffff;
+
+inline bool is_network_protocol(SnortProtocolId proto)
 { return (proto >= SNORT_PROTO_IP and proto <= SNORT_PROTO_UDP); }
 
-static inline bool is_builtin_protocol(int16_t proto)
+inline bool is_builtin_protocol(SnortProtocolId proto)
 { return proto < SNORT_PROTO_MAX; }
 
-static inline bool is_service_protocol(int16_t proto)
-{ return !is_network_protocol(proto); }
+inline bool is_service_protocol(SnortProtocolId proto)
+{ return proto > SNORT_PROTO_UDP; }
 
-void InitializeProtocolReferenceTable(void);
-void FreeProtoocolReferenceTable(void);
+// A mapping between names and IDs.
+namespace snort
+{
+class SO_PUBLIC ProtocolReference
+{
+public:
+    ProtocolReference();
+    ~ProtocolReference();
 
-int16_t get_protocol_count();
+    ProtocolReference(ProtocolReference* old_proto_ref);
 
-const char* get_protocol_name(uint16_t id);
-const char* get_protocol_name_sorted(uint16_t id);
+    ProtocolReference(const ProtocolReference&)  = delete;
+    ProtocolReference& operator=(const ProtocolReference&)  = delete;
 
-int16_t AddProtocolReference(const char* protocol);
-SO_PUBLIC int16_t FindProtocolReference(const char* protocol);
+    SnortProtocolId get_count();
 
-int16_t GetProtocolReference(struct Packet*);
+    const char* get_name(SnortProtocolId id);
+    const char* get_name_sorted(SnortProtocolId id);
 
+    SnortProtocolId add(const char* protocol);
+    SnortProtocolId find(const char* protocol);
+
+    bool operator()(SnortProtocolId a, SnortProtocolId b);
+
+private:
+    std::vector<std::string> id_map;
+    std::vector<SnortProtocolId> ind_map;
+    std::unordered_map<std::string, SnortProtocolId> ref_table;
+
+    SnortProtocolId protocol_number = 0;
+
+    void init(ProtocolReference* old_proto_ref);
+};
+}
 #endif
 

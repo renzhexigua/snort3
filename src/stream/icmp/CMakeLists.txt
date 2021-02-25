@@ -1,5 +1,7 @@
 
-add_library( stream_icmp STATIC
+add_library( stream_icmp OBJECT
+    icmp_ha.cc
+    icmp_ha.h
     icmp_module.cc
     icmp_module.h
     icmp_session.cc
@@ -8,6 +10,3 @@ add_library( stream_icmp STATIC
     stream_icmp.h
 )
 
-target_link_libraries( stream_icmp
-    protocols
-)

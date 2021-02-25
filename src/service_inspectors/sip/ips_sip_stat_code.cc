@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2011-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -26,15 +26,16 @@
 #include "config.h"
 #endif
 
-#include "sip.h"
-
 #include "framework/ips_option.h"
 #include "framework/module.h"
-#include "framework/parameter.h"
-#include "detection/detect.h"
-#include "detection/detection_defines.h"
-#include "hash/sfhashfcn.h"
-#include "time/profiler.h"
+#include "hash/hash_key_operations.h"
+#include "log/messages.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+
+#include "sip.h"
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // sip_stat_code
@@ -53,59 +54,71 @@ public:
         IpsOption(s_name)
     { ssod = c; }
 
-    int eval(Cursor&, Packet*) override;
+    uint32_t hash() const override;
+    bool operator==(const IpsOption&) const override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     SipStatCodeRuleOptData ssod;
 };
 
-int SipStatCodeOption::eval(Cursor&, Packet* p)
+uint32_t SipStatCodeOption::hash() const
 {
-    SIPData* sd;
-    SIP_Roptions* ropts;
-    uint16_t short_code;
-    int i_code;
+    uint32_t a = IpsOption::hash(), b = 0, c = 0;
 
-    PROFILE_VARS;
-    MODULE_PROFILE_START(sipStatCodeRuleOptionPerfStats);
+    unsigned n = 0;
+    while ( n < SIP_NUM_STAT_CODE_MAX and ssod.stat_codes[n] ) ++n;
 
-    if ((!p->is_tcp() && !p->is_udp()) || !p->flow || !p->dsize)
-    {
-        MODULE_PROFILE_END(sipStatCodeRuleOptionPerfStats);
-        return DETECTION_OPTION_NO_MATCH;
-    }
+    mix_str(a, b, c, (const char*)ssod.stat_codes, n*sizeof(ssod.stat_codes[0]));
+    finalize(a, b, c);
 
-    sd = get_sip_session_data(p->flow);
+    return c;
+}
+
+bool SipStatCodeOption::operator==(const IpsOption& ips) const
+{
+    if ( !IpsOption::operator==(ips) )
+        return false;
+
+    const SipStatCodeOption& rhs = (const SipStatCodeOption&)ips;
+
+    if ( !memcmp(ssod.stat_codes, rhs.ssod.stat_codes, sizeof(ssod.stat_codes)) )
+        return true;
+
+    return false;
+}
+
+IpsOption::EvalStatus SipStatCodeOption::eval(Cursor&, Packet* p)
+{
+    RuleProfile profile(sipStatCodeRuleOptionPerfStats);
+
+    if ((!p->has_tcp_data() && !p->is_udp()) || !p->flow || !p->dsize)
+        return NO_MATCH;
+
+    SIPData* sd = get_sip_session_data(p->flow);
 
     if (!sd)
-    {
-        MODULE_PROFILE_END(sipStatCodeRuleOptionPerfStats);
-        return DETECTION_OPTION_NO_MATCH;
-    }
+        return NO_MATCH;
 
-    ropts = &sd->ropts;
+    SIP_Roptions* ropts = &sd->ropts;
 
     if (0 == ropts->status_code)
+        return NO_MATCH;
+
+    // Match the stat code
+    uint16_t short_code = ropts->status_code / 100;
+    for ( int i = 0; i < SIP_NUM_STAT_CODE_MAX; i++ )
     {
-        MODULE_PROFILE_END(sipStatCodeRuleOptionPerfStats);
-        return DETECTION_OPTION_NO_MATCH;
+        auto stat_code = ssod.stat_codes[i];
+
+        if ( !stat_code )
+            break;
+
+        if ( stat_code == short_code || stat_code == ropts->status_code )
+            return MATCH;
     }
 
-    /*Match the stat code*/
-    short_code = ropts->status_code / 100;
-    for (i_code = 0; i_code < SIP_NUM_STAT_CODE_MAX; i_code++)
-    {
-        if ((ssod.stat_codes[i_code] == short_code)||
-            (ssod.stat_codes[i_code] == ropts->status_code))
-        {
-            MODULE_PROFILE_END(sipStatCodeRuleOptionPerfStats);
-            return DETECTION_OPTION_MATCH;
-        }
-    }
-
-    MODULE_PROFILE_END(sipStatCodeRuleOptionPerfStats);
-
-    return DETECTION_OPTION_NO_MATCH;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -115,7 +128,7 @@ int SipStatCodeOption::eval(Cursor&, Packet* p)
 static const Parameter s_params[] =
 {
     { "*code", Parameter::PT_INT, "1:999", nullptr,
-      "stat code" },
+      "status code" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -123,7 +136,7 @@ static const Parameter s_params[] =
 class SipStatCodeModule : public Module
 {
 public:
-    SipStatCodeModule() : Module(s_name, s_help, s_params) { }
+    SipStatCodeModule() : Module(s_name, s_help, s_params), ssod() { }
 
     bool begin(const char*, int, SnortConfig*) override;
     bool set(const char*, Value&, SnortConfig*) override;
@@ -131,6 +144,10 @@ public:
     ProfileStats* get_profile() const override
     { return &sipStatCodeRuleOptionPerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     SipStatCodeRuleOptData ssod;
 
 private:
@@ -145,19 +162,18 @@ bool SipStatCodeModule::begin(const char*, int, SnortConfig*)
 
 bool SipStatCodeModule::set(const char*, Value& v, SnortConfig*)
 {
-    unsigned long statCode;
     if (num_tokens < SIP_NUM_STAT_CODE_MAX)
     {
         if ( v.is("*code") )
         {
-            statCode = v.get_long();
-            if ((statCode > MAX_STAT_CODE) || ((statCode > NUM_OF_RESPONSE_TYPES - 1) &&
-                (statCode < MIN_STAT_CODE)))
+            uint16_t statCode = v.get_uint16();
+
+            if ( (statCode >= NUM_OF_RESPONSE_TYPES) && (statCode < MIN_STAT_CODE) )
             {
-                ParseError("Status code specified is not a 3 digit number or 1\n");
+                ParseError("Status code specified is not a single digit or a 3 digit number");
                 return false;
             }
-            ssod.stat_codes[num_tokens] = (uint16_t)statCode;
+            ssod.stat_codes[num_tokens] = statCode;
             num_tokens++;
         }
         else
@@ -219,5 +235,10 @@ static const IpsApi sip_stat_code_api =
     nullptr
 };
 
+//-------------------------------------------------------------------------
+// plugin
+//-------------------------------------------------------------------------
+
+// added to snort_plugins in sip.cc
 const BaseApi* ips_sip_stat_code = &sip_stat_code_api.base;
 

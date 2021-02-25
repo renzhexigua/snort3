@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,21 +20,31 @@
 #ifndef IPS_OPTION_H
 #define IPS_OPTION_H
 
-#include "main/snort_types.h"
-#include "framework/base_api.h"
+// All IPS rule keywords are realized as IpsOptions instantiated when rules
+// are parsed.
+
 #include "detection/rule_option_types.h"
-
-struct Packet;
-
-// this is the current version of the api
-#define IPSAPI_VERSION ((BASE_API_VERSION << 16) | 0)
+#include "framework/base_api.h"
+#include "main/snort_types.h"
+#include "target_based/snort_protocols.h"
 
 //-------------------------------------------------------------------------
 // api for class
 // eval and action are packet thread specific
 //-------------------------------------------------------------------------
 
+class Cursor;
+struct OptTreeNode;
+struct PatternMatchData;
+
+namespace snort
+{
+struct Packet;
 struct SnortConfig;
+class Module;
+
+// this is the current version of the api
+#define IPSAPI_VERSION ((BASE_API_VERSION << 16) | 0)
 
 enum CursorActionType
 {
@@ -42,16 +52,29 @@ enum CursorActionType
     CAT_ADJUST,
     CAT_SET_OTHER,
     CAT_SET_RAW,
+    CAT_SET_COOKIE,
+    CAT_SET_STAT_MSG,
+    CAT_SET_STAT_CODE,
+    CAT_SET_METHOD,
+    CAT_SET_RAW_HEADER,
+    CAT_SET_RAW_KEY,
     CAT_SET_FILE,
     CAT_SET_BODY,
     CAT_SET_HEADER,
     CAT_SET_KEY,
 };
 
+enum RuleDirection
+{
+    RULE_FROM_CLIENT,
+    RULE_FROM_SERVER,
+    RULE_WO_DIR
+};
+
 class SO_PUBLIC IpsOption
 {
 public:
-    virtual ~IpsOption() { }
+    virtual ~IpsOption() = default;
 
     // main thread
     virtual uint32_t hash() const;
@@ -60,42 +83,38 @@ public:
     bool operator!=(const IpsOption& ips) const
     { return !(*this == ips); }
 
+    virtual bool is_agent() { return false; }
+
     // packet threads
     virtual bool is_relative() { return false; }
-    virtual bool fp_research() { return false; }
-    virtual int eval(class Cursor&, Packet*) { return true; }
+    virtual bool retry(Cursor&, const Cursor&) { return false; }
     virtual void action(Packet*) { }
+
+    enum EvalStatus { NO_MATCH, MATCH, NO_ALERT, FAILED_BIT };
+    virtual EvalStatus eval(Cursor&, Packet*) { return MATCH; }
 
     option_type_t get_type() const { return type; }
     const char* get_name() const { return name; }
+    const char* get_buffer() const { return buffer; }
 
     virtual CursorActionType get_cursor_type() const
     { return CAT_NONE; }
 
-    static int eval(void* v, Cursor& c, Packet* p)
-    {
-        IpsOption* opt = (IpsOption*)v;
-        return opt->eval(c, p);
-    }
+    // for fast-pattern options like content
+    virtual PatternMatchData* get_pattern(SnortProtocolId, RuleDirection = RULE_WO_DIR)
+    { return nullptr; }
 
-    static CursorActionType get_cat(void* v)
-    {
-        IpsOption* opt = (IpsOption*)v;
-        return opt->get_cursor_type();
-    }
+    virtual PatternMatchData* get_alternate_pattern()
+    { return nullptr; }
 
-    static bool get_fp_only(void* v)
-    {
-        IpsOption* opt = (IpsOption*)v;
-        return !opt->fp_research();
-    }
+    static void set_buffer(const char*);
 
 protected:
-    IpsOption(const char* s, option_type_t t = RULE_OPTION_TYPE_OTHER)
-    { name = s; type = t; }
+    IpsOption(const char* s, option_type_t t = RULE_OPTION_TYPE_OTHER);
 
 private:
     const char* name;
+    const char* buffer;
     option_type_t type;
 };
 
@@ -107,9 +126,9 @@ enum RuleOptType
     OPT_TYPE_MAX
 };
 
-typedef void (* IpsOptFunc)(SnortConfig*);
+typedef void (* IpsOptFunc)(const SnortConfig*);
 
-typedef IpsOption* (* IpsNewFunc)(class Module*, struct OptTreeNode*);
+typedef IpsOption* (* IpsNewFunc)(Module*, OptTreeNode*);
 typedef void (* IpsDelFunc)(IpsOption*);
 
 struct IpsApi
@@ -128,6 +147,6 @@ struct IpsApi
     IpsDelFunc dtor;
     IpsOptFunc verify;
 };
-
+}
 #endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,24 +17,19 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-/**
- * @file   util_net.h
- * @author Chris Green <cmg@sourcefire.com>
- * @date   Fri Jun 27 10:20:31 2003
- *
- * @brief  simple network related functions
- *
- * Put your simple network related functions here
- */
-
 #ifndef UTIL_NET_H
 #define UTIL_NET_H
 
+#include <arpa/inet.h>
 #include "main/snort_types.h"
-#include "sfip/sfip_t.h"
 
-SO_PUBLIC char* inet_ntoax(const sfip_t*);
-SO_PUBLIC char* mktcpflag_str(int flags);
+namespace snort
+{
+struct SfCidr;
+typedef char InetBuf[INET6_ADDRSTRLEN];
 
-#endif /* UTIL_NET_H */
+SO_PUBLIC char* ObfuscateIpToText(
+    const struct SfIp*, const SfCidr& homenet, const SfCidr& obfuscate_net, InetBuf&);
+}
+#endif
 

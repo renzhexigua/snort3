@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class Ppm : public ConversionState
 {
 public:
     Ppm(Converter& c) : ConversionState(c) { }
-    virtual ~Ppm() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -42,102 +41,92 @@ bool Ppm::convert(std::istringstream& data_stream)
     bool retval = true;
     std::string keyword;
 
-    table_api.open_table("ppm");
+    table_api.open_table("latency");
+    table_api.add_diff_option_comment("ppm", "latency");
 
     while (data_stream >> keyword)
     {
         bool tmpval = true;
-        bool popped_comma;
-
+        bool popped_comma = false;
         if (keyword.back() == ',')
         {
             keyword.pop_back();
             popped_comma = true;
         }
-        else
-        {
-            popped_comma = false;
-        }
 
         if (keyword.empty())
             continue;
 
-        if (!keyword.compare("threshold"))
-            tmpval = parse_int_option("threshold", data_stream, false);
+        if (keyword == "threshold")
+        {
+            table_api.add_diff_option_comment("threshold", "rule.suspend_threshold");
+            table_api.open_table("rule");
+            tmpval = parse_int_option("suspend_threshold", data_stream, false);
+            table_api.close_table();
+        }
 
-        else if (!keyword.compare("fastpath-expensive-packets"))
+        else if (keyword == "fastpath-expensive-packets")
         {
-            table_api.add_diff_option_comment("fastpath-expensive-packets",
-                "fastpath_expensive_packets");
-            tmpval = table_api.add_option("fastpath_expensive_packets", true);
+            table_api.add_diff_option_comment("fastpath-expensive-packets", "packet.fastpath");
+            table_api.open_table("packet");
+            tmpval = table_api.add_option("fastpath", true);
+            table_api.close_table();
         }
-        else if (!keyword.compare("max-pkt-time"))
+
+        else if (keyword == "max-pkt-time")
         {
-            table_api.add_diff_option_comment("max-pkt-time", "max_pkt_time");
-            tmpval = parse_int_option("max_pkt_time", data_stream, false);
+            table_api.add_diff_option_comment("max-pkt-time", "packet.max_time");
+            table_api.open_table("packet");
+            tmpval = parse_int_option("max_time", data_stream, false);
+            table_api.close_table();
         }
-        else if (!keyword.compare("debug-pkts"))
-        {
+
+        else if (keyword == "debug-pkts")
             table_api.add_deleted_comment("debug-pkts");
-        }
-        else if (!keyword.compare("max-rule-time"))
-        {
-            table_api.add_diff_option_comment("max-rule-time", "max_rule_time");
-            tmpval = parse_int_option("max_rule_time", data_stream, false);
-        }
-        else if (!keyword.compare("suspend-expensive-rules"))
-        {
-            table_api.add_diff_option_comment("suspend-expensive-rules",
-                "suspend_expensive_rules");
-            tmpval = table_api.add_option("suspend_expensive_rules", true);
-        }
-        else if (!keyword.compare("suspend-timeout"))
-        {
-            table_api.add_diff_option_comment("suspend-timeout", "suspend_timeout");
-            tmpval = parse_int_option("suspend_timeout", data_stream, false);
-        }
-        else if (!keyword.compare("pkt-log"))
-        {
-            table_api.add_diff_option_comment("pkt-log", "pkt_log");
-            std::string opt1;
-            std::string opt2;
 
-            if (popped_comma)
-                table_api.add_option("pkt_log", "log");
-
-            else if (!(data_stream >> opt1))
-                table_api.add_option("pkt_log", "log");
-
-            else if (opt1.back() == ',')
-            {
-                opt1.pop_back();
-                tmpval = table_api.add_option("pkt_log", opt1);
-            }
-            else if (!(data_stream >> opt2))
-                tmpval = table_api.add_option("pkt_log", opt1);
-
-            else
-                tmpval = table_api.add_option("pkt_log", "both");
-        }
-        else if (!keyword.compare("rule-log"))
+        else if (keyword == "max-rule-time")
         {
-            std::string opt1;
-            std::string opt2;
-            table_api.add_diff_option_comment("rule-log", "rule_log");
+            table_api.add_diff_option_comment("max-rule-time", "rule.max_time");
+            table_api.open_table("rule");
+            tmpval = parse_int_option("max_time", data_stream, false);
+            table_api.close_table();
+        }
 
-            if (!(data_stream >> opt1))
+        else if (keyword == "suspend-expensive-rules")
+        {
+            table_api.add_diff_option_comment("suspend-expensive-rules", "rule.suspend");
+            table_api.open_table("rule");
+            tmpval = table_api.add_option("suspend", true);
+            table_api.close_table();
+        }
+
+        else if (keyword == "suspend-timeout")
+        {
+            table_api.add_diff_option_comment("suspend-timeout", "max_suspend_time");
+            table_api.open_table("rule");
+
+            int opt;
+
+            if (!(data_stream >> opt))
                 tmpval = false;
 
-            else if (opt1.back() == ',')
-            {
-                opt1.pop_back();
-                tmpval = table_api.add_option("rule_log", opt1);
-            }
-            else if (!(data_stream >> opt2))
-                tmpval = table_api.add_option("rule_log", opt1);
-
             else
-                tmpval = table_api.add_option("rule_log", "both");
+            {
+                table_api.add_diff_option_comment("suspend-timeout", "max_suspend_time");
+                table_api.add_comment("seconds changed to milliseconds");
+                tmpval = table_api.add_option("max_suspend_time", opt * 1000);
+            }
+
+            table_api.close_table();
+        }
+
+        else if ((keyword == "pkt-log") or (keyword == "rule-log"))
+        {
+            table_api.add_deleted_comment(keyword);
+            if (!popped_comma)
+            {
+                while ((data_stream >> keyword) && (keyword.back() != ','));
+            }
         }
         else
             tmpval = false;

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,48 +17,100 @@
 //--------------------------------------------------------------------------
 // packet.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
-#include "protocols/packet.h"
-#include "protocols/protocol_ids.h"
-
-#if 0
-uint8_t Packet::ip_proto_next() const
-{
-    if (is_ip4())
-    {
-        return ptrs.ip_api.get_ip4h()->proto();
-    }
-    else if (is_ip6())
-    {
-        const ip::IP6Hdr* const ip6h = ptrs.ip_api.get_ip6h();
-        int lyr = num_layers-1;
-
-        for (; lyr >= 0; lyr--)
-            if (layers[lyr].start == (const uint8_t*)(ip6h))
-                break;
-
-#if 0
-        Since this packet 'is_ip6()', we ar gauranteed to find the layer
-        if (lyr < 0)
-            return IPPROTO_ID_RESERVED;
+#ifdef HAVE_CONFIG_H
+#include "config.h"
 #endif
 
-        while (lyr < num_layers)
-        {
-            const uint16_t prot = layers[lyr].prot_id;
+#include "packet.h"
 
-            if (!is_ip_protocol(prot))
-                return (uint8_t)prot;
+#include "detection/ips_context.h"
+#include "flow/expect_cache.h"
+#include "framework/endianness.h"
+#include "log/obfuscator.h"
+#include "packet_io/active.h"
+#include "managers/codec_manager.h"
 
-            ++lyr;
-        }
+#include "packet_manager.h"
+#include "vlan.h"
+
+namespace snort
+{
+Packet::Packet(bool packet_data)
+{
+    layers = new Layer[CodecManager::get_max_layers()];
+    allocated = packet_data;
+
+    if (!packet_data)
+    {
+        pkt = nullptr;
+        pkth = nullptr;
+    }
+    else
+    {
+        pkth = new DAQ_PktHdr_t();
+        pkt = new uint8_t[Codec::PKT_MAX];
     }
 
-    return IPPROTO_ID_RESERVED;
+    obfuscator = nullptr;
+    endianness = nullptr;
+    active_inst = new Active();
+    action_inst = nullptr;
+    reset();
 }
 
-#endif
+Packet::~Packet()
+{
+    release_helpers();
 
-bool Packet::get_ip_proto_next(uint8_t& lyr, uint8_t& proto) const
+    if (allocated)
+    {
+        delete pkth;
+        delete[] pkt;
+    }
+    delete active_inst;
+    delete[] layers;
+}
+
+void Packet::reset()
+{
+    flow = nullptr;
+    packet_flags = 0;
+    ts_packet_flags = 0;
+    xtradata_mask = 0;
+    proto_bits = 0;
+    alt_dsize = 0;
+    num_layers = 0;
+    ip_proto_next = IpProtocol::PROTO_NOT_SET;
+    disable_inspect = false;
+    ExpectFlow::reset_expect_flows();
+
+    release_helpers();
+    ptrs.reset();
+
+    iplist_id = 0;
+    user_inspection_policy_id = 0;
+    user_ips_policy_id = 0;
+    user_network_policy_id = 0;
+    vlan_idx = 0;
+    filtering_state.clear();
+}
+
+void Packet::release_helpers()
+{
+    if ( obfuscator )
+    {
+        delete obfuscator;
+        obfuscator = nullptr;
+    }
+
+    if ( endianness )
+    {
+        delete endianness;
+        endianness = nullptr;
+    }
+}
+
+bool Packet::get_ip_proto_next(uint8_t& lyr, IpProtocol& proto) const
 {
     if (lyr > num_layers)
         return false;
@@ -67,22 +119,22 @@ bool Packet::get_ip_proto_next(uint8_t& lyr, uint8_t& proto) const
     {
         switch (layers[lyr].prot_id)
         {
-        case IPPROTO_ID_IPV6:
-        case ETHERTYPE_IPV6:
+        case ProtocolId::IPV6:
+        case ProtocolId::ETHERTYPE_IPV6:
             // move past this IP layer and any IPv6 extensions.
             while ( ((lyr + 1) < num_layers) && is_ip6_extension(layers[lyr+1].prot_id) )
                 ++lyr;
 
-            if ( (layers[lyr].prot_id == IPPROTO_ID_IPV6) || (layers[lyr].prot_id ==
-                ETHERTYPE_IPV6) )
+            if ( (layers[lyr].prot_id == ProtocolId::IPV6) || (layers[lyr].prot_id ==
+                ProtocolId::ETHERTYPE_IPV6) )
                 proto =  reinterpret_cast<const ip::IP6Hdr*>(layers[lyr++].start)->next();
             else
                 proto =  reinterpret_cast<const ip::IP6Extension*>(layers[lyr++].start)->ip6e_nxt;
 
             return true;
 
-        case ETHERTYPE_IPV4:
-        case IPPROTO_ID_IPIP:
+        case ProtocolId::ETHERTYPE_IPV4:
+        case ProtocolId::IPIP:
             proto = reinterpret_cast<const ip::IP4Hdr*>(layers[lyr++].start)->proto();
             return true;
 
@@ -114,14 +166,27 @@ const char* Packet::get_type() const
     case PktType::FILE:
         if ( proto_bits & PROTO_BIT__TCP )
             return "TCP";
+
         if ( proto_bits & PROTO_BIT__UDP )
             return "UDP";
-        break;
+
+        assert(false);
+        return "Error";
+
+    case PktType::NONE:
+        if ( proto_bits & PROTO_BIT__ARP )
+            return "ARP";
+
+        if ( num_layers > 0 )
+            return PacketManager::get_proto_name(layers[num_layers-1].prot_id);
+
+        return "None";
 
     default:
         break;
     }
-    return "error";
+    assert(false);
+    return "Error";
 }
 
 const char* Packet::get_pseudo_type() const
@@ -137,8 +202,8 @@ const char* Packet::get_pseudo_type() const
     case PSEUDO_PKT_TCP:
         return "stream_tcp";
 
-    case PSEUDO_PKT_DCE_RPKT:
-        return "dce2_rpc_reass";
+    case PSEUDO_PKT_USER:
+        return "stream_user";
 
     case PSEUDO_PKT_DCE_SEG:
         return "dce2_rpc_deseg";
@@ -152,14 +217,68 @@ const char* Packet::get_pseudo_type() const
     case PSEUDO_PKT_SMB_TRANS:
         return "dce2_smb_transact";
 
-    case PSEUDO_PKT_PS:
-        return "port_scan";
-
-    case PSEUDO_PKT_SDF:
-        return "sdf";
-
     default: break;
     }
     return "other";
 }
+
+// Things that are set prior to PDU creation and used after PDU creation
+static inline uint32_t get_session_flags(Packet& p)
+{
+    if ( p.ptrs.get_pkt_type() == PktType::PDU )
+        return p.context->get_session_flags();
+
+    return p.flow ? p.flow->get_session_flags() : 0;
+}
+
+bool Packet::is_detection_enabled(bool to_server)
+{
+    uint32_t session_flags = get_session_flags(*this);
+
+    if ( to_server )
+        return !(session_flags & SSNFLAG_NO_DETECT_TO_SERVER);
+
+    return !(session_flags & SSNFLAG_NO_DETECT_TO_CLIENT);
+}
+
+bool Packet::test_session_flags(uint32_t flags)
+{ return (get_session_flags(*this) & flags) != 0; }
+
+SnortProtocolId Packet::get_snort_protocol_id()
+{
+    if ( ptrs.get_pkt_type() == PktType::PDU )
+        return context->get_snort_protocol_id();
+
+    return flow ? flow->ssn_state.snort_protocol_id : UNKNOWN_PROTOCOL_ID;
+}
+
+uint16_t Packet::get_flow_vlan_id() const
+{
+    uint16_t vid = 0;
+
+    if (flow)
+        vid = flow->key->vlan_tag;
+    else if ( !context->conf->get_vlan_agnostic() and (proto_bits & PROTO_BIT__VLAN) )
+        vid = layer::get_vlan_layer(this)->vid();
+
+    return vid;
+}
+
+bool Packet::is_from_application_client() const
+{
+    if (flow)
+        return flow->flags.app_direction_swapped ? is_from_server() : is_from_client();
+    else
+        return is_from_client();
+}
+
+bool Packet::is_from_application_server() const
+{
+    if (flow)
+        return flow->flags.app_direction_swapped ? is_from_client() : is_from_server();
+    else
+        return is_from_server();
+}
+
+} // namespace snort
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,17 +20,16 @@
 #include "config.h"
 #endif
 
-#include "actions/actions.h"
-#include "main/snort_types.h"
-#include "main/snort_debug.h"
-#include "utils/util.h"
-#include "log/obfuscation.h"
-#include "stream/stream_api.h"
-#include "packet_io/active.h"
-#include "detection/signature.h"
+#include "actions.h"
+
 #include "detection/detect.h"
-#include "detection_util.h"
 #include "detection/tag.h"
+#include "packet_io/active.h"
+#include "packet_io/active_action.h"
+#include "parser/parser.h"
+#include "utils/stats.h"
+
+using namespace snort;
 
 static void pass()
 {
@@ -47,13 +46,13 @@ static void alert(Packet* p, const OptTreeNode* otn)
 {
     RuleTreeNode* rtn = getRuntimeRtnFromOtn(otn);
 
-    if (rtn == NULL)
+    if (rtn == nullptr)
         return;
 
     /* Call OptTreeNode specific output functions */
     if (otn->outputFuncs)
     {
-        ListHead lh;  // FIXIT-L "kinda hackish"
+        ListHead lh;  // FIXIT-L use of ListHead for CallLogFuncs() is a little unwieldy here
         lh.LogList = otn->outputFuncs;
         CallLogFuncs(p, otn, &lh);
     }
@@ -61,78 +60,81 @@ static void alert(Packet* p, const OptTreeNode* otn)
     CallLogFuncs(p, otn, rtn->listhead);
 }
 
-static const char* const rule_type[RULE_TYPE__MAX] =
+static const char* const type[Actions::MAX] =
 {
     "none", "log", "pass", "alert", "drop", "block", "reset"
 };
 
-const char* get_action_string(RuleType action)
+const char* Actions::get_string(Actions::Type action)
 {
-    if ( action < RULE_TYPE__MAX )
-        return rule_type[action];
+    if ( action < Actions::MAX )
+        return type[action];
 
     return "ERROR";
 }
 
-RuleType get_action_type(const char* s)
+Actions::Type Actions::get_type(const char* s)
 {
     if ( !s )
-        return RULE_TYPE__NONE;
+        return Actions::NONE;
 
-    else if ( !strcasecmp(s, ACTION_LOG) )
-        return RULE_TYPE__LOG;
+    else if ( !strcasecmp(s, Actions::get_string(Actions::LOG)) )
+        return Actions::LOG;
 
-    else if ( !strcasecmp(s, ACTION_PASS) )
-        return RULE_TYPE__PASS;
+    else if ( !strcasecmp(s, Actions::get_string(Actions::PASS)) )
+        return Actions::PASS;
 
-    else if ( !strcasecmp(s, ACTION_ALERT) )
-        return RULE_TYPE__ALERT;
+    else if ( !strcasecmp(s, Actions::get_string(Actions::ALERT)) )
+        return Actions::ALERT;
 
-    else if ( !strcasecmp(s, ACTION_DROP) )
-        return RULE_TYPE__DROP;
+    else if ( !strcasecmp(s, Actions::get_string(Actions::DROP)) )
+        return Actions::DROP;
 
-    else if ( !strcasecmp(s, ACTION_BLOCK) )
-        return RULE_TYPE__BLOCK;
+    else if ( !strcasecmp(s, Actions::get_string(Actions::BLOCK)) )
+        return Actions::BLOCK;
 
-    else if ( !strcasecmp(s, ACTION_RESET) )
-        return RULE_TYPE__RESET;
+    else if ( !strcasecmp(s, Actions::get_string(Actions::RESET)) )
+        return Actions::RESET;
 
-    return RULE_TYPE__NONE;
+    return Actions::NONE;
 }
 
-void action_execute(RuleType action, Packet* p, OptTreeNode* otn, uint16_t event_id)
+void Actions::execute(Actions::Type action, Packet* p, const OptTreeNode* otn,
+    uint16_t event_id)
 {
     switch (action)
     {
-    case RULE_TYPE__PASS:
+    case Actions::PASS:
         pass();
         SetTags(p, otn, event_id);
         break;
 
-    case RULE_TYPE__ALERT:
+    case Actions::ALERT:
         alert(p, otn);
         SetTags(p, otn, event_id);
         break;
 
-    case RULE_TYPE__LOG:
+    case Actions::LOG:
         log(p, otn);
         SetTags(p, otn, event_id);
         break;
 
-    case RULE_TYPE__DROP:
-        Active::drop_packet(p);
+    case Actions::DROP:
+        p->active->drop_packet(p);
+        p->active->set_drop_reason("ips");
         alert(p, otn);
         SetTags(p, otn, event_id);
         break;
 
-    case RULE_TYPE__BLOCK:
-        Active::block_session(p);
+    case Actions::BLOCK:
+        p->active->block_session(p);
+        p->active->set_drop_reason("ips");
         alert(p, otn);
         SetTags(p, otn, event_id);
         break;
 
-    case RULE_TYPE__RESET:
-        Active::reset_session(p);
+    case Actions::RESET:
+        p->active->reset_session(p, get_ips_policy()->action[action]);
         alert(p, otn);
         SetTags(p, otn, event_id);
         break;
@@ -142,20 +144,20 @@ void action_execute(RuleType action, Packet* p, OptTreeNode* otn, uint16_t event
     }
 }
 
-void action_apply(RuleType action, Packet* p)
+void Actions::apply(Actions::Type action, Packet* p)
 {
     switch ( action )
     {
-    case RULE_TYPE__DROP:
-        Active::drop_packet(p);
+    case Actions::DROP:
+        p->active->drop_packet(p);
         break;
 
-    case RULE_TYPE__BLOCK:
-        Active::block_session(p);
+    case Actions::BLOCK:
+        p->active->block_session(p);
         break;
 
-    case RULE_TYPE__RESET:
-        Active::reset_session(p);
+    case Actions::RESET:
+        p->active->reset_session(p, get_ips_policy()->action[action]);
         break;
 
     default:

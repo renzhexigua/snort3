@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,7 +20,12 @@
 #ifndef STREAM_ICMP_H
 #define STREAM_ICMP_H
 
-#include "main/snort_types.h"
+#include <cstdint>
+
+namespace snort
+{
+class Inspector;
+}
 
 struct StreamIcmpConfig
 {
@@ -28,6 +33,8 @@ struct StreamIcmpConfig
 
     StreamIcmpConfig();
 };
+
+StreamIcmpConfig* get_icmp_cfg(snort::Inspector*);
 
 #endif
 

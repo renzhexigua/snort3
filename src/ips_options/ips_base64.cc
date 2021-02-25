@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 1998-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -19,33 +19,22 @@
 
 /* ips_base64.cc */
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <ctype.h>
-#include <errno.h>
 
-#include "snort_types.h"
-#include "snort_bounds.h"
-#include "protocols/packet.h"
-#include "parser.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "profiler.h"
-#include "utils/sf_base64decode.h"
-#include "detection/detection_defines.h"
-#include "detection/detection_util.h"
+#include "detection/detection_engine.h"
+#include "detection/treenodes.h"
+#include "hash/hash_key_operations.h"
 #include "framework/cursor.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
-#include "hash/sfhashfcn.h"
+#include "log/messages.h"
+#include "mime/decode_b64.h"
+#include "profiler/profiler.h"
+#include "utils/util_unfold.h"
 
-static THREAD_LOCAL uint8_t base64_decode_buf[DECODE_BLEN];
-static THREAD_LOCAL uint32_t base64_decode_size;
+using namespace snort;
 
 static THREAD_LOCAL ProfileStats base64PerfStats;
 
@@ -60,25 +49,24 @@ static THREAD_LOCAL ProfileStats base64PerfStats;
 
 #define BASE64DECODE_RELATIVE_FLAG 0x01
 
-typedef struct _Base64DecodeData
+struct Base64DecodeData
 {
     uint32_t bytes_to_decode;
     uint32_t offset;
     uint8_t flags;
-}Base64DecodeData;
+};
 
 class Base64DecodeOption : public IpsOption
 {
 public:
-    Base64DecodeOption(const Base64DecodeData& c) : IpsOption(s_name)
+    Base64DecodeOption(const Base64DecodeData& c) : IpsOption(s_name, RULE_OPTION_TYPE_BUFFER_USE)
     { config = c; }
 
-    ~Base64DecodeOption() { }
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     Base64DecodeData config;
@@ -90,26 +78,25 @@ private:
 
 uint32_t Base64DecodeOption::hash() const
 {
-    uint32_t a,b,c;
-
-    a = config.bytes_to_decode;
-    b = config.offset;
-    c = config.flags;
+    uint32_t a = config.bytes_to_decode;
+    uint32_t b = config.offset;
+    uint32_t c = config.flags;
 
     mix(a,b,c);
-    mix_str(a,b,c,get_name());
+    a += IpsOption::hash();
 
-    final(a,b,c);
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool Base64DecodeOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(s_name, ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    Base64DecodeOption& rhs = (Base64DecodeOption&)ips;
+    const Base64DecodeOption& rhs = (const Base64DecodeOption&)ips;
     const Base64DecodeData* left = &config;
     const Base64DecodeData* right = &rhs.config;
 
@@ -123,19 +110,15 @@ bool Base64DecodeOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int Base64DecodeOption::eval(Cursor& c, Packet*)
+IpsOption::EvalStatus Base64DecodeOption::eval(Cursor& c, Packet* p)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
-    const uint8_t* start_ptr;
-    unsigned size;
-    uint8_t base64_buf[DECODE_BLEN];
-    uint32_t base64_size =0;
+    RuleProfile profile(base64PerfStats);
+    DataBuffer& base64_decode_buffer = DetectionEngine::get_alt_buffer(p);
+    base64_decode_buffer.len = 0;
 
-    PROFILE_VARS;
-    MODULE_PROFILE_START(base64PerfStats);
-
-    base64_decode_size = 0;
     Base64DecodeData* idx = (Base64DecodeData*)&config;
+    const uint8_t* start_ptr = nullptr;
+    unsigned size = 0;
 
     if (idx->flags & BASE64DECODE_RELATIVE_FLAG)
     {
@@ -149,34 +132,27 @@ int Base64DecodeOption::eval(Cursor& c, Packet*)
     }
 
     if ( idx->offset >= size )
-    {
-        MODULE_PROFILE_END(base64PerfStats);
-        return rval;
-    }
+        return NO_MATCH;
+
     start_ptr += idx->offset;
     size -= idx->offset;
 
-    if (sf_unfold_header(start_ptr, size, base64_buf, sizeof(base64_buf), &base64_size, 0, 0) != 0)
-    {
-        MODULE_PROFILE_END(base64PerfStats);
-        return rval;
-    }
+    uint8_t base64_buf[DECODE_BLEN];
+    uint32_t base64_size = 0;
+
+    if (sf_unfold_header(start_ptr, size, base64_buf, sizeof(base64_buf), &base64_size, 0, nullptr) != 0)
+        return NO_MATCH;
 
     if (idx->bytes_to_decode && (base64_size > idx->bytes_to_decode))
     {
         base64_size = idx->bytes_to_decode;
     }
 
-    if (sf_base64decode(base64_buf, base64_size, (uint8_t*)base64_decode_buf,
-        sizeof(base64_decode_buf), &base64_decode_size) != 0)
-    {
-        MODULE_PROFILE_END(base64PerfStats);
-        return rval;
-    }
+    if (sf_base64decode(base64_buf, base64_size, base64_decode_buffer.data,
+        sizeof(base64_decode_buffer.data), &base64_decode_buffer.len) != 0)
+        return NO_MATCH;
 
-    MODULE_PROFILE_END(base64PerfStats);
-
-    return DETECTION_OPTION_MATCH;
+    return MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -185,14 +161,14 @@ int Base64DecodeOption::eval(Cursor& c, Packet*)
 
 static const Parameter s_params[] =
 {
-    { "bytes", Parameter::PT_INT, "1:", nullptr,
-      "Number of base64 encoded bytes to decode." },
+    { "bytes", Parameter::PT_INT, "1:max32", nullptr,
+      "number of base64 encoded bytes to decode" },
 
-    { "offset", Parameter::PT_INT, "0:", "0",
-      "Bytes past start of buffer to start decoding." },
+    { "offset", Parameter::PT_INT, "0:max32", "0",
+      "bytes past start of buffer to start decoding" },
 
     { "relative", Parameter::PT_IMPLIED, nullptr, nullptr,
-      "Apply offset to cursor instead of start of buffer." },
+      "apply offset to cursor instead of start of buffer" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -208,7 +184,11 @@ public:
     ProfileStats* get_profile() const override
     { return &base64PerfStats; }
 
-    Base64DecodeData data;
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    Base64DecodeData data = {};
 };
 
 bool B64DecodeModule::begin(const char*, int, SnortConfig*)
@@ -220,10 +200,10 @@ bool B64DecodeModule::begin(const char*, int, SnortConfig*)
 bool B64DecodeModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("bytes") )
-        data.bytes_to_decode = v.get_long();
+        data.bytes_to_decode = v.get_uint32();
 
     else if ( v.is("offset") )
-        data.offset = v.get_long();
+        data.offset = v.get_uint32();
 
     else if ( v.is("relative") )
         data.flags |= BASE64DECODE_RELATIVE_FLAG;
@@ -294,32 +274,25 @@ static const IpsApi base64_decode_api =
 class Base64DataOption : public IpsOption
 {
 public:
-    Base64DataOption() : IpsOption(s_data_name) { }
+    Base64DataOption() : IpsOption(s_data_name, RULE_OPTION_TYPE_BUFFER_SET) { }
 
     CursorActionType get_cursor_type() const override
     { return CAT_SET_OTHER; }
 
-    int eval(Cursor&, Packet*);
+    EvalStatus eval(Cursor&, Packet*) override;
 };
 
-int Base64DataOption::eval(Cursor& c, Packet*)
+IpsOption::EvalStatus Base64DataOption::eval(Cursor& c, Packet* p)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
-    PROFILE_VARS;
+    RuleProfile profile(base64PerfStats);
+    const DataBuffer& base64_decode_buffer = DetectionEngine::get_alt_buffer(p);
 
-    MODULE_PROFILE_START(base64PerfStats);
+    if ( !base64_decode_buffer.len )
+        return NO_MATCH;
 
-    if ( !base64_decode_size )
-    {
-        MODULE_PROFILE_END(base64PerfStats);
-        return rval;
-    }
+    c.set(s_data_name, base64_decode_buffer.data, base64_decode_buffer.len);
 
-    c.set(s_data_name, base64_decode_buf, base64_decode_size);
-    rval = DETECTION_OPTION_MATCH;
-
-    MODULE_PROFILE_END(base64PerfStats);
-    return rval;
+    return MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -374,13 +347,12 @@ static const IpsApi base64_data_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_base64[] =
+#endif
 {
     &base64_decode_api.base,
     &base64_data_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_base64_decode = &base64_decode_api.base;
-const BaseApi* ips_base64_data = &base64_data_api.base;
-#endif
 

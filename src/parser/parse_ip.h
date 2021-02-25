@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,12 +20,9 @@
 #ifndef PARSE_IP_H
 #define PARSE_IP_H
 
-#include <sys/types.h>
-#include "snort_types.h"
-
 struct sfip_var_t;
 
-sfip_var_t* sfip_var_from_string(const char*);
+sfip_var_t* sfip_var_from_string(const char* addr, const char* caller);
 
 #endif
 

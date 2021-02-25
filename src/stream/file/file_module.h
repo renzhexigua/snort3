@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,16 +20,16 @@
 #ifndef FILE_MODULE_H
 #define FILE_MODULE_H
 
-#include "snort_types.h"
 #include "framework/module.h"
-#include "main/thread.h"
-#include "stream/stream.h"
 
+namespace snort
+{
 struct SnortConfig;
+}
 
 extern const PegInfo file_pegs[];
 extern THREAD_LOCAL struct FileStats file_stats;
-extern THREAD_LOCAL ProfileStats file_perf_stats;
+extern THREAD_LOCAL snort::ProfileStats file_perf_stats;
 
 //-------------------------------------------------------------------------
 // stream_file module
@@ -38,20 +38,21 @@ extern THREAD_LOCAL ProfileStats file_perf_stats;
 #define MOD_NAME "stream_file"
 #define MOD_HELP "stream inspector for file flow tracking and processing"
 
-class StreamFileModule : public Module
+class StreamFileModule : public snort::Module
 {
 public:
     StreamFileModule();
-    ~StreamFileModule();
 
-#if 0
-    const PegInfo* get_pegs() const override;
-    PegCount* get_counts() const override;
-#endif
+    bool begin(const char*, int, snort::SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
 
-    bool begin(const char*, int, SnortConfig*) override;
-    bool set(const char*, Value&, SnortConfig*) override;
+    Usage get_usage() const override
+    { return INSPECT; }
 
+    bool is_bindable() const override
+    { return true; }
+
+public:
     bool upload;
 };
 

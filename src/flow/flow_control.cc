@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -16,251 +16,141 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "flow/flow_control.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <assert.h>
-#include <arpa/inet.h>
+#include <daq_common.h>
 
-#include "flow/flow_cache.h"
-#include "flow/expect_cache.h"
-#include "flow/session.h"
-#include "packet_io/active.h"
-#include "packet_io/sfdaq.h"
-#include "utils/stats.h"
-#include "protocols/layer.h"
-#include "protocols/vlan.h"
+#include "flow_control.h"
+
+#include "detection/detection_engine.h"
+#include "main/snort_config.h"
 #include "managers/inspector_manager.h"
-#include "sfip/sf_ip.h"
+#include "memory/memory_cap.h"
+#include "packet_io/active.h"
+#include "packet_tracer/packet_tracer.h"
+#include "protocols/icmp4.h"
 #include "protocols/tcp.h"
 #include "protocols/udp.h"
-#include "protocols/icmp4.h"
-#include "protocols/icmp6.h"
-#include "detection/detect.h"
+#include "protocols/vlan.h"
+#include "stream/stream.h"
+#include "utils/util.h"
 
-FlowControl::FlowControl()
+#include "expect_cache.h"
+#include "flow_cache.h"
+#include "ha.h"
+#include "session.h"
+
+using namespace snort;
+
+FlowControl::FlowControl(const FlowCacheConfig& fc)
 {
-    ip_cache = nullptr;
-    icmp_cache = nullptr;
-    tcp_cache = nullptr;
-    udp_cache = nullptr;
-    user_cache = nullptr;
-    file_cache = nullptr;
-    exp_cache = nullptr;
-
-    ip_mem = icmp_mem = nullptr;
-    tcp_mem = udp_mem = nullptr;
-    user_mem = file_mem = nullptr;
-
-    get_ip = get_icmp = nullptr;
-    get_tcp = get_udp = nullptr;
-    get_user = get_file = nullptr;
+    cache = new FlowCache(fc);
 }
 
 FlowControl::~FlowControl()
 {
-    delete ip_cache;
-    delete icmp_cache;
-    delete tcp_cache;
-    delete udp_cache;
-    delete user_cache;
-    delete file_cache;
-    delete exp_cache;
+    DetectionEngine de;
 
-    free(ip_mem);
-    free(icmp_mem);
-    free(tcp_mem);
-    free(udp_mem);
-    free(user_mem);
-    free(file_mem);
+    delete cache;
+    snort_free(mem);
+    delete exp_cache;
 }
 
 //-------------------------------------------------------------------------
 // count foo
 //-------------------------------------------------------------------------
 
-static THREAD_LOCAL PegCount ip_count = 0;
-static THREAD_LOCAL PegCount icmp_count = 0;
-static THREAD_LOCAL PegCount tcp_count = 0;
-static THREAD_LOCAL PegCount udp_count = 0;
-static THREAD_LOCAL PegCount user_count = 0;
-static THREAD_LOCAL PegCount file_count = 0;
+PegCount FlowControl::get_total_prunes() const
+{ return cache->get_total_prunes(); }
 
-uint32_t FlowControl::max_flows(PktType proto)
-{
-    FlowCache* cache = get_cache(proto);
+PegCount FlowControl::get_prunes(PruneReason reason) const
+{ return cache->get_prunes(reason); }
 
-    if ( cache )
-        return cache->get_max_flows();
+PegCount FlowControl::get_total_deletes() const
+{ return cache->get_total_deletes(); }
 
-    return 0;
-}
-
-PegCount FlowControl::get_prunes (PktType proto)
-{
-    FlowCache* cache = get_cache(proto);
-    return cache ? cache->get_prunes() : 0;
-}
-
-PegCount FlowControl::get_flows(PktType proto)
-{
-    switch ( proto )
-    {
-    case PktType::IP:   return ip_count;
-    case PktType::ICMP: return icmp_count;
-    case PktType::TCP:  return tcp_count;
-    case PktType::UDP:  return udp_count;
-    case PktType::PDU: return user_count;
-    case PktType::FILE: return file_count;
-    default:            return 0;
-    }
-}
+PegCount FlowControl::get_deletes(FlowDeleteState state) const
+{ return cache->get_deletes(state); }
 
 void FlowControl::clear_counts()
 {
-    ip_count = icmp_count = 0;
-    tcp_count = udp_count = 0;
-    user_count = file_count = 0;
-
-    FlowCache* cache;
-
-    if ( (cache = get_cache(PktType::IP)) )
-        cache->reset_prunes();
-
-    if ( (cache = get_cache(PktType::ICMP)) )
-        cache->reset_prunes();
-
-    if ( (cache = get_cache(PktType::TCP)) )
-        cache->reset_prunes();
-
-    if ( (cache = get_cache(PktType::UDP)) )
-        cache->reset_prunes();
-
-    if ( (cache = get_cache(PktType::PDU)) )
-        cache->reset_prunes();
-
-    if ( (cache = get_cache(PktType::FILE)) )
-        cache->reset_prunes();
-}
-
-Memcap& FlowControl::get_memcap (PktType proto)
-{
-    static Memcap dummy;
-    FlowCache* cache = get_cache(proto);
-    assert(cache);  // FIXIT-L dummy is a hack
-    return cache ? cache->get_memcap() : dummy;
+    cache->reset_stats();
+    num_flows = 0;
 }
 
 //-------------------------------------------------------------------------
 // cache foo
 //-------------------------------------------------------------------------
 
-inline FlowCache* FlowControl::get_cache (PktType proto)
-{
-    switch ( proto )
-    {
-    case PktType::IP:   return ip_cache;
-    case PktType::ICMP: return icmp_cache;
-    case PktType::TCP:  return tcp_cache;
-    case PktType::UDP:  return udp_cache;
-    case PktType::PDU: return user_cache;
-    case PktType::FILE: return file_cache;
-    default:            return nullptr;
-    }
-}
+void FlowControl::set_flow_cache_config(const FlowCacheConfig& cfg)
+{ cache->set_flow_cache_config(cfg); }
+
+const FlowCacheConfig& FlowControl::get_flow_cache_config() const
+{ return cache->get_flow_cache_config(); }
+
+unsigned FlowControl::get_flows_allocated() const
+{ return cache->get_flows_allocated(); }
 
 Flow* FlowControl::find_flow(const FlowKey* key)
-{
-    FlowCache* cache = get_cache((PktType)key->protocol);
-
-    if ( cache )
-        return cache->find(key);
-
-    return NULL;
-}
+{ return cache->find(key); }
 
 Flow* FlowControl::new_flow(const FlowKey* key)
+{ return cache->allocate(key); }
+
+void FlowControl::release_flow(const FlowKey* key)
 {
-    FlowCache* cache = get_cache((PktType)key->protocol);
-
-    if ( !cache )
-        return NULL;
-
-    return cache->get(key);
+    if ( auto flow = cache->find(key) )
+        cache->release(flow, PruneReason::HA);
 }
 
-// FIXIT-L cache* can be put in flow so that lookups by
-// protocol are obviated for existing / initialized flows
-void FlowControl::delete_flow(const FlowKey* key)
+void FlowControl::release_flow(Flow* flow, PruneReason reason)
+{ cache->release(flow, reason); }
+
+void FlowControl::purge_flows ()
+{ cache->purge(); }
+
+unsigned FlowControl::delete_flows(unsigned num_to_delete)
+{ return cache->delete_flows(num_to_delete); }
+
+// hole for memory manager/prune handler
+bool FlowControl::prune_one(PruneReason reason, bool do_cleanup)
+{ return cache->prune_one(reason, do_cleanup); }
+
+void FlowControl::timeout_flows(time_t cur_time)
 {
-    FlowCache* cache = get_cache((PktType)key->protocol);
-
-    if ( !cache )
-        return;
-
-    Flow* flow = cache->find(key);
-
-    if ( flow )
-        cache->release(flow, "ha sync");
+    cache->timeout(1, cur_time);
 }
 
-void FlowControl::delete_flow(Flow* flow, const char* why)
+void FlowControl::preemptive_cleanup()
 {
-    FlowCache* cache = get_cache(flow->protocol);
-
-    if ( cache )
-        cache->release(flow, why);
-}
-
-void FlowControl::purge_flows (PktType proto)
-{
-    FlowCache* cache = get_cache(proto);
-
-    if ( cache )
-        cache->purge();
-}
-
-void FlowControl::prune_flows (PktType proto, Packet* p)
-{
-    FlowCache* cache = get_cache(proto);
-
-    if ( !cache )
-        return;
-
-    // smack the older timed out flows
-    if (!cache->prune_stale(p->pkth->ts.tv_sec, (Flow*)p->flow))
+    // FIXIT-RC is there a possibility of this looping forever?
+    while ( memory::MemoryCap::over_threshold() )
     {
-        // if no luck, try the memcap
-        cache->prune_excess(true, (Flow*)p->flow);
+        if ( !prune_one(PruneReason::PREEMPTIVE, true) )
+            break;
     }
 }
 
-void FlowControl::timeout_flows(uint32_t flowCount, time_t cur_time)
+Flow* FlowControl::stale_flow_cleanup(FlowCache* cache, Flow* flow, Packet* p)
 {
-    Active::suspend();
+    if ( p->pkth->flags & DAQ_PKT_FLAG_NEW_FLOW )
+    {
+        if (PacketTracer::is_active())
+            PacketTracer::log("Session: deleting snort session, reason: stale and not cleaned \n");
 
-    if ( ip_cache )
-        ip_cache->timeout(flowCount, cur_time);
+        ActiveSuspendContext act_susp(Active::ASP_TIMEOUT);
 
-    //if ( icmp_cache )
-    //icmp_cache does not need cleaning
+        {
+            PacketTracerSuspend pt_susp;
 
-    if ( tcp_cache )
-        tcp_cache->timeout(flowCount, cur_time);
+            cache->release(flow, PruneReason::STALE);
+            flow = nullptr;
+        }
+    }
 
-    if ( udp_cache )
-        udp_cache->timeout(flowCount, cur_time);
-
-    if ( user_cache )
-        user_cache->timeout(flowCount, cur_time);
-
-    if ( file_cache )
-        file_cache->timeout(flowCount, cur_time);
-
-    Active::resume();
+    return flow;
 }
 
 //-------------------------------------------------------------------------
@@ -272,9 +162,8 @@ void FlowControl::set_key(FlowKey* key, Packet* p)
     const ip::IpApi& ip_api = p->ptrs.ip_api;
     uint32_t mplsId;
     uint16_t vlanId;
-    uint16_t addressSpaceId;
-    uint8_t type = (uint8_t)p->type();
-    uint8_t proto = (uint8_t)p->get_ip_proto_next();
+    PktType type = p->type();
+    IpProtocol ip_proto = p->get_ip_proto_next();
 
     if ( p->proto_bits & PROTO_BIT__VLAN )
         vlanId = layer::get_vlan_layer(p)->vid();
@@ -286,26 +175,20 @@ void FlowControl::set_key(FlowKey* key, Packet* p)
     else
         mplsId = 0;
 
-#ifdef HAVE_DAQ_ADDRESS_SPACE_ID
-    addressSpaceId = DAQ_GetAddressSpaceID(p->pkth);
-#else
-    addressSpaceId = 0;
-#endif
-
     if ( (p->ptrs.decode_flags & DECODE_FRAG) )
     {
-        key->init(type, proto, ip_api.get_src(), ip_api.get_dst(), ip_api.id(),
-            vlanId, mplsId, addressSpaceId);
+        key->init(p->context->conf, type, ip_proto, ip_api.get_src(),
+            ip_api.get_dst(), ip_api.id(), vlanId, mplsId, *p->pkth);
     }
-    else if ( type == (uint8_t)PktType::ICMP )
+    else if ( type == PktType::ICMP )
     {
-        key->init(type, proto, ip_api.get_src(), p->ptrs.icmph->type, ip_api.get_dst(), 0,
-            vlanId, mplsId, addressSpaceId);
+        key->init(p->context->conf, type, ip_proto, ip_api.get_src(), p->ptrs.icmph->type,
+            ip_api.get_dst(), 0, vlanId, mplsId, *p->pkth);
     }
     else
     {
-        key->init(type, proto, ip_api.get_src(), p->ptrs.sp, ip_api.get_dst(), p->ptrs.dp,
-            vlanId, mplsId, addressSpaceId);
+        key->init(p->context->conf, type, ip_proto, ip_api.get_src(), p->ptrs.sp,
+            ip_api.get_dst(), p->ptrs.dp, vlanId, mplsId, *p->pkth);
     }
 }
 
@@ -315,458 +198,344 @@ static bool is_bidirectional(const Flow* flow)
     return (flow->ssn_state.session_flags & bidir) == bidir;
 }
 
-// FIXIT-L init_roles* should take const Packet*
-static void init_roles_ip(Packet* p, Flow* flow)
+static void init_roles_ip(const Packet* p, Flow* flow)
 {
-    flow->ssn_state.direction = FROM_SENDER;
-    sfip_copy(flow->client_ip, p->ptrs.ip_api.get_src());
-    sfip_copy(flow->server_ip, p->ptrs.ip_api.get_dst());
+    flow->ssn_state.direction = FROM_CLIENT;
+    flow->client_ip = *p->ptrs.ip_api.get_src();
+    flow->server_ip = *p->ptrs.ip_api.get_dst();
 }
 
-static void init_roles_tcp(Packet* p, Flow* flow)
+static bool init_roles_tcp(const Packet* p, Flow* flow)
 {
+    bool swapped;
     if ( p->ptrs.tcph->is_syn_only() )
     {
         flow->ssn_state.direction = FROM_CLIENT;
-        sfip_copy(flow->client_ip, p->ptrs.ip_api.get_src());
-        flow->client_port = ntohs(p->ptrs.tcph->th_sport);
-        sfip_copy(flow->server_ip, p->ptrs.ip_api.get_dst());
-        flow->server_port = ntohs(p->ptrs.tcph->th_dport);
+        flow->client_ip = *p->ptrs.ip_api.get_src();
+        flow->client_port = p->ptrs.sp;
+        flow->server_ip = *p->ptrs.ip_api.get_dst();
+        flow->server_port = p->ptrs.dp;
+        swapped = false;
     }
     else if ( p->ptrs.tcph->is_syn_ack() )
     {
         flow->ssn_state.direction = FROM_SERVER;
-        sfip_copy(flow->client_ip, p->ptrs.ip_api.get_dst());
-        flow->client_port = ntohs(p->ptrs.tcph->th_dport);
-        sfip_copy(flow->server_ip, p->ptrs.ip_api.get_src());
-        flow->server_port = ntohs(p->ptrs.tcph->th_sport);
+        flow->client_ip = *p->ptrs.ip_api.get_dst();
+        flow->client_port = p->ptrs.dp;
+        flow->server_ip = *p->ptrs.ip_api.get_src();
+        flow->server_port = p->ptrs.sp;
+        swapped = true;
     }
     else if (p->ptrs.sp > p->ptrs.dp)
     {
         flow->ssn_state.direction = FROM_CLIENT;
-        sfip_copy(flow->client_ip, p->ptrs.ip_api.get_src());
-        flow->client_port = ntohs(p->ptrs.tcph->th_sport);
-        sfip_copy(flow->server_ip, p->ptrs.ip_api.get_dst());
-        flow->server_port = ntohs(p->ptrs.tcph->th_dport);
+        flow->client_ip = *p->ptrs.ip_api.get_src();
+        flow->client_port = p->ptrs.sp;
+        flow->server_ip = *p->ptrs.ip_api.get_dst();
+        flow->server_port = p->ptrs.dp;
+        swapped = false;
     }
     else
     {
         flow->ssn_state.direction = FROM_SERVER;
-        sfip_copy(flow->client_ip, p->ptrs.ip_api.get_dst());
-        flow->client_port = ntohs(p->ptrs.tcph->th_dport);
-        sfip_copy(flow->server_ip, p->ptrs.ip_api.get_src());
-        flow->server_port = ntohs(p->ptrs.tcph->th_sport);
+        flow->client_ip = *p->ptrs.ip_api.get_dst();
+        flow->client_port = p->ptrs.dp;
+        flow->server_ip = *p->ptrs.ip_api.get_src();
+        flow->server_port = p->ptrs.sp;
+        swapped = true;
     }
+    return swapped;
 }
 
-static void init_roles_udp(Packet* p, Flow* flow)
+static void init_roles_udp(const Packet* p, Flow* flow)
 {
-    flow->ssn_state.direction = FROM_SENDER;
-    sfip_copy(flow->client_ip, p->ptrs.ip_api.get_src());
-    flow->client_port = ntohs(p->ptrs.udph->uh_sport);
-    sfip_copy(flow->server_ip, p->ptrs.ip_api.get_dst());
-    flow->server_port = ntohs(p->ptrs.udph->uh_dport);
+    flow->ssn_state.direction = FROM_CLIENT;
+    flow->client_ip = *p->ptrs.ip_api.get_src();
+    flow->client_port = p->ptrs.sp;
+    flow->server_ip = *p->ptrs.ip_api.get_dst();
+    flow->server_port = p->ptrs.dp;
 }
 
-static void init_roles_user(Packet* p, Flow* flow)
+static bool init_roles_user(const Packet* p, Flow* flow)
 {
+    bool swapped;
     if ( p->ptrs.decode_flags & DECODE_C2S )
     {
         flow->ssn_state.direction = FROM_CLIENT;
-        sfip_copy(flow->client_ip, p->ptrs.ip_api.get_src());
+        flow->client_ip = *p->ptrs.ip_api.get_src();
         flow->client_port = p->ptrs.sp;
-        sfip_copy(flow->server_ip, p->ptrs.ip_api.get_dst());
+        flow->server_ip = *p->ptrs.ip_api.get_dst();
         flow->server_port = p->ptrs.dp;
+        swapped = false;
     }
     else
     {
         flow->ssn_state.direction = FROM_SERVER;
-        sfip_copy(flow->client_ip, p->ptrs.ip_api.get_dst());
+        flow->client_ip = *p->ptrs.ip_api.get_dst();
         flow->client_port = p->ptrs.dp;
-        sfip_copy(flow->server_ip, p->ptrs.ip_api.get_src());
+        flow->server_ip = *p->ptrs.ip_api.get_src();
         flow->server_port = p->ptrs.sp;
+        swapped = true;
     }
+    return swapped;
 }
 
+// FIXIT-L init_roles should take const Packet*
 static void init_roles(Packet* p, Flow* flow)
 {
-    switch ( flow->protocol )
+    bool swapped = false;
+    switch ( flow->pkt_type )
     {
-    case PktType::IP:
-    case PktType::ICMP:
-        init_roles_ip(p, flow);
-        break;
+        case PktType::IP:
+        case PktType::ICMP:
+            init_roles_ip(p, flow);
+            break;
 
-    case PktType::TCP:
-        init_roles_tcp(p, flow);
-        break;
+        case PktType::TCP:
+            swapped = init_roles_tcp(p, flow);
+            break;
 
-    case PktType::UDP:
-        init_roles_udp(p, flow);
-        break;
+        case PktType::UDP:
+            init_roles_udp(p, flow);
+            break;
 
-    case PktType::PDU:
-    case PktType::FILE:
-        init_roles_user(p, flow);
-        break;
+        case PktType::PDU:
+        case PktType::FILE:
+            swapped = init_roles_user(p, flow);
+            break;
 
-    default:
-        break;
+        default:
+            break;
     }
+
+    if (swapped)
+    {
+        flow->client_intf = p->pkth->egress_index;
+        flow->server_intf = p->pkth->ingress_index;
+        flow->client_group = p->pkth->egress_group;
+        flow->server_group = p->pkth->ingress_group;
+    }
+    else
+    {
+        flow->client_intf = p->pkth->ingress_index;
+        flow->server_intf = p->pkth->egress_index;
+        flow->client_group = p->pkth->ingress_group;
+        flow->server_group = p->pkth->egress_group;
+    }
+
+    flow->flags.app_direction_swapped = false;
+    if ( flow->ssn_state.direction == FROM_CLIENT )
+        p->packet_flags |= PKT_FROM_CLIENT;
+    else
+        p->packet_flags |= PKT_FROM_SERVER;
+}
+
+//-------------------------------------------------------------------------
+// proto
+//-------------------------------------------------------------------------
+
+void FlowControl::init_proto(PktType type, InspectSsnFunc get_ssn)
+{
+    assert(get_ssn);
+
+    get_proto_session[to_utype(type)] = get_ssn;
+}
+
+// FIXIT-P apply more filtering logic here, eg require_3whs
+// delegate to stream inspectors but that requires binding
+// can't use session because goal is to avoid instantiation
+static bool want_flow(PktType type, Packet* p)
+{
+    if ( type != PktType::TCP )
+        return true;
+
+    if ( p->is_retry() )
+    {
+        // Do not start a new flow from a retry packet.
+        p->active->drop_packet(p);
+        p->disable_inspect = true;
+        return false;
+    }
+
+    if ( p->ptrs.tcph->is_rst() )
+        // guessing direction based on ports is misleading
+        return false;
+
+    if ( !p->ptrs.tcph->is_syn_only() or p->context->conf->track_on_syn() )
+        return true;
+
+    const unsigned DECODE_TCP_HS = DECODE_TCP_MSS | DECODE_TCP_TS | DECODE_TCP_WS;
+
+    if ( (p->ptrs.decode_flags & DECODE_TCP_HS) or p->dsize )
+        return true;
+
+    p->packet_flags |= PKT_FROM_CLIENT;
+    return false;
+}
+
+bool FlowControl::process(PktType type, Packet* p, bool* new_flow)
+{
+    if ( !get_proto_session[to_utype(type)] )
+        return false;
+
+    FlowKey key;
+    set_key(&key, p);
+    Flow* flow = cache->find(&key);
+
+    if (flow)
+        flow = stale_flow_cleanup(cache, flow, p);
+
+    if ( !flow )
+    {
+        flow = HighAvailabilityManager::import(*p, key);
+
+        if ( !flow )
+        {
+            if ( !want_flow(type, p) )
+                return true;
+
+            flow = cache->allocate(&key);
+
+            if ( !flow )
+                return true;
+
+            if ( new_flow )
+                *new_flow = true;
+        }
+    }
+
+    if ( !flow->session )
+    {
+        flow->init(type);
+        flow->session = get_proto_session[to_utype(type)](flow);
+    }
+
+    num_flows += process(flow, p);
+
+    // FIXIT-M refactor to unlink_uni immediately after session
+    // is processed by inspector manager (all flows)
+    if ( flow->next && is_bidirectional(flow) )
+        cache->unlink_uni(flow);
+
+    return true;
 }
 
 unsigned FlowControl::process(Flow* flow, Packet* p)
 {
     unsigned news = 0;
 
-    p->flow = flow;
+    flow->previous_ssn_state = flow->ssn_state;
 
-    if ( flow->flow_state )
-        set_policies(snort_conf, flow->policy_id);
+    p->flow = flow;
+    p->disable_inspect = flow->is_inspection_disabled();
+
+    last_pkt_type = p->type();
+    preemptive_cleanup();
+
+    // If this code is executed on a flow in SETUP state, it will result in a packet from both
+    // client and server on packets from 0.0.0.0 or ::
+    if ( flow->flow_state != Flow::FlowState::SETUP )
+    {
+        flow->set_direction(p);
+        // This call can reset the flow state to SETUP in lazy flow timeout cases
+        flow->session->precheck(p);
+    }
+
+    if ( flow->flow_state != Flow::FlowState::SETUP )
+    {
+        const SnortConfig* sc = SnortConfig::get_conf();
+        set_inspection_policy(sc, flow->inspection_policy_id);
+        set_ips_policy(sc, flow->ips_policy_id);
+        set_network_policy(sc, flow->network_policy_id);
+        p->filtering_state = flow->filtering_state;
+    }
 
     else
     {
+        if (PacketTracer::is_active())
+            PacketTracer::log("Session: new snort session\n");
+
         init_roles(p, flow);
-        Inspector* b = InspectorManager::get_binder();
 
-        if ( b )
-            b->eval(p);
+        // process expected flows
+        check_expected_flow(flow, p);
 
-        if ( !b || (flow->flow_state == Flow::INSPECT &&
-            (!flow->ssn_client || !flow->session->setup(p))) )
-            flow->set_state(Flow::ALLOW);
+        DataBus::publish(FLOW_STATE_SETUP_EVENT, p);
+
+        if ( flow->flow_state == Flow::FlowState::SETUP ||
+            (flow->flow_state == Flow::FlowState::INSPECT &&
+             (!flow->ssn_client || !flow->session->setup(p))) )
+            flow->set_state(Flow::FlowState::ALLOW);
 
         ++news;
+        flow->flowstats.start_time = p->pkth->ts;
+        flow->set_client_initiate(p);
     }
-    // FIXIT-L service should be deleted from packet
-    // and obtained directly from flow
-    p->application_protocol_ordinal = flow->ssn_state.application_protocol;
-    flow->set_direction(p);
+
+    // This requires the packet direction to be set
+    if ( p->proto_bits & PROTO_BIT__MPLS )
+        flow->set_mpls_layer_per_dir(p);
 
     switch ( flow->flow_state )
     {
-    case Flow::SETUP:
-        flow->set_state(Flow::ALLOW);
+    case Flow::FlowState::SETUP:
+        flow->set_state(Flow::FlowState::ALLOW);
         break;
 
-    case Flow::INSPECT:
+    case Flow::FlowState::INSPECT:
         assert(flow->ssn_client);
         assert(flow->ssn_server);
-        flow->session->process(p);
         break;
 
-    case Flow::ALLOW:
+    case Flow::FlowState::ALLOW:
         if ( news )
-            stream.stop_inspection(flow, p, SSN_DIR_BOTH, -1, 0);
+            Stream::stop_inspection(flow, p, SSN_DIR_BOTH, -1, 0);
         else
-            DisableInspection(p);
-
-        p->ptrs.decode_flags |= DECODE_PKT_TRUST;
+            DetectionEngine::disable_all(p);
         break;
 
-    case Flow::BLOCK:
+    case Flow::FlowState::BLOCK:
         if ( news )
-            stream.drop_traffic(flow, SSN_DIR_BOTH);
+            Stream::drop_traffic(p, SSN_DIR_BOTH);
         else
-            Active::block_again();
+            p->active->block_again();
 
-        DisableInspection(p);
+        p->active->set_drop_reason("session");
+        DetectionEngine::disable_all(p);
+        if ( PacketTracer::is_active() )
+            PacketTracer::log("Session: session has been blocked, drop\n");
         break;
 
-    case Flow::RESET:
+    case Flow::FlowState::RESET:
         if ( news )
-            stream.drop_traffic(flow, SSN_DIR_BOTH);
+            Stream::drop_traffic(p, SSN_DIR_BOTH);
         else
-            Active::reset_again();
+            p->active->reset_again();
 
-        stream.blocked_session(flow, p);
-        DisableInspection(p);
+        Stream::blocked_flow(p);
+        p->active->set_drop_reason("session");
+        DetectionEngine::disable_all(p);
+        if ( PacketTracer::is_active() )
+            PacketTracer::log("Session: session has been reset\n");
         break;
     }
 
+    update_stats(flow, p);
     return news;
 }
 
-//-------------------------------------------------------------------------
-// ip
-//-------------------------------------------------------------------------
-
-void FlowControl::init_ip(
-    const FlowConfig& fc, InspectSsnFunc get_ssn)
+void FlowControl::update_stats(Flow* flow, Packet* p)
 {
-    if ( !fc.max_sessions || !get_ssn )
-        return;
-
-    ip_cache = new FlowCache(fc, 5, 0);
-
-    ip_mem = (Flow*)calloc(fc.max_sessions, sizeof(Flow));
-
-    if ( !ip_mem )
-        return;
-
-    for ( unsigned i = 0; i < fc.max_sessions; ++i )
-        ip_cache->push(ip_mem + i);
-
-    get_ip = get_ssn;
-}
-
-void FlowControl::process_ip(Packet* p)
-{
-    if ( !ip_cache )
-        return;
-
-    FlowKey key;
-    set_key(&key, p);
-    Flow* flow = ip_cache->get(&key);
-
-    if ( !flow )
-        return;
-
-    if ( !flow->session )
+    if (p->is_from_client())
     {
-        flow->init(PktType::IP);
-        flow->session = get_ip(flow);
+        flow->flowstats.client_pkts++;
+        flow->flowstats.client_bytes += p->pktlen;
     }
-
-    ip_count += process(flow, p);
-
-    if ( flow->next && is_bidirectional(flow) )
-        ip_cache->unlink_uni(flow);
-}
-
-//-------------------------------------------------------------------------
-// icmp
-//-------------------------------------------------------------------------
-
-void FlowControl::init_icmp(
-    const FlowConfig& fc, InspectSsnFunc get_ssn)
-{
-    if ( !fc.max_sessions || !get_ssn )
-        return;
-
-    icmp_cache = new FlowCache(fc, 5, 0);
-
-    icmp_mem = (Flow*)calloc(fc.max_sessions, sizeof(Flow));
-
-    if ( !icmp_mem )
-        return;
-
-    for ( unsigned i = 0; i < fc.max_sessions; ++i )
-        icmp_cache->push(icmp_mem + i);
-
-    get_icmp = get_ssn;
-}
-
-void FlowControl::process_icmp(Packet* p)
-{
-    if ( !icmp_cache )
+    else
     {
-        process_ip(p);
-        return;
+        flow->flowstats.server_pkts++;
+        flow->flowstats.server_bytes += p->pktlen;
     }
-
-    FlowKey key;
-    set_key(&key, p);
-    Flow* flow = icmp_cache->get(&key);
-
-    if ( !flow )
-        return;
-
-    if ( !flow->session )
-    {
-        flow->init(PktType::ICMP);
-        flow->session = get_icmp(flow);
-    }
-
-    icmp_count += process(flow, p);
-
-    if ( flow->next && is_bidirectional(flow) )
-        icmp_cache->unlink_uni(flow);
-}
-
-//-------------------------------------------------------------------------
-// tcp
-//-------------------------------------------------------------------------
-
-void FlowControl::init_tcp(
-    const FlowConfig& fc, InspectSsnFunc get_ssn)
-{
-    if ( !fc.max_sessions || !get_ssn )
-        return;
-
-    tcp_cache = new FlowCache(fc, 5, 0);
-
-    tcp_mem = (Flow*)calloc(fc.max_sessions, sizeof(Flow));
-
-    if ( !tcp_mem )
-        return;
-
-    for ( unsigned i = 0; i < fc.max_sessions; ++i )
-        tcp_cache->push(tcp_mem + i);
-
-    get_tcp = get_ssn;
-}
-
-void FlowControl::process_tcp(Packet* p)
-{
-    if ( !tcp_cache )
-        return;
-
-    FlowKey key;
-    set_key(&key, p);
-    Flow* flow = tcp_cache->get(&key);
-
-    if ( !flow )
-        return;
-
-    if ( !flow->session )
-    {
-        flow->init(PktType::TCP);
-        flow->session = get_tcp(flow);
-    }
-
-    tcp_count += process(flow, p);
-
-    if ( flow->next && is_bidirectional(flow) )
-        tcp_cache->unlink_uni(flow);
-}
-
-//-------------------------------------------------------------------------
-// udp
-//-------------------------------------------------------------------------
-
-void FlowControl::init_udp(
-    const FlowConfig& fc, InspectSsnFunc get_ssn)
-{
-    if ( !fc.max_sessions || !get_ssn )
-        return;
-
-    udp_cache = new FlowCache(fc, 5, 0);
-
-    udp_mem = (Flow*)calloc(fc.max_sessions, sizeof(Flow));
-
-    if ( !udp_mem )
-        return;
-
-    for ( unsigned i = 0; i < fc.max_sessions; ++i )
-        udp_cache->push(udp_mem + i);
-
-    get_udp = get_ssn;
-}
-
-void FlowControl::process_udp(Packet* p)
-{
-    if ( !udp_cache )
-        return;
-
-    FlowKey key;
-    set_key(&key, p);
-    Flow* flow = udp_cache->get(&key);
-
-    if ( !flow )
-        return;
-
-    if ( !flow->session )
-    {
-        flow->init(PktType::UDP);
-        flow->session = get_udp(flow);
-    }
-
-    udp_count += process(flow, p);
-
-    if ( flow->next && is_bidirectional(flow) )
-        udp_cache->unlink_uni(flow);
-}
-
-//-------------------------------------------------------------------------
-// user
-//-------------------------------------------------------------------------
-
-void FlowControl::init_user(
-    const FlowConfig& fc, InspectSsnFunc get_ssn)
-{
-    if ( !fc.max_sessions || !get_ssn )
-        return;
-
-    user_cache = new FlowCache(fc, 5, 0);
-
-    user_mem = (Flow*)calloc(fc.max_sessions, sizeof(Flow));
-
-    if ( !user_mem )
-        return;
-
-    for ( unsigned i = 0; i < fc.max_sessions; ++i )
-        user_cache->push(user_mem + i);
-
-    get_user = get_ssn;
-}
-
-void FlowControl::process_user(Packet* p)
-{
-    if ( !user_cache )
-        return;
-
-    FlowKey key;
-    set_key(&key, p);
-    Flow* flow = user_cache->get(&key);
-
-    if ( !flow )
-        return;
-
-    if ( !flow->session )
-    {
-        flow->init(PktType::PDU);
-        flow->session = get_user(flow);
-    }
-
-    user_count += process(flow, p);
-
-    if ( flow->next && is_bidirectional(flow) )
-        user_cache->unlink_uni(flow);
-}
-
-//-------------------------------------------------------------------------
-// file
-//-------------------------------------------------------------------------
-
-void FlowControl::init_file(
-    const FlowConfig& fc, InspectSsnFunc get_ssn)
-{
-    if ( !fc.max_sessions || !get_ssn )
-        return;
-
-    file_cache = new FlowCache(fc, 5, 0);
-
-    file_mem = (Flow*)calloc(fc.max_sessions, sizeof(Flow));
-
-    if ( !file_mem )
-        return;
-
-    for ( unsigned i = 0; i < fc.max_sessions; ++i )
-        file_cache->push(file_mem + i);
-
-    get_file = get_ssn;
-}
-
-void FlowControl::process_file(Packet* p)
-{
-    if ( !file_cache )
-        return;
-
-    FlowKey key;
-    set_key(&key, p);
-    Flow* flow = file_cache->get(&key);
-
-    if ( !flow )
-        return;
-
-    if ( !flow->session )
-    {
-        flow->init(PktType::FILE);
-        flow->session = get_file(flow);
-    }
-
-    file_count += process(flow, p);
 }
 
 //-------------------------------------------------------------------------
@@ -783,40 +552,31 @@ void FlowControl::init_exp(uint32_t max)
     exp_cache = new ExpectCache(max);
 }
 
-char FlowControl::expected_flow(Flow* flow, Packet* p)
+void FlowControl::check_expected_flow(Flow* flow, Packet* p)
 {
-    char ignore = exp_cache->check(p, flow);
+    bool ignore = exp_cache->check(p, flow);
 
     if ( ignore )
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_STREAM_STATE,
-            "Stream: Ignoring packet from %d. Marking flow marked as ignore.\n",
-            p->packet_flags & PKT_FROM_CLIENT ? "sender" : "responder"); );
-
         flow->ssn_state.ignore_direction = ignore;
-        DisableInspection(p);
+        DetectionEngine::disable_all(p);
     }
-
-    return ignore;
 }
 
-int FlowControl::add_expected(
-    const sfip_t *srcIP, uint16_t srcPort,
-    const sfip_t *dstIP, uint16_t dstPort,
-    PktType protocol, char direction,
+int FlowControl::add_expected_ignore( const Packet* ctrlPkt, PktType type, IpProtocol ip_proto,
+    const SfIp *srcIP, uint16_t srcPort, const SfIp *dstIP, uint16_t dstPort, char direction,
     FlowData* fd)
 {
-    return exp_cache->add_flow(
-        srcIP, srcPort, dstIP, dstPort, protocol, direction, fd);
+    return exp_cache->add_flow( ctrlPkt, type, ip_proto, srcIP, srcPort, dstIP, dstPort, direction,
+        fd);
 }
 
-int FlowControl::add_expected(
-    const sfip_t *srcIP, uint16_t srcPort,
-    const sfip_t *dstIP, uint16_t dstPort,
-    PktType protocol, int16_t appId, FlowData* fd)
+int FlowControl::add_expected( const Packet* ctrlPkt, PktType type, IpProtocol ip_proto,
+    const SfIp *srcIP, uint16_t srcPort, const SfIp *dstIP, uint16_t dstPort,
+    SnortProtocolId snort_protocol_id, FlowData* fd, bool swap_app_direction)
 {
-    return exp_cache->add_flow(
-        srcIP, srcPort, dstIP, dstPort, protocol, SSN_DIR_BOTH, fd, appId);
+    return exp_cache->add_flow( ctrlPkt, type, ip_proto, srcIP, srcPort, dstIP, dstPort,
+        SSN_DIR_BOTH, fd, snort_protocol_id, swap_app_direction);
 }
 
 bool FlowControl::is_expected(Packet* p)

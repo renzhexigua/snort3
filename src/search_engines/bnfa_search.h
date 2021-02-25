@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,25 +16,28 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
+
+// bnfa_search.h author Marc Norton <mnorton@sourcefire.com>
+
+#ifndef BNFA_SEARCH_H
+#define BNFA_SEARCH_H
+
 /*
-** bnfa_search.h
-**
 ** Basic NFA based multi-pattern search using Aho_corasick construction,
 ** and compacted sparse storage.
 **
 ** Version 3.0
-**
-** author: marc norton
 ** date:   12/21/05
 */
 
-#include <stdio.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdint>
 
-#ifndef BNFA_SEARCH_H
-#define BNFA_SEARCH_H
+#include "search_common.h"
+
+namespace snort
+{
+struct SnortConfig;
+}
 
 /* debugging - allow printing the trie and nfa in list format
    #define ALLOW_LIST_PRINT */
@@ -64,37 +67,37 @@ typedef  unsigned int bnfa_state_t;
 /*
 *   Internal Pattern Representation
 */
-typedef struct bnfa_pattern
+struct bnfa_pattern_t
 {
-    struct bnfa_pattern* next;
+    bnfa_pattern_t* next;
+    uint8_t* casepatrn;   /* case specific */
+    void* userdata;       /* ptr to users pattern data/info  */
 
-    unsigned char* casepatrn;          /* case specific */
-    unsigned n;                        /* pattern len */
-    int nocase;                        /* nocase flag */
-    int negative;                      /* pattern is negated */
-    void* userdata;                    /* ptr to users pattern data/info  */
-} bnfa_pattern_t;
+    unsigned n;           /* pattern len */
+    int nocase;           /* nocase flag */
+    int negative;         /* pattern is negated */
+};
 
 /*
 *  List format transition node
 */
-typedef struct bnfa_trans_node_s
+struct bnfa_trans_node_t
 {
+    bnfa_trans_node_t* next;
     bnfa_state_t key;
     bnfa_state_t next_state;
-    struct bnfa_trans_node_s* next;
-} bnfa_trans_node_t;
+};
 
 /*
 *  List format patterns
 */
-typedef struct bnfa_match_node_s
+struct bnfa_match_node_t
 {
     void* data;
     void* rule_option_tree;
     void* neg_list;
-    struct bnfa_match_node_s* next;
-} bnfa_match_node_t;
+    bnfa_match_node_t* next;
+};
 
 /*
 *  Final storage type for the state transitions
@@ -115,7 +118,7 @@ enum
 /*
 *   Aho-Corasick State Machine Struct
 */
-typedef struct
+struct bnfa_struct_t
 {
     int bnfaMethod;
     int bnfaCaseMode;
@@ -124,20 +127,21 @@ typedef struct
     int bnfaOpt;
 
     unsigned bnfaPatternCnt;
-    bnfa_pattern_t* bnfaPatterns;
 
     int bnfaMaxStates;
     int bnfaNumStates;
     int bnfaNumTrans;
     int bnfaMatchStates;
 
+    bnfa_pattern_t* bnfaPatterns;
     bnfa_trans_node_t** bnfaTransTable;
-
     bnfa_state_t** bnfaNextState;
     bnfa_match_node_t** bnfaMatchList;
     bnfa_state_t* bnfaFailState;
-
     bnfa_state_t* bnfaTransList;
+
+    const MpseAgent* agent;
+
     int bnfaForceFullZeroState;
 
     int bnfa_memory;
@@ -147,25 +151,15 @@ typedef struct
     int nextstate_memory;
     int failstate_memory;
     int matchlist_memory;
-
-    void (* userfree)(void*);
-    void (* optiontreefree)(void**);
-    void (* neg_list_free)(void**);
-
-#define MAX_INQ 32
-    unsigned inq;
-    unsigned inq_flush;
-    void* q[MAX_INQ];
-}bnfa_struct_t;
+};
 
 /*
 *   Prototypes
 */
 void bnfa_init_xlatcase();
 
-bnfa_struct_t* bnfaNew(void (* userfree)(void* p),
-    void (* optiontreefree)(void** p),
-    void (* neg_list_free)(void** p));
+bnfa_struct_t* bnfaNew(const MpseAgent*);
+
 void bnfaSetOpt(bnfa_struct_t* p, int flag);
 void bnfaSetCase(bnfa_struct_t* p, int flag);
 void bnfaFree(bnfa_struct_t* pstruct);
@@ -174,26 +168,11 @@ int bnfaAddPattern(
     bnfa_struct_t* pstruct, const uint8_t* pat, unsigned patlen,
     bool nocase, bool negative, void* userdata);
 
-int bnfaCompile(bnfa_struct_t* pstruct,
-    int (* build_tree)(void* id, void** existing_tree),
-    int (* neg_list_func)(void* id, void** list));
-struct SnortConfig;
-int bnfaCompile(
-    SnortConfig*,
-    bnfa_struct_t* pstruct,
-    int (* build_tree)(SnortConfig*, void* id, void** existing_tree),
-    int (* neg_list_func)(void* id, void** list));
-
-typedef int (* bnfa_match_f)(
-    bnfa_pattern_t*, void* tree, int index, void* data, void* neg_list);
+int bnfaCompile(snort::SnortConfig*, bnfa_struct_t*);
 
 unsigned _bnfa_search_csparse_nfa(
-bnfa_struct_t * pstruct, const uint8_t* t, int tlen, bnfa_match_f,
-void* sdata, unsigned sindex, int* current_state);
-
-unsigned _bnfa_search_csparse_nfa_q(
-bnfa_struct_t * pstruct, unsigned char* t, int tlen, bnfa_match_f,
-void* sdata, unsigned sindex, int* current_state);
+    bnfa_struct_t * pstruct, const uint8_t* t, int tlen, MpseMatch,
+    void* context, unsigned sindex, int* current_state);
 
 int bnfaPatternCount(bnfa_struct_t* p);
 
@@ -201,16 +180,15 @@ void bnfaPrint(bnfa_struct_t* pstruct);   /* prints the nfa states-verbose!! */
 void bnfaPrintInfo(bnfa_struct_t* pstruct);    /* print info on this search engine */
 
 /*
- * Summary - this tracks search engine information accross multiple instances of
+ * Summary - this tracks search engine information across multiple instances of
  * search engines.  It helps in snort where we have many search engines, each using
  * rule grouping, to track total patterns, states, memory, etc...
  *
  */
 void bnfaPrintInfoEx(bnfa_struct_t* p, const char* text);
-void bnfaAccumInfo(bnfa_struct_t* pstruct);    /* add info to summary over multiple search engines
-                                                 */
-void bnfaPrintSummary(void); /* print current summary */
-void bnfaInitSummary(void);  /* reset accumulator foir global summary over multiple engines */
-void bnfa_print_qinfo(void);
+void bnfaAccumInfo(bnfa_struct_t* pstruct);  // add info to summary over multiple search engines
+void bnfaPrintSummary(); /* print current summary */
+void bnfaInitSummary();  /* reset accumulator for global summary over multiple engines */
+void bnfa_print_qinfo();
 #endif
 

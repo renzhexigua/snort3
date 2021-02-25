@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -21,18 +21,27 @@
 #include "config.h"
 #endif
 
+#include "main/snort_types.h"
+
 #include "search_engines.h"
-#include "framework/mpse.h"
+
+using namespace snort;
+
+extern const BaseApi* se_ac_banded;
+extern const BaseApi* se_ac_full;
+extern const BaseApi* se_ac_sparse;
+extern const BaseApi* se_ac_sparse_bands;
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* se_acsmx2[] =
+#endif
 {
     se_ac_banded,
     se_ac_full,
-    se_ac_full_q,
     se_ac_sparse,
     se_ac_sparse_bands,
     nullptr
 };
-#endif
 

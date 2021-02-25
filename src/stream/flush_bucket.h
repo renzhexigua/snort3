@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,47 +20,60 @@
 #ifndef FLUSH_BUCKET_H
 #define FLUSH_BUCKET_H
 
-#include "main/snort_types.h"
-#include "main/thread.h"
+// FlushBuckets manage a set of flush points for stream_tcp.
+
+#include <cstdint>
+#include <vector>
 
 class FlushBucket
 {
 public:
-    virtual ~FlushBucket() { }
+    virtual ~FlushBucket() = default;
     virtual uint16_t get_next() = 0;
 
     static uint16_t get_size();
     static void set(unsigned sz);
+    static void set();
     static void clear();
 
 protected:
-    FlushBucket() { }
+    FlushBucket() = default;
 };
 
 class ConstFlushBucket : public FlushBucket
 {
 public:
-    ConstFlushBucket(uint16_t sz)
-    { size = sz; }
+    ConstFlushBucket(uint16_t fp)
+    { pt = fp; }
 
-    uint16_t get_next()
-    { return size; }
+    uint16_t get_next() override
+    { return pt; }
 
 private:
-    uint16_t size;
+    uint16_t pt;
 };
 
-class StaticFlushBucket : public FlushBucket
+class VarFlushBucket : public FlushBucket
+{
+public:
+    uint16_t get_next() override;
+
+protected:
+    VarFlushBucket() = default;
+    void set_next(uint16_t);
+
+private:
+    unsigned idx = 0;
+    std::vector<uint16_t> flush_points;
+};
+
+class StaticFlushBucket : public VarFlushBucket
 {
 public:
     StaticFlushBucket();
-    uint16_t get_next();
-
-private:
-    unsigned idx;
 };
 
-class RandomFlushBucket : public StaticFlushBucket
+class RandomFlushBucket : public VarFlushBucket
 {
 public:
     RandomFlushBucket();

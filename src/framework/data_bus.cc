@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,11 +17,19 @@
 //--------------------------------------------------------------------------
 // data_bus.cc author Russ Combs <rucombs@cisco.com>
 
-#include "framework/data_bus.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include "data_bus.h"
+
 #include "main/policy.h"
+#include "main/snort_config.h"
 #include "protocols/packet.h"
 
-DataBus& get_data_bus()
+using namespace snort;
+
+static DataBus& get_data_bus()
 { return get_inspection_policy()->dbus; }
 
 class BufferEvent : public DataEvent
@@ -51,30 +59,69 @@ private:
     const Packet* packet;
 };
 
-DataBus::DataBus() { }
+//--------------------------------------------------------------------------
+// public methods
+//--------------------------------------------------------------------------
+
+DataBus::DataBus() = default;
 
 DataBus::~DataBus()
 {
     for ( auto& p : map )
         for ( auto* h : p.second )
-            delete h;
+        {
+            // If the object is cloned, pass the ownership to the next config.
+            // When the object is no further cloned (e.g., the last config), delete it.
+            if ( h->cloned )
+                h->cloned = false;
+            else
+                delete h;
+        }
+}
+
+void DataBus::clone(DataBus& from, const char* exclude_name)
+{
+    for ( auto& p : from.map )
+        for ( auto* h : p.second )
+            if ( nullptr == exclude_name || 0 != strcmp(exclude_name, h->module_name) )
+            {
+                h->cloned = true;
+                _subscribe(p.first.c_str(), h);
+            }
 }
 
 // add handler to list of handlers to be notified upon
 // publication of given event
 void DataBus::subscribe(const char* key, DataHandler* h)
 {
-    DataList& v = map[key];
-    v.push_back(h);
+    get_data_bus()._subscribe(key, h);
+}
+
+// for subscribers that need to receive events regardless of active inspection policy
+void DataBus::subscribe_global(const char* key, DataHandler* h, SnortConfig* sc)
+{
+    assert(sc);
+    sc->global_dbus->_subscribe(key, h);
+}
+
+void DataBus::unsubscribe(const char* key, DataHandler* h)
+{
+    get_data_bus()._unsubscribe(key, h);
+}
+
+void DataBus::unsubscribe_global(const char* key, DataHandler* h, SnortConfig* sc)
+{
+    assert(sc);
+    sc->global_dbus->_unsubscribe(key, h);
 }
 
 // notify subscribers of event
 void DataBus::publish(const char* key, DataEvent& e, Flow* f)
 {
-    DataList& v = map[key];
+    InspectionPolicy* pi = get_inspection_policy();
+    pi->dbus._publish(key, e, f);
 
-    for ( auto* h : v )
-        h->handle(e, f);
+    SnortConfig::get_conf()->global_dbus->_publish(key, e, f);
 }
 
 void DataBus::publish(const char* key, const uint8_t* buf, unsigned len, Flow* f)
@@ -86,8 +133,42 @@ void DataBus::publish(const char* key, const uint8_t* buf, unsigned len, Flow* f
 void DataBus::publish(const char* key, Packet* p, Flow* f)
 {
     PacketEvent e(p);
-    if ( !f )
+    if ( p && !f )
         f = p->flow;
     publish(key, e, f);
+}
+
+//--------------------------------------------------------------------------
+// private methods
+//--------------------------------------------------------------------------
+
+void DataBus::_subscribe(const char* key, DataHandler* h)
+{
+    DataList& v = map[key];
+    v.emplace_back(h);
+}
+
+void DataBus::_unsubscribe(const char* key, DataHandler* h)
+{
+    DataList& v = map[key];
+
+    for ( unsigned i = 0; i < v.size(); i++ )
+        if ( v[i] == h )
+            v.erase(v.begin() + i--);
+
+    if ( v.empty() )
+        map.erase(key);
+}
+
+// notify subscribers of event
+void DataBus::_publish(const char* key, DataEvent& e, Flow* f)
+{
+    auto v = map.find(key);
+
+    if ( v != map.end() )
+    {
+        for ( auto* h : v->second )
+            h->handle(e, f);
+    }
 }
 

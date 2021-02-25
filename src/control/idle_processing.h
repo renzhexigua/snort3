@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2011-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,11 +20,17 @@
 #ifndef IDLE_PROCESSING_H
 #define IDLE_PROCESSING_H
 
-typedef void (* IdleProcessingHandler)(void);
+using IdleHook = void (*)();
 
-int IdleProcessingRegisterHandler(IdleProcessingHandler);
-void IdleProcessingExecute(void);
-void IdleProcessingCleanUp(void);
+class IdleProcessing
+{
+public:
+    static void register_handler(IdleHook);
+    static void execute();
+
+    // only needs to be called if changing out the handler set
+    static void unregister_all();
+};
 
 #endif
 

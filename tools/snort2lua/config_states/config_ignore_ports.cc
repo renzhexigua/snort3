@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -37,8 +37,7 @@ class IgnorePorts : public ConversionState
 {
 public:
     IgnorePorts(Converter& c) : ConversionState(c) { }
-    virtual ~IgnorePorts() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -55,14 +54,14 @@ bool IgnorePorts::convert(std::istringstream& data_stream)
 
     // if the keyword is not 'tcp' or 'udp', return false;
     if (!(data_stream >> keyword) ||
-        (keyword.compare("udp") && keyword.compare("tcp")) )
+        (keyword != "udp" && keyword != "tcp") )
     {
         data_api.failed_conversion(data_stream, keyword);
         return false;
     }
 
     // Only add to the binder once we have validated the configuration.
-    Binder bind(table_api);
+    auto& bind = cv.make_binder();
     bind.set_when_proto(keyword);
 
     while (data_stream >> port)
@@ -71,9 +70,9 @@ bool IgnorePorts::convert(std::istringstream& data_stream)
         {
             const std::size_t colon_pos = port.find(':');
 
-            if (!port.compare("any"))
+            if (port == "any")
             {
-                // Possible Snort bug, but only port zero is ignrored
+                // Possible Snort bug, but only port zero is ignored
                 bind.add_when_port("0");
             }
             else if (colon_pos == std::string::npos)
@@ -112,17 +111,17 @@ bool IgnorePorts::convert(std::istringstream& data_stream)
                     bind.add_when_port(std::to_string(i));
             }
         }
-        catch (std::invalid_argument)
+        catch (std::invalid_argument&)
         {
             data_api.failed_conversion(data_stream, "can't convert " + port);
             retval = false;
-            bind.print_binding(false); // don't print the binding if an error occured
+            bind.print_binding(false); // don't print the binding if an error occurred
         }
-        catch (std::out_of_range)
+        catch (std::out_of_range&)
         {
             data_api.failed_conversion(data_stream, "Port" + port + " must be <= 65535");
             retval = false;
-            bind.print_binding(false); // don't print the binding if an error occured
+            bind.print_binding(false); // don't print the binding if an error occurred
         }
     }
 

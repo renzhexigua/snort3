@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,68 +17,41 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-/*
-   ipobj.c
-
-   IP address encapsulation interface
-
-   This module provides encapsulation of single IP ADDRESSes as
-   objects, and collections of IP ADDRESSes as objects
-*/
-
-#include "ipobj.h"
+// ipobj.c
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-#include <ctype.h>
+#include "ipobj.h"
 
-#include "util.h"
-#include "snort_bounds.h"
-#include "sfip/sf_ip.h"
+#include "protocols/packet.h"
+#include "utils/util.h"
+#include "utils/util_cstring.h"
+
+using namespace snort;
 
 /*
    IP COLLECTION INTERFACE
 
    Snort Accepts:
 
-   IP-Address		192.168.1.1
-   IP-Address/MaskBits	192.168.1.0/24
-   IP-Address/Mask		192.168.1.0/255.255.255.0
+   IP-Address           192.168.1.1
+   IP-Address/MaskBits  192.168.1.0/24
+   IP-Address/Mask      192.168.1.0/255.255.255.0
 
    These can all be handled via the CIDR block notation : IP/MaskBits
 
    We use collections (lists) of cidr blocks to represent address blocks
-   and indivdual addresses.
+   and individual addresses.
 
    For a single IPAddress the implied Mask is 32 bits,or 255.255.255.255, or 0xffffffff, or -1.
-
 */
-IPSET* ipset_new(void)
+IPSET* ipset_new()
 {
-    IPSET* p = (IPSET*)SnortAlloc(sizeof(IPSET));
+    IPSET* p = (IPSET*)snort_calloc(sizeof(IPSET));
     sflist_init(&p->ip_list);
-
     return p;
-}
-
-IPSET* ipset_copy(IPSET* ipsp)
-{
-    IPSET* newset = ipset_new();
-    IP_PORT* ip_port;
-    SF_LNODE* cursor;
-
-    for (ip_port =(IP_PORT*)sflist_first(&ipsp->ip_list, &cursor);
-        ip_port !=NULL;
-        ip_port =(IP_PORT*)sflist_next(&cursor) )
-    {
-        ipset_add(newset, &ip_port->ip, &ip_port->portset, ip_port->notflag);
-    }
-    return newset;
 }
 
 void ipset_free(IPSET* ipc)
@@ -90,26 +63,24 @@ void ipset_free(IPSET* ipc)
 
         while ( p )
         {
-            sflist_static_free_all(&p->portset.port_list, free);
+            sflist_static_free_all(&p->portset.port_list, snort_free);
             p = (IP_PORT*)sflist_next(&cursor);
         }
-        sflist_static_free_all(&ipc->ip_list, free);
-        free(ipc);
+        sflist_static_free_all(&ipc->ip_list, snort_free);
+        snort_free(ipc);
     }
 }
 
-int ipset_add(IPSET* ipset, sfip_t* ip, void* vport, int notflag)
+int ipset_add(IPSET* ipset, SfCidr* ip, void* vport, int notflag)
 {
     if ( !ipset )
         return -1;
 
     {
         PORTSET* portset = (PORTSET*)vport;
-        IP_PORT* p = (IP_PORT*)calloc(1,sizeof(IP_PORT) );
-        if (!p)
-            return -1;
+        IP_PORT* p = (IP_PORT*)snort_calloc(sizeof(IP_PORT));
 
-        sfip_set_ip(&p->ip, ip);
+        p->ip.set(*ip);
         p->portset = *portset;
         p->notflag = (char)notflag;
 
@@ -122,7 +93,7 @@ int ipset_add(IPSET* ipset, sfip_t* ip, void* vport, int notflag)
     return 0;
 }
 
-int ipset_contains(IPSET* ipc, const sfip_t* ip, void* port)
+int ipset_contains(IPSET* ipc, const SfIp* ip, void* port)
 {
     PORTRANGE* pr;
     unsigned short portu;
@@ -139,15 +110,15 @@ int ipset_contains(IPSET* ipc, const sfip_t* ip, void* port)
     SF_LNODE* cur_ip;
 
     for (p =(IP_PORT*)sflist_first(&ipc->ip_list, &cur_ip);
-        p!=0;
+        p!=nullptr;
         p =(IP_PORT*)sflist_next(&cur_ip) )
     {
-        if ( sfip_contains(&p->ip, ip) == SFIP_CONTAINS)
+        if (p->ip.contains(ip) == SFIP_CONTAINS)
         {
             SF_LNODE* cur_port;
 
             for ( pr=(PORTRANGE*)sflist_first(&p->portset.port_list, &cur_port);
-                pr != 0;
+                pr != nullptr;
                 pr=(PORTRANGE*)sflist_next(&cur_port) )
             {
                 /*
@@ -167,41 +138,6 @@ int ipset_contains(IPSET* ipc, const sfip_t* ip, void* port)
     return 0;
 }
 
-int ipset_print(IPSET* ipc)
-{
-    char ip_str[80];
-    PORTRANGE* pr;
-
-    if ( !ipc )
-        return 0;
-
-    {
-        IP_PORT* p;
-        printf("IPSET\n");
-        SF_LNODE* cur_ip;
-
-        for ( p =(IP_PORT*)sflist_first(&ipc->ip_list, &cur_ip);
-            p!=0;
-            p =(IP_PORT*)sflist_next(&cur_ip) )
-        {
-            SnortSnprintf(ip_str, 80, "%s", sfip_to_str(&p->ip));
-            printf("CIDR BLOCK: %c%s", p->notflag ? '!' : ' ', ip_str);
-            SF_LNODE* cur_port;
-
-            for ( pr=(PORTRANGE*)sflist_first(&p->portset.port_list, &cur_port);
-                pr != 0;
-                pr=(PORTRANGE*)sflist_next(&cur_port) )
-            {
-                printf("  %d", pr->port_lo);
-                if ( pr->port_hi != pr->port_lo )
-                    printf("-%d", pr->port_hi);
-            }
-            printf("\n");
-        }
-    }
-    return 0;
-}
-
 static void portset_init(PORTSET* portset)
 {
     sflist_init(&portset->port_list);
@@ -214,9 +150,7 @@ static int portset_add(PORTSET* portset, unsigned port_lo, unsigned port_hi)
     if ( !portset )
         return -1;
 
-    p = (PORTRANGE*)calloc(1,sizeof(PORTRANGE) );
-    if (!p)
-        return -1;
+    p = (PORTRANGE*)snort_calloc(sizeof(PORTRANGE));
 
     p->port_lo = port_lo;
     p->port_hi = port_hi;
@@ -228,77 +162,68 @@ static int portset_add(PORTSET* portset, unsigned port_lo, unsigned port_hi)
 
 static int port_parse(char* portstr, PORTSET* portset)
 {
-    unsigned port_lo = 0, port_hi = 0;
-    char* port1;
-    char* port_begin;
-    char* port_end;
-    char* port2;
+    char* port_begin = snort_strdup(portstr);
+    char* port1 = port_begin;
+    char* port2 = strstr(port_begin, "-");
 
-    port_begin = strdup(portstr);
-
-    port1 = port_begin;
-    port2 = strstr(port_begin, "-");
-
+    if (*port1 == '\0')
     {
-        if (*port1 == '\0')
-        {
-            free(port_begin);
-            return -1;
-        }
-
-        if (port2)
-        {
-            *port2 = '\0';
-            port2++;
-        }
-
-        port_lo = strtoul(port1, &port_end, 10);
-        if (port_end == port1)
-        {
-            free(port_begin);
-            return -2;
-        }
-
-        if (port2)
-        {
-            port_hi = strtoul(port2, &port_end, 10);
-            if (port_end == port2)
-            {
-                free(port_begin);
-                return -3;
-            }
-        }
-        else
-        {
-            port_hi = port_lo;
-        }
-
-        /* check to see if port is out of range */
-        if ( port_hi > MAXPORTS-1 || port_lo > MAXPORTS-1)
-        {
-            free(port_begin);
-            return -4;
-        }
-
-        /* swap ports if necessary */
-        if (port_hi < port_lo)
-        {
-            unsigned tmp;
-
-            tmp = port_hi;
-            port_hi = port_lo;
-            port_lo = tmp;
-        }
-
-        portset_add(portset, port_lo, port_hi);
+        snort_free(port_begin);
+        return -1;
     }
 
-    free(port_begin);
+    if (port2)
+    {
+        *port2 = '\0';
+        port2++;
+    }
+
+    char* port_end;
+    unsigned port_lo = strtoul(port1, &port_end, 10);
+    unsigned port_hi = 0;
+
+    if (port_end == port1)
+    {
+        snort_free(port_begin);
+        return -2;
+    }
+
+    if (port2)
+    {
+        port_hi = strtoul(port2, &port_end, 10);
+        if (port_end == port2)
+        {
+            snort_free(port_begin);
+            return -3;
+        }
+    }
+    else
+    {
+        port_hi = port_lo;
+    }
+
+    /* check to see if port is out of range */
+    if ( port_hi > MAX_PORTS-1 || port_lo > MAX_PORTS-1)
+    {
+        snort_free(port_begin);
+        return -4;
+    }
+
+    /* swap ports if necessary */
+    if (port_hi < port_lo)
+    {
+        unsigned tmp = port_hi;
+        port_hi = port_lo;
+        port_lo = tmp;
+    }
+
+    portset_add(portset, port_lo, port_hi);
+    snort_free(port_begin);
 
     return 0;
 }
 
-static int ip_parse(char* ipstr, sfip_t* ip, char* not_flag, PORTSET* portset, char** endIP)
+static int ip_parse(char* ipstr, SfCidr* ip, char* not_flag, PORTSET* portset, char** endIP)
 {
     char* port_str;
     char* comma;
@@ -326,15 +251,15 @@ static int ip_parse(char* ipstr, sfip_t* ip, char* not_flag, PORTSET* portset, c
         *end_bracket = '\0';
     }
 
-    if (sfip_pton(ipstr, ip) != SFIP_SUCCESS)
+    if (ip->set(ipstr) != SFIP_SUCCESS)
         return -1;
 
     /* Just to get the IP string out of the way */
     char* lasts = nullptr;
     strtok_r(ipstr, " \t", &lasts);
 
-    /* Is either the port after the 1st space, or NULL */
-    port_str = strtok_r(NULL, " \t", &lasts);
+    /* Is either the port after the 1st space, or null */
+    port_str = strtok_r(nullptr, " \t", &lasts);
 
     while (port_str)
     {
@@ -353,7 +278,7 @@ static int ip_parse(char* ipstr, sfip_t* ip, char* not_flag, PORTSET* portset, c
         }
 
         port_parse(port_str, portset);
-        port_str = strtok_r(NULL, " \t", &lasts);
+        port_str = strtok_r(nullptr, " \t", &lasts);
     }
 
     if (portset->port_list.count == 0)
@@ -389,14 +314,10 @@ int ipset_parse(IPSET* ipset, const char* ipstr)
     char set_not_flag = 0;
     char item_not_flag;
     char open_bracket = 0;
-    sfip_t ip;
+    SfCidr ip;
     PORTSET portset;
 
-    copy = strdup(ipstr);
-
-    if (!copy)
-        return -2;
-
+    copy = snort_strdup(ipstr);
     startIP = copy;
 
     if (*startIP == '!')
@@ -425,13 +346,13 @@ int ipset_parse(IPSET* ipset, const char* ipstr)
 
         if (ip_parse(startIP, &ip, &item_not_flag, &portset, &endIP) != 0)
         {
-            free(copy);
+            snort_free(copy);
             return -5;
         }
 
         if (ipset_add(ipset, &ip, &portset, (item_not_flag ^ set_not_flag)) != 0)
         {
-            free(copy);
+            snort_free(copy);
             return -6;
         }
 
@@ -445,7 +366,7 @@ int ipset_parse(IPSET* ipset, const char* ipstr)
         startIP = endIP;
     }
 
-    free(copy);
+    snort_free(copy);
 
     if (!parse_count)
         return -7;
@@ -455,257 +376,4 @@ int ipset_parse(IPSET* ipset, const char* ipstr)
 
     return 0;
 }
-
-#ifdef MAIN_IP
-#include <time.h>
-
-#define rand   random
-#define srand srandom
-
-#define MAXIP 100
-
-#include "sflsq.c"
-
-void test_ip4_parsing(void)
-{
-    unsigned host, mask, not_flag;
-    PORTSET portset;
-    char** curip;
-    int ret;
-    IPADDRESS* adp;
-    char* ips[] =
-    {
-        "138.26.1.24:25",
-        "1.1.1.1/255.255.255.0:444",
-        "1.1.1.1/16:25-28",
-        "1.1.1.1/255.255.255.255:25 27-29",
-        "z/24",
-        "0/0",
-        "0.0.0.0/0.0.0.0:25-26 28-29 31",
-        "0.0.0.0/0.0.2.0",
-        NULL
-    };
-
-    for (curip = ips; curip[0] != NULL; curip++)
-    {
-        portset_init(&portset);
-
-        /* network byte order stuff */
-        if ((ret = ip4_parse(curip[0], 1, &not_flag, &host, &mask, &portset)) != 0)
-        {
-            fprintf(stderr, "Unable to parse %s with ret %d\n", curip[0], ret);
-        }
-        else
-        {
-            printf("%c", not_flag ? '!' : ' ');
-            printf("%s/", inet_ntoa(*(struct in_addr*)&host));
-            printf("%s", inet_ntoa(*(struct in_addr*)&mask));
-            printf(" parsed successfully\n");
-        }
-
-        /* host byte order stuff */
-        if ((ret = ip4_parse(curip[0], 0, &not_flag, &host, &mask, &portset)) != 0)
-        {
-            fprintf(stderr, "Unable to parse %s with ret %d\n", curip[0], ret);
-        }
-        else
-        {
-            adp = ip_new(IPV4_FAMILY);
-            ip_set(adp, &host, IPV4_FAMILY);
-            ip_fprint(stdout, adp);
-            fprintf(stdout, "*****************\n");
-            ip_free(adp);
-        }
-    }
-}
-
-void test_ip4set_parsing(void)
-{
-    char** curip;
-    int ret;
-    char* ips[] =
-    {
-        "12.24.24.1/32,!24.24.24.1",
-        "[0.0.0.0/0.0.2.0,241.242.241.22]",
-        "138.26.1.24",
-        "1.1.1.1",
-        "1.1.1.1/16",
-        "1.1.1.1/255.255.255.255",
-        "z/24",
-        "0/0",
-        "0.0.0.0/0.0.0.0",
-        "0.0.0.0/0.0.2.0",
-        NULL
-    };
-
-    for (curip = ips; curip[0] != NULL; curip++)
-    {
-        IPSET* ipset = ipset_new(IPV4_FAMILY);
-
-        /* network byte order stuff */
-        if ((ret = ip4_setparse(ipset, curip[0])) != 0)
-        {
-            ipset_free(ipset);
-            fprintf(stderr, "Unable to parse %s with ret %d\n", curip[0], ret);
-        }
-        else
-        {
-            printf("-[%s]\n ", curip[0]);
-            ipset_print(ipset);
-            printf("---------------------\n ");
-        }
-    }
-}
-
-//  -----------------------------
-void test_ip(void)
-{
-    int i,k;
-    IPADDRESS* ipa[MAXIP];
-    unsigned ipaddress,ipx;
-    unsigned short ipaddress6[8], ipx6[8];
-
-    printf("IPADDRESS testing\n");
-
-    srand(time(0) );
-
-    for (i=0; i<MAXIP; i++)
-    {
-        if ( i % 2 )
-        {
-            ipa[i]= ip_new(IPV4_FAMILY);
-            ipaddress = rand() * rand();
-            ip_set(ipa[i], &ipaddress, IPV4_FAMILY);
-
-            if ( !ip_equal(ipa[i],&ipaddress, IPV4_FAMILY) )
-                printf("error with ip_equal\n");
-
-            ip_get(ipa[i], &ipx, IPV4_FAMILY);
-            if ( ipx != ipaddress )
-                printf("error with ip_get\n");
-        }
-        else
-        {
-            ipa[i]= ip_new(IPV6_FAMILY);
-
-            for (k=0; k<8; k++)
-                ipaddress6[k] = (char)(rand() % (1<<16));
-
-            ip_set(ipa[i], ipaddress6, IPV6_FAMILY);
-
-            if ( !ip_equal(ipa[i],&ipaddress6, IPV6_FAMILY) )
-                printf("error with ip6_equal\n");
-
-            ip_get(ipa[i], ipx6, IPV6_FAMILY);
-
-            for (k=0; k<8; k++)
-                if ( ipx6[k] != ipaddress6[k] )
-                    printf("error with ip6_get\n");
-        }
-
-        printf("[%d] ",i);
-        ip_fprint(stdout,ipa[i]);
-        printf("\n");
-    }
-
-    printf("IP testing completed\n");
-}
-
-//  -----------------------------
-void test_ipset(void)
-{
-    int i,k;
-    IPSET* ipset, * ipset6;
-    IPSET* ipset_copyp, * ipset6_copyp;
-
-    unsigned ipaddress, mask;
-    unsigned short mask6[8];
-    unsigned short ipaddress6[8];
-    unsigned port_lo, port_hi;
-    PORTSET portset;
-
-    printf("IPSET testing\n");
-
-    ipset  = ipset_new(IPV4_FAMILY);
-    ipset6 = ipset_new(IPV6_FAMILY);
-
-    srand(time(0) );
-
-    for (i=0; i<MAXIP; i++)
-    {
-        if ( i % 2 )
-        {
-            ipaddress = rand() * rand();
-            mask = 0xffffff00;
-            port_lo = rand();
-            port_hi = rand() % 5 + port_lo;
-            portset_init(&portset);
-            portset_add(&portset, port_lo, port_hi);
-
-            ipset_add(ipset, &ipaddress, &mask, &portset, 0, IPV4_FAMILY);   //class C cidr blocks
-
-            if ( !ipset_contains(ipset, &ipaddress, &port_lo, IPV4_FAMILY) )
-                printf("error with ipset_contains\n");
-        }
-        else
-        {
-            for (k=0; k<8; k++)
-                ipaddress6[k] = (char)(rand() % (1<<16));
-
-            for (k=0; k<8; k++)
-                mask6[k] = 0xffff;
-
-            port_lo = rand();
-            port_hi = rand() % 5 + port_lo;
-            portset_init(&portset);
-            portset_add(&portset, port_lo, port_hi);
-
-            ipset_add(ipset6, ipaddress6, mask6, &portset, 0, IPV6_FAMILY);
-
-            if ( !ipset_contains(ipset6, &ipaddress6, &port_lo, IPV6_FAMILY) )
-                printf("error with ipset6_contains\n");
-        }
-    }
-
-    ipset_copyp = ipset_copy(ipset);
-    ipset6_copyp = ipset_copy(ipset6);
-
-    printf("-----IP SET-----\n");
-    ipset_print(ipset);
-    printf("\n");
-
-    printf("-----IP SET6-----\n");
-    ipset_print(ipset6);
-    printf("\n");
-
-    printf("-----IP SET COPY -----\n");
-    ipset_print(ipset_copyp);
-    printf("\n");
-
-    printf("-----IP SET6 COPY -----\n");
-    ipset_print(ipset6_copyp);
-    printf("\n");
-
-    printf("IP set testing completed\n");
-}
-
-//  -----------------------------
-int main(int argc, char** argv)
-{
-    printf("ipobj \n");
-
-    test_ip();
-
-    test_ipset();
-
-    test_ip4_parsing();
-
-    test_ip4set_parsing();
-
-    printf("normal pgm completion\n");
-
-    return 0;
-}
-
-#endif
 

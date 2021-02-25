@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,10 +20,16 @@
 
 #ifndef DNS_MODULE_H
 #define DNS_MODULE_H
+//Interface to the DNS service inspector
 
-#include "framework/module.h"
 #include "framework/bits.h"
+#include "framework/module.h"
 #include "main/thread.h"
+
+namespace snort
+{
+struct SnortConfig;
+}
 
 #define GID_DNS 131
 
@@ -34,27 +40,41 @@
 #define DNS_NAME "dns"
 #define DNS_HELP "dns inspection"
 
-struct SnortConfig;
 
-extern THREAD_LOCAL SimpleStats dnsstats;
-extern THREAD_LOCAL ProfileStats dnsPerfStats;
+struct DnsStats
+{
+    PegCount packets;
+    PegCount requests;
+    PegCount responses;
+    PegCount concurrent_sessions;
+    PegCount max_concurrent_sessions;
+};
 
-class DnsModule : public Module
+extern const PegInfo dns_peg_names[];
+extern THREAD_LOCAL DnsStats dnsstats;
+extern THREAD_LOCAL snort::ProfileStats dnsPerfStats;
+
+class DnsModule : public snort::Module
 {
 public:
     DnsModule();
 
-    bool set(const char*, Value&, SnortConfig*) override
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override
     { return false; }
 
     unsigned get_gid() const override
     { return GID_DNS; }
 
-    const RuleMap* get_rules() const override;
+    const snort::RuleMap* get_rules() const override;
     const PegInfo* get_pegs() const override;
     PegCount* get_counts() const override;
-    ProfileStats* get_profile() const override;
+    snort::ProfileStats* get_profile() const override;
+
+    Usage get_usage() const override
+    { return INSPECT; }
+
+    bool is_bindable() const override
+    { return true; }
 };
 
 #endif
-

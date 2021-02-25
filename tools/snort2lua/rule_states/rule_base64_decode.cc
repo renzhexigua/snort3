@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,8 +21,8 @@
 
 #include "conversion_state.h"
 #include "helpers/converter.h"
-#include "rule_states/rule_api.h"
 #include "helpers/s2l_util.h"
+#include "rule_api.h"
 
 namespace rules
 {
@@ -32,8 +32,7 @@ class Base64Decode : public ConversionState
 {
 public:
     Base64Decode(Converter& c) : ConversionState(c) { }
-    virtual ~Base64Decode() { }
-    virtual bool convert(std::istringstream& data);
+    bool convert(std::istringstream& data) override;
 };
 } // namespace
 
@@ -51,7 +50,7 @@ bool Base64Decode::convert(std::istringstream& data_stream)
     {
         // a colon will have been parsed when retrieving the keyword.
         // Therefore, if a colon is present, we are in the next rule option.
-        if (args.find(":") != std::string::npos)
+        if (args.find(':') != std::string::npos)
         {
             rule_api.add_option("base64_decode");
             data_stream.clear();
@@ -62,11 +61,10 @@ bool Base64Decode::convert(std::istringstream& data_stream)
             // since we still can't be sure if we passed the base64_decode buffer,
             // check the next option and ensure it matches
             std::istringstream arg_stream(args);
-            util::get_string(arg_stream, tmp, ", ");
-
-            if (!tmp.compare("bytes") ||
-                !tmp.compare("offset") ||
-                !tmp.compare("relative"))
+            if (util::get_string(arg_stream, tmp, ", ") &&
+                (tmp == "bytes" ||
+                tmp == "offset" ||
+                tmp == "relative"))
             {
                 rule_api.add_option("base64_decode", args);
             }

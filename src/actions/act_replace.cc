@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,80 +21,54 @@
 #include "config.h"
 #endif
 
-#include <string>
-
-#include "snort_types.h"
+#include "detection/detection_engine.h"
 #include "framework/ips_action.h"
 #include "framework/module.h"
-#include "protocols/packet.h"
+#include "main/snort_config.h"
 #include "packet_io/active.h"
-#include "snort_debug.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "rewrite"
 
 #define s_help \
     "overwrite packet contents"
 
-// FIXIT-L ips_replace.cc should part of this lib
-// FIXIT-L enforce that a rule with a replace option has a replace action
-//       (and vice-versa)
 //--------------------------------------------------------------------------
 // queue foo
 //--------------------------------------------------------------------------
 
-struct Replacement
+static inline void Replace_ApplyChange(Packet* p, std::string& data, unsigned offset)
 {
-    std::string data;
-    unsigned offset;
-};
-
-#define MAX_REPLACEMENTS 32
-static THREAD_LOCAL Replacement* rpl;
-static THREAD_LOCAL int num_rpl = 0;
-
-void Replace_ResetQueue(void)
-{
-    num_rpl = 0;
-}
-
-void Replace_QueueChange(const std::string& s, unsigned off)
-{
-    Replacement* r;
-
-    if ( num_rpl == MAX_REPLACEMENTS )
-        return;
-
-    r = rpl + num_rpl++;
-
-    r->data = s;
-    r->offset = off;
-}
-
-static inline void Replace_ApplyChange(Packet* p, Replacement* r)
-{
-    uint8_t* start = (uint8_t*)p->data + r->offset;
+    uint8_t* start = const_cast<uint8_t*>(p->data) + offset;
     const uint8_t* end = p->data + p->dsize;
     unsigned len;
 
-    if ( (start + r->data.size()) >= end )
-        len = p->dsize - r->offset;
+    if ( (start + data.size()) >= end )
+        len = p->dsize - offset;
     else
-        len = r->data.size();
+        len = data.size();
 
-    memcpy(start, r->data.c_str(), len);
+    memcpy(start, data.c_str(), len);
 }
 
 static void Replace_ModifyPacket(Packet* p)
 {
-    if ( num_rpl == 0 )
-        return;
+    std::string data;
+    unsigned offset;
+    bool modified = false;
 
-    for ( int n = 0; n < num_rpl; n++ )
+    while ( DetectionEngine::get_replacement(data, offset) )
     {
-        Replace_ApplyChange(p, rpl+n);
+        modified = true;
+        Replace_ApplyChange(p, data, offset);
     }
-    p->packet_flags |= PKT_MODIFIED;
-    num_rpl = 0;
+
+    if ( modified )
+        p->packet_flags |= PKT_MODIFIED;
+
+    DetectionEngine::clear_replacement();
 }
 
 //-------------------------------------------------------------------------
@@ -103,6 +77,9 @@ static void Replace_ModifyPacket(Packet* p)
 
 static const Parameter s_params[] =
 {
+    { "disable_replace", Parameter::PT_BOOL, nullptr, "false",
+      "disable replace of packet contents with rewrite rules" },
+
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
 
@@ -112,45 +89,51 @@ public:
     ReplaceModule() : Module(s_name, s_help, s_params) { }
     bool set(const char*, Value&, SnortConfig*) override;
     bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+
+    Usage get_usage() const override
+    { return DETECT; }
 
 public:
+    bool disable_replace;
 };
 
-bool ReplaceModule::set(const char*, Value&, SnortConfig*)
+bool ReplaceModule::set(const char*, Value& v, SnortConfig*)
 {
-    return false;
-}
+    if ( v.is("disable_replace") )
+        disable_replace = v.get_bool();
+    else
+        return false;
 
-bool ReplaceModule::begin(const char*, int, SnortConfig*)
-{
     return true;
 }
 
-bool ReplaceModule::end(const char*, int, SnortConfig*)
+bool ReplaceModule::begin(const char*, int, SnortConfig* sc)
 {
+    disable_replace = false;
+    sc->set_active_enabled();
     return true;
 }
 
 //-------------------------------------------------------------------------
-
-class ReplaceAction : public IpsAction
+class ReplaceAction : public snort::IpsAction
 {
 public:
-    ReplaceAction(ReplaceModule*);
+    ReplaceAction(bool disable_replace);
 
-    void exec(Packet*) override;
+    void exec(snort::Packet*) override;
+private:
+    bool disable_replace = false;
 };
 
-ReplaceAction::ReplaceAction(ReplaceModule*) :
+ReplaceAction::ReplaceAction(bool dr) :
     IpsAction(s_name, ACT_RESET)
 {
-    Active::set_enabled();
+    disable_replace = dr;
 }
 
 void ReplaceAction::exec(Packet* p)
 {
-    if ( p->is_rebuilt() )
+    if ( p->is_rebuilt() || disable_replace )
         return;
 
     Replace_ModifyPacket(p);
@@ -165,16 +148,10 @@ static void mod_dtor(Module* m)
 { delete m; }
 
 static IpsAction* rep_ctor(Module* m)
-{ return new ReplaceAction((ReplaceModule*)m); }
+{ return new ReplaceAction( ((ReplaceModule*)m)->disable_replace); }
 
 static void rep_dtor(IpsAction* p)
 { delete p; }
-
-static void rep_tinit()
-{ rpl = new Replacement[MAX_REPLACEMENTS]; }
-
-static void rep_tterm()
-{ delete[] rpl; }
 
 static ActionApi rep_api
 {
@@ -190,22 +167,22 @@ static ActionApi rep_api
         mod_ctor,
         mod_dtor
     },
-    RULE_TYPE__ALERT,
+    Actions::ALERT,
     nullptr,
     nullptr,
-    rep_tinit,
-    rep_tterm,
+    nullptr,
+    nullptr,
     rep_ctor,
     rep_dtor
 };
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* act_replace[] =
+#endif
 {
     &rep_api.base,
     nullptr
 };
-#else
-const BaseApi* act_replace = &rep_api.base;
-#endif
 

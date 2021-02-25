@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,14 +17,14 @@
 //--------------------------------------------------------------------------
 // file_module.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "file_module.h"
 
-#include <string>
+using namespace snort;
 using namespace std;
-
-#include "stream_file.h"
-#include "main/snort_config.h"
-#include "stream/stream.h"
 
 //-------------------------------------------------------------------------
 // stream_file module
@@ -41,15 +41,6 @@ static const Parameter s_params[] =
 StreamFileModule::StreamFileModule() :
     Module(MOD_NAME, MOD_HELP, s_params) { }
 
-StreamFileModule::~StreamFileModule() { }
-
-#if 0
-const PegInfo* StreamFileModule::get_pegs() const
-{ return file_pegs; }
-
-PegCount* StreamFileModule::get_counts() const
-{ return (PegCount*)&file_stats; }
-#endif
 
 bool StreamFileModule::begin(const char*, int, SnortConfig*)
 {

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,25 +16,22 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-/*
- * Description:
- *
- * Header file for FTPTelnet FTP Server Module
- *
- * This file defines the server structure and functions to access server
- * inspection.
- *
- * NOTES:
- * - 16.09.04:  Initial Development.  SAS
- *
- * Steven A. Sturges <ssturges@sourcefire.com>
- * Daniel J. Roelker <droelker@sourcefire.com>
- * Marc A. Norton <mnorton@sourcefire.com>
- */
+
+// ftp_server.h author Steven A. Sturges <ssturges@sourcefire.com>
+
+// contributors:
+// Daniel J. Roelker <droelker@sourcefire.com>
+// Marc A. Norton <mnorton@sourcefire.com>
+
 #ifndef FTP_SERVER_H
 #define FTP_SERVER_H
 
-#include "ftpp_include.h"
+/*
+ * FTP Server Module
+ *
+ * This file defines the server structure and functions to access server
+ * inspection.
+ */
 
 typedef struct s_FTP_SERVER_RSP
 {

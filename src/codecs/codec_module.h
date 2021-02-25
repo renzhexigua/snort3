@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -26,6 +26,15 @@
 #include "framework/module.h"
 #include "main/snort_types.h"
 
+namespace snort
+{
+class Trace;
+}
+
+extern THREAD_LOCAL const snort::Trace* decode_trace;
+
+namespace snort
+{
 constexpr int GID_DECODE = 116;
 
 //-----------------------------------------------------
@@ -68,8 +77,8 @@ enum CodecSid : uint32_t
 
     DECODE_BAD_PPPOE = 120,
     DECODE_BAD_VLAN = 130,
-    DECODE_BAD_VLAN_ETHLLC = 131,
-    DECODE_BAD_VLAN_OTHER = 132,
+    DECODE_BAD_LLC_HEADER = 131,
+    DECODE_BAD_LLC_OTHER = 132,
     DECODE_BAD_80211_ETHLLC = 133,
     DECODE_BAD_80211_OTHER = 134,
 
@@ -203,30 +212,48 @@ enum CodecSid : uint32_t
     DECODE_AUTH_HDR_TRUNC,
     DECODE_AUTH_HDR_BAD_LEN,
     DECODE_FPATH_HDR_TRUNC,
+    DECODE_CISCO_META_HDR_TRUNC,
+    DECODE_CISCO_META_HDR_OPT_LEN,
+    DECODE_CISCO_META_HDR_OPT_TYPE, // = 470
+    DECODE_CISCO_META_HDR_SGT,
     DECODE_TOO_MANY_LAYERS,
-    DECODE_CAPWAP_TRUNC,
-    DECODE_INDEX_MAX // = 470
+    DECODE_BAD_ETHER_TYPE,
+    DECODE_ICMP6_NOT_IP6,
+    DECODE_MIPV6_BAD_PAYLOAD_PROTO,
+    DECODE_INDEX_MAX
 };
 
 //-------------------------------------------------------------------------
 // module
 //-------------------------------------------------------------------------
 
-class SO_PUBLIC CodecModule : public Module
+class BaseCodecModule : public Module
 {
 public:
-    CodecModule();
-    CodecModule(const char* s, const char* h) : Module(s, h)
+    BaseCodecModule(const char* s, const char* h) : Module(s, h)
     { }
 
-    CodecModule(const char* s, const char* h, const Parameter* p, bool is_list = false)
+    BaseCodecModule(const char* s, const char* h, const Parameter* p, bool is_list = false)
         : Module(s, h, p, is_list) { }
 
     unsigned get_gid() const override
     { return GID_DECODE; }
 
-    const RuleMap* get_rules() const override;
+    Usage get_usage() const override
+    { return CONTEXT; }
 };
+
+class SO_PUBLIC CodecModule : public BaseCodecModule
+{
+public:
+    CodecModule();
+
+    const RuleMap* get_rules() const override;
+
+    void set_trace(const Trace*) const override;
+    const TraceOption* get_trace_options() const override;
+};
+}
 
 #endif
 

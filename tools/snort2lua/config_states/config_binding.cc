@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -37,8 +37,7 @@ class Binding : public ConversionState
 {
 public:
     Binding(Converter& c) : ConversionState(c) { }
-    virtual ~Binding() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 
 private:
     void add_vlan(const std::string& vlan, Binder&);
@@ -112,7 +111,7 @@ void Binding::add_policy_id(const std::string& id,
             "IDs, but policy_id is " + id);
     }
 
-    bind.set_when_policy_id(policy_id);
+    bind.set_when_ips_policy_id(policy_id);
 }
 
 void Binding::add_net(const std::string& net,
@@ -132,13 +131,13 @@ bool Binding::convert(std::istringstream& data_stream)
         (!(data_stream >> binding_type)))
         return false;
 
-    if (!binding_type.compare("policy_id"))
+    if (binding_type == "policy_id")
         func = &Binding::add_policy_id;
 
-    else if (!binding_type.compare("vlan"))
+    else if (binding_type == "vlan")
         func = &Binding::add_vlan;
 
-    else if (!binding_type.compare("net"))
+    else if (binding_type == "net")
         func = &Binding::add_net;
 
     else
@@ -148,7 +147,10 @@ bool Binding::convert(std::istringstream& data_stream)
     if (!util::get_string(data_stream, val, ","))
         return false;
 
-    Binder bind(table_api);
+    auto& bind = cv.make_binder();
+    auto& net_bind = cv.make_binder();
+    net_bind.print_binding(false);
+
     bool rc = true;
 
     do
@@ -156,6 +158,7 @@ bool Binding::convert(std::istringstream& data_stream)
         try
         {
             (this->*func)(val, bind);
+            (this->*func)(val, net_bind);
         }
         catch (const std::invalid_argument& e)
         {
@@ -182,13 +185,12 @@ bool Binding::convert(std::istringstream& data_stream)
         {
             Converter bind_cv;
 
-            // This will ensure that the final ouput file contains
-            // lua syntax - even if their are only rules in the file
+            // This will ensure that the final output file contains
+            // lua syntax - even if there are only rules in the file
             bind_cv.get_table_api().open_top_level_table("ips");
             bind_cv.get_table_api().close_table();
 
-//            file = file + ".lua";  FIXIT-L  the file names should contain their original
-// variables
+            //file = file + ".lua";  FIXIT-L file names should contain their original variables
             file = full_path + ".lua";
 
             if (bind_cv.convert(full_path, file, file, full_path + ".rej") < 0)
@@ -200,7 +202,17 @@ bool Binding::convert(std::istringstream& data_stream)
         }
     }
 
-    bind.set_use_file(file);
+    bool is_ips;
+
+    if ( cv.get_ips_pattern().empty() )
+        is_ips = false;
+    else if ( file.find(cv.get_ips_pattern()) != std::string::npos )
+        is_ips = true;
+    else
+        is_ips = false;
+
+    bind.set_use_file(file, is_ips ? Binder::IT_IPS : Binder::IT_FILE);
+
     return rc;
 }
 

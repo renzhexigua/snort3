@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,8 +17,17 @@
 //--------------------------------------------------------------------------
 // hashes.h author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "hashes.h"
 
+#include <openssl/md5.h>
+#include <openssl/sha.h>
+
+namespace snort
+{
 void sha256(const unsigned char* data, size_t size, unsigned char* digest)
 {
     SHA256_CTX c;
@@ -43,3 +52,4 @@ void md5(const unsigned char* data, size_t size, unsigned char* digest)
     MD5_Final(digest, &c);
 }
 
+}

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,134 +16,55 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
+// sflsq.h author Marc Norton <mnorton@sourcefire.com>
 
-//---------------------------------------------------------------
-// if you are thinking to use these for new code, please consider
-// instead using STL containers which give you all this and much
-// more.  :)
-//---------------------------------------------------------------
-
-/*
-*  sflsq.h
-*
-*  Simple LIST, STACK, QUEUE DICTIONARY(LIST BASED)interface
-*
-*  All of these functions are based on lists, which use
-*  the standard malloc.
-*
-*  Note that NODE_DATA can be redifined with the
-*  define below.
-*
-*  Author: Marc Norton
-*/
 #ifndef SFLSQ_H
 #define SFLSQ_H
 
-/*
-*
-*/
+#include "main/snort_types.h"
+
+// Simple LIST interface
+// Switch to STL containers ASAP
+// FIXIT-M deprecated, we are going to delete this
+
 typedef void* NODE_DATA;
 
-/*
-*    Simple list,stack or queue NODE
-*/
 typedef struct sf_lnode
 {
     struct sf_lnode* next;
     struct sf_lnode* prev;
     NODE_DATA ndata;
 }
-SF_QNODE,SF_SNODE,SF_LNODE;
+SF_LNODE;
 
-/*
-*	Integer Stack - uses an array from the subroutines stack
-*/
-struct SF_ISTACK
-{
-    unsigned* stack;
-    unsigned nstack;
-    unsigned n;
-};
-
-/*
-*	Pointer Stack - uses an array from the subroutines stack
-*/
-struct SF_PSTACK
-{
-    void** stack;
-    unsigned nstack;
-    unsigned n;
-};
-
-/*
-*  Simple Structure for Queue's, stacks, lists
-*/
 struct sf_list
 {
     SF_LNODE* head, * tail;
     unsigned count;
 };
 
-typedef sf_list SF_QUEUE;
-typedef sf_list SF_STACK;
 typedef sf_list SF_LIST;
 
-/*
-*  Linked List Interface
-*/
-SF_LIST* sflist_new(void);
-void sflist_init(SF_LIST*);
-int sflist_add_tail(SF_LIST*, NODE_DATA);
-int sflist_add_head(SF_LIST*, NODE_DATA);
-int sflist_add_before(SF_LIST*, SF_LNODE*, NODE_DATA);
-int sflist_add_after(SF_LIST*, SF_LNODE*, NODE_DATA);
-NODE_DATA sflist_remove_head(SF_LIST*);
-NODE_DATA sflist_remove_tail(SF_LIST*);
-void sflist_remove_node(SF_LIST*, SF_LNODE*);
-int sflist_count(SF_LIST*);
-NODE_DATA sflist_first(SF_LIST*, SF_LNODE**);
-NODE_DATA sflist_next(SF_LNODE**);
-void sflist_free(SF_LIST*);
-void sflist_free_all(SF_LIST*, void (* free)(void*) );
-void sflist_static_free_all(SF_LIST*, void (* nfree)(void*));
-void sflist_static_free(SF_LIST*);
+// -----------------------------------------------------------------------------
+// Linked List Interface
+// -----------------------------------------------------------------------------
 
-/*
-*   Stack Interface ( LIFO - Last in, First out )
-*/
-SF_STACK* sfstack_new(void);
-int sfstack_add(SF_STACK*, NODE_DATA);
-NODE_DATA sfstack_remove(SF_STACK*);
-int sfstack_count(SF_STACK*);
-void sfstack_free(SF_STACK*);
-void sfstack_free_all(SF_STACK*, void (* free)(void*) );
-void sfstack_static_free_all(SF_STACK*, void (* nfree)(void*));
-void sfstack_static_free(SF_STACK*);
-
-/*
-*   Queue Interface ( FIFO - First in, First out )
-*/
-SF_QUEUE* sfqueue_new(void);
-int sfqueue_add(SF_QUEUE*, NODE_DATA);
-NODE_DATA sfqueue_remove(SF_QUEUE*);
-int sfqueue_count(SF_QUEUE*);
-void sfqueue_free(SF_QUEUE*);
-void sfqueue_free_all(SF_QUEUE*, void (* free)(void*) );
-void sfqueue_static_free_all(SF_QUEUE*,void (* nfree)(void*));
-void sfqueue_static_free(SF_QUEUE*);
-
-/*
-* Performance Stack functions for Integer/Unsigned and Pointers, uses
-* user provided array storage, perhaps from the program stack or a global.
-* These are efficient, and use no memory functions.
-*/
-int sfistack_init(SF_ISTACK*, unsigned* a,  unsigned n);
-int sfistack_push(SF_ISTACK*, unsigned value);
-int sfistack_pop(SF_ISTACK*, unsigned* value);
-
-int sfpstack_init(SF_PSTACK*, void** a,  unsigned n);
-int sfpstack_push(SF_PSTACK*, void* value);
-int sfpstack_pop(SF_PSTACK*, void** value);
+namespace snort
+{
+SO_PUBLIC SF_LIST* sflist_new();
+SO_PUBLIC void sflist_init(SF_LIST*);
+SO_PUBLIC void sflist_add_tail(SF_LIST*, NODE_DATA);
+SO_PUBLIC void sflist_add_head(SF_LIST*, NODE_DATA);
+SO_PUBLIC void sflist_add_before(SF_LIST*, SF_LNODE*, NODE_DATA);
+SO_PUBLIC NODE_DATA sflist_remove_head(SF_LIST*);
+SO_PUBLIC NODE_DATA sflist_remove_tail(SF_LIST*);
+SO_PUBLIC int sflist_count(SF_LIST*);
+SO_PUBLIC NODE_DATA sflist_first(const SF_LIST*, SF_LNODE**);
+SO_PUBLIC NODE_DATA sflist_next(SF_LNODE**);
+SO_PUBLIC void sflist_free(SF_LIST*);
+SO_PUBLIC void sflist_free_all(SF_LIST*, void (* free)(void*) );
+SO_PUBLIC void sflist_static_free_all(SF_LIST*, void (* nfree)(void*));
+}
 
 #endif
 

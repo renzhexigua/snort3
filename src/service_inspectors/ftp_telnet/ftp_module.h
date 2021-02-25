@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,12 +21,8 @@
 #ifndef FTP_MODULE_H
 #define FTP_MODULE_H
 
-#include <string>
-#include <vector>
-
-#include "ftpp_ui_config.h"
 #include "framework/module.h"
-#include "main/thread.h"
+#include "ftpp_ui_config.h"
 
 #define GID_FTP 125
 
@@ -40,10 +36,12 @@
 #define FTP_BOUNCE                       8
 #define FTP_EVASIVE_TELNET_CMD           9
 
+namespace snort
+{
 struct SnortConfig;
+}
 
-extern THREAD_LOCAL SimpleStats ftstats;
-extern THREAD_LOCAL ProfileStats ftpPerfStats;
+extern THREAD_LOCAL snort::ProfileStats ftpPerfStats;
 
 //-------------------------------------------------------------------------
 
@@ -53,21 +51,27 @@ struct BounceTo
     Port low;
     Port high;
 
-    BounceTo(std::string& address, Port lo, Port hi);
+    BounceTo(const std::string& address, Port lo, Port hi);
 };
 
-class FtpClientModule : public Module
+class FtpClientModule : public snort::Module
 {
 public:
     FtpClientModule();
-    ~FtpClientModule();
+    ~FtpClientModule() override;
 
-    bool set(const char*, Value&, SnortConfig*) override;
-    bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
+    bool begin(const char*, int, snort::SnortConfig*) override;
+    bool end(const char*, int, snort::SnortConfig*) override;
 
     FTP_CLIENT_PROTO_CONF* get_data();
     const BounceTo* get_bounce(unsigned idx);
+
+    Usage get_usage() const override
+    { return INSPECT; }
+
+    bool is_bindable() const override
+    { return true; }
 
 private:
     FTP_CLIENT_PROTO_CONF* conf;
@@ -90,6 +94,8 @@ private:
 #define CMD_ENCR   0x0080
 #define CMD_DIR    0x0100
 #define CMD_VALID  0x0200
+#define CMD_REST   0x0400
+#define CMD_PROT   0x0800
 
 struct FtpCmd
 {
@@ -99,33 +105,39 @@ struct FtpCmd
     uint32_t flags;
     unsigned number;
 
-    FtpCmd(std::string&, uint32_t, int);
-    FtpCmd(std::string&, std::string&, int);
+    FtpCmd(const std::string&, uint32_t, int);
+    FtpCmd(const std::string&, const std::string&, int);
 };
 
-class FtpServerModule : public Module
+class FtpServerModule : public snort::Module
 {
 public:
     FtpServerModule();
-    ~FtpServerModule();
+    ~FtpServerModule() override;
 
-    bool set(const char*, Value&, SnortConfig*) override;
-    bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
+    bool begin(const char*, int, snort::SnortConfig*) override;
+    bool end(const char*, int, snort::SnortConfig*) override;
 
     unsigned get_gid() const override
     { return GID_FTP; }
 
-    const RuleMap* get_rules() const override;
+    const snort::RuleMap* get_rules() const override;
     const PegInfo* get_pegs() const override;
     PegCount* get_counts() const override;
-    ProfileStats* get_profile() const override;
+    snort::ProfileStats* get_profile() const override;
+
+    Usage get_usage() const override
+    { return INSPECT; }
+
+    bool is_bindable() const override
+    { return true; }
 
     FTP_SERVER_PROTO_CONF* get_data();
     const FtpCmd* get_cmd(unsigned idx);
 
 private:
-    void add_commands(Value&, uint32_t flags, int num = 0);
+    void add_commands(snort::Value&, uint32_t flags, int num = 0);
 
 private:
     FTP_SERVER_PROTO_CONF* conf;

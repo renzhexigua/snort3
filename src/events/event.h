@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -18,13 +18,9 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-/*  D E F I N E S  ************************************************************/
 #ifndef EVENT_H
 #define EVENT_H
 
-#include <sys/types.h>
-
-#include "main/snort_types.h"
 #include "main/thread.h"
 
 struct SigInfo;
@@ -41,17 +37,21 @@ struct sf_timeval32
 
 struct Event
 {
-    const SigInfo* sig_info;
-    uint32_t event_id;        /* event ID */
-    uint32_t event_reference; /* reference to other events that have gone off,
-                                * such as in the case of tagged packets...
-                                */
-    struct sf_timeval32 ref_time;   /* reference time for the event reference */
-    const char* alt_msg;
+    SigInfo* sig_info = nullptr;
+    uint32_t event_id = 0;
+    uint32_t event_reference = 0; // reference to other events that have gone off,
+                              // such as in the case of tagged packets...
+    struct sf_timeval32 ref_time = { 0, 0 };   /* reference time for the event reference */
+    const char* alt_msg = nullptr;
+
+    Event() = default;
+    Event(SigInfo& si)
+    { sig_info = &si; }
 };
 
 void SetEvent(
-Event*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+    Event&, uint32_t gid, uint32_t sid, uint32_t rev,
+    uint32_t classification, uint32_t priority, uint32_t event_ref);
 
 #endif
 

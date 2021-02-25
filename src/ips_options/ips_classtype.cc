@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,23 +17,17 @@
 //--------------------------------------------------------------------------
 // ips_classtype.cc author Russ Combs <rucombs@cisco.com>
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <ctype.h>
 
-#include "main/snort_types.h"
-#include "main/snort_debug.h"
 #include "detection/treenodes.h"
-#include "utils/util.h"
-#include "detection/detection_defines.h"
+#include "framework/decode_data.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
-#include "protocols/packet.h"
+#include "main/snort_config.h"
+
+using namespace snort;
 
 #define s_name "classtype"
 
@@ -57,7 +51,12 @@ class ClassTypeModule : public Module
 public:
     ClassTypeModule() : Module(s_name, s_help, s_params) { }
     bool set(const char*, Value&, SnortConfig*) override;
-    ClassType* type;
+
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    const ClassType* type = nullptr;
 };
 
 bool ClassTypeModule::set(const char*, Value& v, SnortConfig* sc)
@@ -65,8 +64,14 @@ bool ClassTypeModule::set(const char*, Value& v, SnortConfig* sc)
     if ( !v.is("~") )
         return false;
 
-    type = ClassTypeLookupByType(sc, v.get_string());
+    type = get_classification(sc, v.get_string());
 
+    if ( !type and sc->dump_rule_info() )
+    {
+        const char* s = v.get_string();
+        add_classification(sc, s, s, 1);
+        type = get_classification(sc, s);
+    }
     return type != nullptr;
 }
 
@@ -87,7 +92,7 @@ static void mod_dtor(Module* m)
 static IpsOption* classtype_ctor(Module* p, OptTreeNode* otn)
 {
     ClassTypeModule* m = (ClassTypeModule*)p;
-    otn->sigInfo.classType = m->type;
+    otn->sigInfo.class_type = m->type;
 
     if ( m->type )
     {

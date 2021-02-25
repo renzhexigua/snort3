@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -15,54 +15,37 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-//
 
-/*
- * pop.h: Definitions, structs, function prototype(s) for
- *		the POP service inspectors.
- * Author: Bhagyashree Bantwal <bbantwal@cisco.com>
- */
+// pop.h author Bhagyashree Bantwal <bbantwal@cisco.com>
 
 #ifndef POP_H
 #define POP_H
 
-#include "protocols/packet.h"
-#include "stream/stream_api.h"
-#include "profiler.h"
-#include "pop_config.h"
-/* Direction packet is coming from, if we can figure it out */
+// Implementation header with definitions, datatypes and flowdata class for
+// POP service inspector.
+
+#include "flow/flow.h"
+#include "mime/file_mime_process.h"
+
+// Direction packet is coming from, if we can figure it out
 #define POP_PKT_FROM_UNKNOWN  0
 #define POP_PKT_FROM_CLIENT   1
 #define POP_PKT_FROM_SERVER   2
 
-#define SEARCH_CMD       0
-#define SEARCH_RESP      1
-#define SEARCH_HDR       2
-#define SEARCH_DATA_END  3
-#define NUM_SEARCHES  4
-
-#define BOUNDARY     0
-
-#define STATE_DATA             0    /* Data state */
-#define STATE_TLS_CLIENT_PEND  1    /* Got STARTTLS */
-#define STATE_TLS_SERVER_PEND  2    /* Got STARTTLS */
-#define STATE_TLS_DATA         3    /* Successful handshake, TLS encrypted data */
+#define STATE_DATA             0    // Data state
+#define STATE_TLS_CLIENT_PEND  1    // Got STARTTLS
+#define STATE_TLS_SERVER_PEND  2    // Got STARTTLS
+#define STATE_TLS_DATA         3    // Successful handshake, TLS encrypted data
 #define STATE_COMMAND          4
 #define STATE_UNKNOWN          5
+#define STATE_DECRYPTION_REQ   6
 
-#define STATE_DATA_INIT    0
-#define STATE_DATA_HEADER  1    /* Data header section of data state */
-#define STATE_DATA_BODY    2    /* Data body section of data state */
-#define STATE_MIME_HEADER  3    /* MIME header section within data section */
-#define STATE_DATA_UNKNOWN 4
-
-/* session flags */
+// session flags
 #define POP_FLAG_NEXT_STATE_UNKNOWN         0x00000004
 #define POP_FLAG_GOT_NON_REBUILT            0x00000008
 #define POP_FLAG_CHECK_SSL                  0x00000010
+#define POP_FLAG_ABANDON_EVT               0x00000020
 
-/* Maximum length of header chars before colon, based on Exim 4.32 exploit */
-#define MAX_HEADER_NAME_LEN 64
 typedef enum _POPCmdEnum
 {
     CMD_APOP = 0,
@@ -111,18 +94,21 @@ struct POPToken
     int search_id;
 };
 
-struct POPCmdConfig
-{
-    char alert;                  /*  1 if alert when seen                          */
-    char normalize;              /*  1 if we should normalize this command         */
-    int max_line_len;            /*  Max length of this particular command         */
-};
-
 struct POPSearchInfo
 {
     int id;
     int index;
     int length;
+};
+
+class PopMime : public snort::MimeSession
+{
+    using snort::MimeSession::MimeSession;
+private:
+    void decode_alert() override;
+    void decompress_alert() override;
+    void reset_state(snort::Flow* ssn) override;
+    bool is_end_of_data(snort::Flow* ssn) override;
 };
 
 struct POPData
@@ -131,22 +117,24 @@ struct POPData
     int prev_response;
     int state_flags;
     int session_flags;
-    MimeState mime_ssn;
+    PopMime* mime_ssn;
 };
 
-class PopFlowData : public FlowData
+class PopFlowData : public snort::FlowData
 {
 public:
     PopFlowData();
-    ~PopFlowData();
+    ~PopFlowData() override;
 
     static void init()
-    { flow_id = FlowData::get_flow_id(); }
+    { inspector_id = snort::FlowData::create_flow_data_id(); }
+
+    size_t size_of() override
+    { return sizeof(*this); }
 
 public:
-    static unsigned flow_id;
+    static unsigned inspector_id;
     POPData session;
 };
 
 #endif
-

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -18,7 +18,13 @@
 
 // arp_module.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "arp_module.h"
+
+using namespace snort;
 
 #define ARPSPOOF_UNICAST_ARP_REQUEST_STR \
     "unicast ARP request"
@@ -56,17 +62,10 @@ static const Parameter s_params[] =
 
 static const RuleMap s_rules[] =
 {
-    { ARPSPOOF_UNICAST_ARP_REQUEST,
-      ARPSPOOF_UNICAST_ARP_REQUEST_STR },
-
-    { ARPSPOOF_ETHERFRAME_ARP_MISMATCH_SRC,
-      ARPSPOOF_ETHERFRAME_ARP_MISMATCH_SRC_STR },
-
-    { ARPSPOOF_ETHERFRAME_ARP_MISMATCH_DST,
-      ARPSPOOF_ETHERFRAME_ARP_MISMATCH_DST_STR },
-
-    { ARPSPOOF_ARP_CACHE_OVERWRITE_ATTACK,
-      ARPSPOOF_ARP_CACHE_OVERWRITE_ATTACK_STR },
+    { ARPSPOOF_UNICAST_ARP_REQUEST, ARPSPOOF_UNICAST_ARP_REQUEST_STR },
+    { ARPSPOOF_ETHERFRAME_ARP_MISMATCH_SRC, ARPSPOOF_ETHERFRAME_ARP_MISMATCH_SRC_STR },
+    { ARPSPOOF_ETHERFRAME_ARP_MISMATCH_DST, ARPSPOOF_ETHERFRAME_ARP_MISMATCH_DST_STR },
+    { ARPSPOOF_ARP_CACHE_OVERWRITE_ATTACK, ARPSPOOF_ARP_CACHE_OVERWRITE_ATTACK_STR },
 
     { 0, nullptr }
 };
@@ -128,9 +127,9 @@ bool ArpSpoofModule::begin(const char*, int, SnortConfig*)
 bool ArpSpoofModule::end(const char*, int idx, SnortConfig*)
 {
     if ( idx )
-        config->ipmel.push_back(host);
+        config->ipmel.emplace_back(host);
     else
-        config->check_overwrite = config->ipmel.size() > 0;
+        config->check_overwrite = !config->ipmel.empty();
 
     return true;
 }

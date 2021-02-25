@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -15,20 +15,13 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-//
-
-/*
- * ssl.h: Definitions, structs, function prototype(s) for
- *		the SSL service inspectors.
- */
 
 #ifndef SSL_INSPECTOR_H
 #define SSL_INSPECTOR_H
 
-#include "protocols/packet.h"
-#include "stream/stream_api.h"
-#include "profiler.h"
-#include "ssl_config.h"
+// Implementation header with definitions, datatypes and flowdata class for SSL service inspector.
+
+#include "flow/flow.h"
 
 #define SSLPP_ENCRYPTED_FLAGS \
     (SSL_HS_SDONE_FLAG | SSL_CLIENT_KEYX_FLAG | \
@@ -43,45 +36,27 @@ struct SSLData
     uint16_t partial_rec_len[4];
 };
 
-struct SSL_counters_t
-{
-    uint64_t stopped;
-    uint64_t disabled;
-    uint64_t decoded;
-    uint64_t alerts;
-    uint64_t cipher_change;
-    uint64_t unrecognized;
-    uint64_t completed_hs;
-    uint64_t bad_handshakes;
-    uint64_t hs_chello;
-    uint64_t hs_shello;
-    uint64_t hs_cert;
-    uint64_t hs_skey;
-    uint64_t hs_ckey;
-    uint64_t hs_finished;
-    uint64_t hs_sdone;
-    uint64_t capp;
-    uint64_t sapp;
-};
-
-class SslFlowData : public FlowData
+class SslFlowData : public snort::FlowData
 {
 public:
-    SslFlowData() : FlowData(flow_id)
-    { memset(&session, 0, sizeof(session)); }
-
-    ~SslFlowData() { }
+    SslFlowData();
+    ~SslFlowData() override;
 
     static void init()
-    { flow_id = FlowData::get_flow_id(); }
+    { inspector_id = snort::FlowData::create_flow_data_id(); }
+
+    size_t size_of() override
+    { return sizeof(*this); }
 
 public:
-    static unsigned flow_id;
+    static unsigned inspector_id;
     SSLData session;
+    struct {
+        bool orig_flag : 1;
+        bool switch_in : 1;
+    } finalize_info;
 };
+//Function: API to get the ssl flow data from the packet flow.
+SSLData* get_ssl_session_data(snort::Flow* flow);
 
-SSLData* get_ssl_session_data(Flow* flow);
-void SSL_InitGlobals(void);
-
-#endif /* SSL_INSPECTOR_H */
-
+#endif

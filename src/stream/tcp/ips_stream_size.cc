@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,16 +21,15 @@
 #include "config.h"
 #endif
 
-#include "tcp_session.h"
 #include "framework/ips_option.h"
 #include "framework/module.h"
-#include "framework/parameter.h"
 #include "framework/range.h"
-#include "detection/detect.h"
-#include "detection/detection_defines.h"
-#include "hash/sfhashfcn.h"
-#include "time/profiler.h"
-#include "sfip/sf_ip.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler_defs.h"
+
+#include "tcp_session.h"
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // stream_size
@@ -52,7 +51,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     RangeCheck ssod;
@@ -65,28 +64,27 @@ private:
 
 uint32_t SizeOption::hash() const
 {
-    uint32_t a,b,c;
-
-    a = ssod.op;
-    b = ssod.min;
-    c = ssod.max;
+    uint32_t a = ssod.op;
+    uint32_t b = ssod.min;
+    uint32_t c = ssod.max;
 
     mix(a,b,c);
 
     a = direction;
+    b += IpsOption::hash();
 
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool SizeOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    const SizeOption& rhs = (SizeOption&)ips;
+    const SizeOption& rhs = (const SizeOption&)ips;
 
     if ( (direction == rhs.direction) && (ssod == rhs.ssod) )
         return true;
@@ -94,80 +92,80 @@ bool SizeOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int SizeOption::eval(Cursor&, Packet* pkt)
+IpsOption::EvalStatus SizeOption::eval(Cursor&, Packet* pkt)
 {
-    if (!pkt->flow || !pkt->ptrs.tcph)
-        return DETECTION_OPTION_NO_MATCH;
+    RuleProfile profile(streamSizePerfStats);
 
-    PROFILE_VARS;
-    MODULE_PROFILE_START(streamSizePerfStats);
+    if ( !pkt->flow || pkt->flow->pkt_type != PktType::TCP )
+        return NO_MATCH;
 
-    Flow* lwssn = (Flow*)pkt->flow;
-    TcpSession* tcpssn = (TcpSession*)lwssn->session;
+    TcpSession* tcpssn = (TcpSession*)pkt->flow->session;
 
     uint32_t client_size;
     uint32_t server_size;
 
-    if (tcpssn->client.l_nxt_seq > tcpssn->client.isn)
+    if (tcpssn->client.get_snd_nxt() > tcpssn->client.get_iss())
     {
         /* the normal case... */
-        client_size = tcpssn->client.l_nxt_seq - tcpssn->client.isn;
+        client_size = tcpssn->client.get_snd_nxt() - tcpssn->client.get_iss();
     }
     else
     {
         /* the seq num wrapping case... */
-        client_size = tcpssn->client.isn - tcpssn->client.l_nxt_seq;
-    }
-    if (tcpssn->server.l_nxt_seq > tcpssn->server.isn)
-    {
-        /* the normal case... */
-        server_size = tcpssn->server.l_nxt_seq - tcpssn->server.isn;
-    }
-    else
-    {
-        /* the seq num wrapping case... */
-        server_size = tcpssn->server.isn - tcpssn->server.l_nxt_seq;
+        client_size = tcpssn->client.get_iss() - tcpssn->client.get_snd_nxt();
     }
 
-    int result = DETECTION_OPTION_NO_MATCH;
+    if (tcpssn->server.get_snd_nxt() > tcpssn->server.get_iss())
+    {
+        /* the normal case... */
+        server_size = tcpssn->server.get_snd_nxt() - tcpssn->server.get_iss();
+    }
+    else
+    {
+        /* the seq num wrapping case... */
+        server_size = tcpssn->server.get_iss() - tcpssn->server.get_snd_nxt();
+    }
 
     switch ( direction )
     {
     case SSN_DIR_FROM_CLIENT:
         if ( ssod.eval(client_size) )
-            result = DETECTION_OPTION_MATCH;
+            return MATCH;
         break;
 
     case SSN_DIR_FROM_SERVER:
         if ( ssod.eval(server_size) )
-            result = DETECTION_OPTION_MATCH;
+            return MATCH;
         break;
 
     case SSN_DIR_NONE: /* overloaded.  really, its an 'either' */
         if ( ssod.eval(client_size) || ssod.eval(server_size) )
-            result = DETECTION_OPTION_MATCH;
+            return MATCH;
         break;
 
     case SSN_DIR_BOTH:
         if ( ssod.eval(client_size) && ssod.eval(server_size) )
-            result = DETECTION_OPTION_MATCH;
+            return MATCH;
         break;
 
     default:
         break;
     }
-    MODULE_PROFILE_END(streamSizePerfStats);
-    return result;
+
+    return NO_MATCH;
+
 }
 
 //-------------------------------------------------------------------------
 // stream_size module
 //-------------------------------------------------------------------------
 
+#define RANGE "0:"
+
 static const Parameter s_params[] =
 {
-    { "~range", Parameter::PT_STRING, nullptr, nullptr,
-      "size for comparison" },
+    { "~range", Parameter::PT_INTERVAL, RANGE, nullptr,
+      "check if the stream size is in the given range" },
 
     { "~direction", Parameter::PT_ENUM, "either|to_server|to_client|both", nullptr,
       "compare applies to the given direction(s)" },
@@ -186,6 +184,10 @@ public:
     ProfileStats* get_profile() const override
     { return &streamSizePerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     RangeCheck ssod;
     int direction;
 };
@@ -200,10 +202,10 @@ bool SizeModule::begin(const char*, int, SnortConfig*)
 bool SizeModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("~range") )
-        ssod.parse(v.get_string());
+        return ssod.validate(v.get_string(), RANGE);
 
     else if ( v.is("~direction") )
-        direction = v.get_long();
+        direction = v.get_uint8();
 
     else
         return false;
@@ -216,14 +218,10 @@ bool SizeModule::set(const char*, Value& v, SnortConfig*)
 //-------------------------------------------------------------------------
 
 static Module* size_mod_ctor()
-{
-    return new SizeModule;
-}
+{ return new SizeModule; }
 
 static void mod_dtor(Module* m)
-{
-    delete m;
-}
+{  delete m; }
 
 static IpsOption* size_ctor(Module* p, OptTreeNode*)
 {
@@ -232,9 +230,7 @@ static IpsOption* size_ctor(Module* p, OptTreeNode*)
 }
 
 static void opt_dtor(IpsOption* p)
-{
-    delete p;
-}
+{ delete p; }
 
 static const IpsApi size_api =
 {
@@ -251,7 +247,7 @@ static const IpsApi size_api =
         mod_dtor
     },
     OPT_TYPE_DETECTION,
-    1, PROTO_BIT__TCP,
+    0, PROTO_BIT__TCP,  // FIXIT-L eventually change to 1 since <> and <=> are supported
     nullptr,
     nullptr,
     nullptr,

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,11 +20,15 @@
 #ifndef IPS_ACTION_H
 #define IPS_ACTION_H
 
-#include "main/snort_types.h"
-#include "framework/base_api.h"
-#include "actions/actions.h"
+// IpsAction provides custom rule actions that are executed when a
+// detection event is generated regardless of whether the event is logged.
+// These can be used to execute external controls like updating an external
+// firewall.
 
-struct Packet;
+#include "actions/actions.h"
+#include "framework/base_api.h"
+#include "main/snort_types.h"
+#include "packet_io/active_action.h"
 
 // this is the current version of the api
 #define ACTAPI_VERSION ((BASE_API_VERSION << 16) | 0)
@@ -33,35 +37,22 @@ struct Packet;
 // api for class
 //-------------------------------------------------------------------------
 
-enum ActionType
+namespace snort
 {
-    ACT_LOCAL,
-    ACT_MODIFY,
-    ACT_PROXY,
-    ACT_RESET,
-    ACT_REMOTE,
-    ACT_MAX
-};
+struct Packet;
 
-struct SnortConfig;
-
-class SO_PUBLIC IpsAction
+class SO_PUBLIC IpsAction : public ActiveAction
 {
 public:
-    virtual ~IpsAction() { }
-
-    virtual void exec(Packet*) = 0;
-
+    virtual void exec(Packet*) override = 0;
     const char* get_name() const { return name; }
-    ActionType get_action() { return action; }
 
 protected:
-    IpsAction(const char* s, ActionType a)
-    { name = s; action = a; }
+    IpsAction(const char* s, ActionType a) : ActiveAction(a)
+    { name = s; }
 
 private:
     const char* name;
-    ActionType action;
 };
 
 typedef void (* IpsActFunc)();
@@ -71,7 +62,7 @@ typedef void (* ActDelFunc)(IpsAction*);
 struct ActionApi
 {
     BaseApi base;
-    RuleType type;
+    Actions::Type type;
 
     IpsActFunc pinit;
     IpsActFunc pterm;
@@ -81,6 +72,6 @@ struct ActionApi
     ActNewFunc ctor;
     ActDelFunc dtor;
 };
-
+}
 #endif
 

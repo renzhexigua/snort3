@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,36 +17,29 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "telnet.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <assert.h>
-#include <string.h>
-#include <stdio.h>
-#include <sys/types.h>
+#include "telnet.h"
 
-#include "snort_types.h"
-#include "snort_debug.h"
+#include "detection/detection_engine.h"
+#include "log/messages.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
 
-#include "pp_telnet.h"
-#include "ftpp_si.h"
-#include "ftpp_ui_config.h"
-#include "ftpp_return_codes.h"
 #include "ft_main.h"
 #include "ftp_print.h"
+#include "ftpp_return_codes.h"
+#include "ftpp_si.h"
+#include "ftpp_ui_config.h"
+#include "pp_telnet.h"
 #include "telnet_module.h"
-#include "profiler.h"
-#include "stream/stream_api.h"
-#include "file_api/file_api.h"
-#include "parser.h"
-#include "framework/inspector.h"
-#include "utils/sfsnprintfappend.h"
+
+using namespace snort;
 
 THREAD_LOCAL ProfileStats telnetPerfStats;
-THREAD_LOCAL SimpleStats tnstats;
+THREAD_LOCAL TelnetStats tnstats;
 
 //-------------------------------------------------------------------------
 // implementation
@@ -76,39 +69,29 @@ static int TelnetCheckConfigs(SnortConfig*, void* pData)
 static int SnortTelnet(TELNET_PROTO_CONF* telnet_config, TELNET_SESSION* Telnetsession,
     Packet* p, int iInspectMode)
 {
-    int iRet;
-    PROFILE_VARS;
+    Profile profile(telnetPerfStats);
 
-    if (!Telnetsession)
-    {
+    if ( !Telnetsession )
         return FTPP_NONFATAL_ERR;
-    }
 
-    if (Telnetsession->encr_state && !Telnetsession->telnet_conf->check_encrypted_data)
-    {
+    if ( Telnetsession->encr_state &&
+         !Telnetsession->telnet_conf->check_encrypted_data )
         return FTPP_SUCCESS;
+
+    if ( telnet_config->normalize )
+    {
+        DataBuffer& buf = DetectionEngine::get_alt_buffer(p);
+        int ret = normalize_telnet(Telnetsession, p, buf, iInspectMode,
+            FTPP_APPLY_TNC_ERASE_CMDS, false);
+
+        if ( ret == FTPP_SUCCESS || ret == FTPP_NORMALIZED )
+            do_detection(p);
     }
 
-    MODULE_PROFILE_START(telnetPerfStats);
-
-    if (!telnet_config->normalize)
+    else
     {
         do_detection(p);
     }
-    else
-    {
-        iRet = normalize_telnet(
-            Telnetsession, p, iInspectMode, FTPP_APPLY_TNC_ERASE_CMDS);
-
-        if ((iRet == FTPP_SUCCESS) || (iRet == FTPP_NORMALIZED))
-        {
-            do_detection(p);
-        }
-    }
-    MODULE_PROFILE_END(telnetPerfStats);
-#ifdef PERF_PROFILING
-    ft_update_perf(telnetPerfStats);
-#endif
 
     return FTPP_SUCCESS;
 }
@@ -117,7 +100,7 @@ static int snort_telnet(TELNET_PROTO_CONF* GlobalConf, Packet* p)
 {
     FTPP_SI_INPUT SiInput;
     int iInspectMode = FTPP_SI_NO_MODE;
-    FTP_TELNET_SESSION* ft_ssn = NULL;
+    FTP_TELNET_SESSION* ft_ssn = nullptr;
 
     /*
      * Set up the FTPP_SI_INPUT pointer.  This is what the session_inspection()
@@ -129,11 +112,11 @@ static int snort_telnet(TELNET_PROTO_CONF* GlobalConf, Packet* p)
     if (p->flow)
     {
         TelnetFlowData* fd = (TelnetFlowData*)
-            p->flow->get_application_data(FtpFlowData::flow_id);
+            p->flow->get_flow_data(FtpFlowData::inspector_id);
 
         ft_ssn = fd ? &fd->session.ft_ssn : nullptr;
 
-        if (ft_ssn != NULL)
+        if (ft_ssn != nullptr)
         {
             SiInput.pproto = ft_ssn->proto;
 
@@ -145,11 +128,11 @@ static int snort_telnet(TELNET_PROTO_CONF* GlobalConf, Packet* p)
                 }
                 else
                 {
-                    if ( p->packet_flags & PKT_FROM_SERVER )
+                    if ( p->is_from_server() )
                     {
                         iInspectMode = FTPP_SI_SERVER_MODE;
                     }
-                    else if ( p->packet_flags & PKT_FROM_CLIENT )
+                    else if ( p->is_from_client() )
                     {
                         iInspectMode = FTPP_SI_CLIENT_MODE;
                     }
@@ -158,16 +141,16 @@ static int snort_telnet(TELNET_PROTO_CONF* GlobalConf, Packet* p)
             else
             {
                 assert(false);
-                p->flow->free_application_data(FtpFlowData::flow_id);
+                p->flow->free_flow_data(FtpFlowData::inspector_id);
                 return 0;
             }
         }
     }
 
-    if (GlobalConf == NULL)
+    if (GlobalConf == nullptr)
         return 0;
 
-    if (ft_ssn == NULL)
+    if (ft_ssn == nullptr)
     {
         SiInput.pproto = FTPP_SI_PROTO_UNKNOWN;
         iInspectMode = FTPP_SI_NO_MODE;
@@ -178,48 +161,17 @@ static int snort_telnet(TELNET_PROTO_CONF* GlobalConf, Packet* p)
             return FTPP_INVALID_PROTO;
     }
 
-    if (ft_ssn != NULL)
+    if (ft_ssn != nullptr)
     {
         switch (SiInput.pproto)
         {
         case FTPP_SI_PROTO_TELNET:
             return SnortTelnet(GlobalConf, (TELNET_SESSION*)ft_ssn, p, iInspectMode);
-            break;
         }
     }
 
     /* Uh, shouldn't get here  */
     return FTPP_INVALID_PROTO;
-}
-
-/*
- * Function: PrintTelnetConf(TELNET_PROTO_CONF *TelnetConf,
- *                          char *Option)
- *
- * Purpose: Prints the telnet configuration
- *
- * Arguments: TelnetConf    => pointer to the telnet configuration
- *
- * Returns: int     => an error code integer (0 = success,
- *                     >0 = non-fatal error, <0 = fatal error)
- *
- */
-static int PrintTelnetConf(TELNET_PROTO_CONF* TelnetConf)
-{
-    if (!TelnetConf)
-    {
-        return FTPP_INVALID_ARG;
-    }
-
-    LogMessage("    TELNET CONFIG:\n");
-    LogMessage("      Are You There Threshold: %d\n",
-        TelnetConf->ayt_threshold);
-    LogMessage("      Normalize: %s\n", TelnetConf->normalize ? "YES" : "NO");
-    PrintConfOpt(TelnetConf->detect_encrypted, "Check for Encrypted Traffic");
-    LogMessage("      Continue to check encrypted data: %s\n",
-        TelnetConf->check_encrypted_data ? "YES" : "NO");
-
-    return FTPP_SUCCESS;
 }
 
 //-------------------------------------------------------------------------
@@ -230,14 +182,14 @@ class Telnet : public Inspector
 {
 public:
     Telnet(TELNET_PROTO_CONF*);
-    ~Telnet();
+    ~Telnet() override;
 
     bool configure(SnortConfig*) override;
-    void show(SnortConfig*) override;
+    void show(const SnortConfig*) const override;
     void eval(Packet*) override;
 
-    bool get_buf(InspectionBuffer::Type, Packet*, InspectionBuffer&);
-    void clear(Packet*);
+    bool get_buf(InspectionBuffer::Type, Packet*, InspectionBuffer&) override;
+    void clear(Packet*) override;
 
 private:
     TELNET_PROTO_CONF* config;
@@ -259,9 +211,15 @@ bool Telnet::configure(SnortConfig* sc)
     return !TelnetCheckConfigs(sc, config);
 }
 
-void Telnet::show(SnortConfig*)
+void Telnet::show(const SnortConfig*) const
 {
-    PrintTelnetConf(config);
+    if ( !config )
+        return;
+
+    ConfigLogger::log_value("ayt_attack_thresh", config->ayt_threshold);
+    ConfigLogger::log_flag("check_encrypted", config->detect_encrypted);
+    ConfigLogger::log_flag("encrypted_traffic", config->check_encrypted_data);
+    ConfigLogger::log_flag("normalize", config->normalize);
 }
 
 void Telnet::eval(Packet* p)
@@ -274,19 +232,19 @@ void Telnet::eval(Packet* p)
 }
 
 bool Telnet::get_buf(
-    InspectionBuffer::Type ibt, Packet*, InspectionBuffer& b)
+    InspectionBuffer::Type ibt, Packet* p, InspectionBuffer& b)
 {
     if ( ibt != InspectionBuffer::IBT_ALT )
         return false;
 
-    b.data = get_telnet_buffer(b.len);
+    b.data = get_telnet_buffer(p, b.len);
 
     return (b.data != nullptr);
 }
 
-void Telnet::clear(Packet*)
+void Telnet::clear(Packet* p)
 {
-    reset_telnet_buffer();
+    reset_telnet_buffer(p);
 }
 
 //-------------------------------------------------------------------------
@@ -331,7 +289,7 @@ const InspectApi tn_api =
         mod_dtor
     },
     IT_SERVICE,
-    (uint16_t)PktType::PDU,
+    PROTO_BIT__PDU,
     nullptr, // buffers
     "telnet",
     tn_init,

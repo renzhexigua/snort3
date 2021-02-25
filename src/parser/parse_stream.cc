@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,21 +17,23 @@
 //--------------------------------------------------------------------------
 // parse_stream.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "parse_stream.h"
 
-#include <ctype.h>
-#include <stdio.h>
-#include <string.h>
-
-#include <istream>
 #include <sstream>
-#include <string>
-using namespace std;
+
+#include "log/messages.h"
+#include "managers/ips_manager.h"
 
 #include "parser.h"
 #include "parse_conf.h"
 #include "parse_rule.h"
-#include "detection/treenodes.h"
+
+using namespace snort;
+using namespace std;
 
 static unsigned chars = 0, tokens = 0;
 static unsigned lines = 1, comments = 0;
@@ -82,7 +84,7 @@ static uint8_t to_hex(char c)
 }
 
 static TokenType get_token(
-    istream& is, string& s, const char* punct, bool esc)
+    istream& is, string& s, const char* punct, int esc)
 {
     static int prev = EOF;
     int c, list = 0, state = 0;
@@ -204,9 +206,9 @@ static TokenType get_token(
                 return TT_STRING;
             }
             else if ( c == '\\' )
-                state = esc ? 4 : 16;
+                state = (esc > 0) ? 4 : 16;
             else if ( c == '\n' )
-                ParseWarning(WARN_RULES, "line break in string on line %d\n", lines-1);
+                ParseWarning(WARN_RULES, "line break in string on line %u\n", lines-1);
             else
                 s += c;
             break;
@@ -221,7 +223,7 @@ static TokenType get_token(
             break;
         case 5:  // unquoted escape
             if ( c != '\n' && c != '\r' )
-                ParseWarning(WARN_RULES, "invalid escape on line %d\n", lines);
+                ParseWarning(WARN_RULES, "invalid escape on line %u\n", lines);
             state = 0;
             break;
         case 6:  // token
@@ -313,7 +315,7 @@ static TokenType get_token(
                 state = 11;
             else if ( c == '\n' )
             {
-                ParseWarning(WARN_RULES, "line break in commented string on line %d\n", lines-1);
+                ParseWarning(WARN_RULES, "line break in commented string on line %u\n", lines-1);
                 state = 11;
             }
             break;
@@ -325,7 +327,8 @@ static TokenType get_token(
             }
             else
             {
-                ParseWarning(WARN_RULES, "\\x used with no following hex digits", lines-1);
+                ParseWarning(WARN_RULES, "\\x used with no following hex digits on line %u\n",
+                        lines-1);
                 s += c;
                 state = 3;
             }
@@ -400,51 +403,51 @@ struct State
 
 static const State fsm[] =
 {
-    { -1, 0, TT_NONE,    FSM_ERR, nullptr,    "" },
-    { 0, 15, TT_LITERAL, FSM_KEY, "include",  "" },
-    { 0,  1, TT_LITERAL, FSM_ACT, nullptr,    "(" },
-    { 1,  8, TT_PUNCT,   FSM_STB, "(",        "(:,;)" },
-    { 1,  2, TT_LITERAL, FSM_PRO, nullptr,    "(" },
-    { 2,  8, TT_PUNCT,   FSM_HDR, "(",        "(:,;)" },
-    { 2,  3, TT_LIST,    FSM_SIP, nullptr,    "" },
-    { 2,  3, TT_LITERAL, FSM_SIP, nullptr,    "" },
-    { 3,  5, TT_LITERAL, FSM_SPX, "->",       nullptr },
-    { 3,  5, TT_LITERAL, FSM_SPX, "<>",       nullptr },
-    { 3,  4, TT_LIST,    FSM_SP,  nullptr,    nullptr },
-    { 3,  4, TT_LITERAL, FSM_SP,  nullptr,    nullptr },
-    { 4,  5, TT_LITERAL, FSM_DIR, nullptr,    nullptr },
-    { 5,  6, TT_LIST,    FSM_DIP, nullptr,    "(" },
-    { 5,  6, TT_LITERAL, FSM_DIP, nullptr,    "(" },
-    { 6,  8, TT_PUNCT,   FSM_DPX, "(",        "(:,;)" },
-    { 6,  7, TT_LIST,    FSM_DP,  nullptr,    "(:,;)" },
-    { 6,  7, TT_LITERAL, FSM_DP,  nullptr,    "(:,;)" },
-    { 7,  8, TT_PUNCT,   FSM_SOB, "(",        nullptr },
-    { 8,  0, TT_PUNCT,   FSM_EOB, ")",        nullptr },
-    { 8, 13, TT_LITERAL, FSM_KEY, "metadata", nullptr },
-    { 8, 16, TT_LITERAL, FSM_KEY, "reference",":;" },
-    { 8,  9, TT_LITERAL, FSM_KEY, nullptr,    nullptr },
-    { 9,  8, TT_PUNCT,   FSM_END, ";",        nullptr },
-    { 9, 10, TT_PUNCT,   FSM_NOP, ":",        nullptr },
-    // we can't allow this because the syntax is squiffy
-    // would prefer to require a ; after the last option
-    // (and delete all the other cases like this too)
-    //{  9,  0, TT_PUNCT,   FSM_EOB, ")",        ""      },
+    { -1,  0, TT_NONE,    FSM_ERR, nullptr,    ""      },
+    {  0, 15, TT_LITERAL, FSM_KEY, "include",  ""      },
+    {  0,  1, TT_LITERAL, FSM_ACT, nullptr,    "("     },
+    {  1,  8, TT_PUNCT,   FSM_STB, "(",        "(:,;)" },
+    {  1,  2, TT_LITERAL, FSM_PRO, nullptr,    "("     },
+    {  2,  8, TT_PUNCT,   FSM_HDR, "(",        "(:,;)" },
+    {  2,  3, TT_LIST,    FSM_SIP, nullptr,    ""      },
+    {  2,  3, TT_LITERAL, FSM_SIP, nullptr,    ""      },
+    {  3,  5, TT_LITERAL, FSM_SPX, "->",       nullptr },
+    {  3,  5, TT_LITERAL, FSM_SPX, "<>",       nullptr },
+    {  3,  4, TT_LIST,    FSM_SP,  nullptr,    nullptr },
+    {  3,  4, TT_LITERAL, FSM_SP,  nullptr,    nullptr },
+    {  4,  5, TT_LITERAL, FSM_DIR, nullptr,    nullptr },
+    {  5,  6, TT_LIST,    FSM_DIP, nullptr,    "("     },
+    {  5,  6, TT_LITERAL, FSM_DIP, nullptr,    "("     },
+    {  6,  8, TT_PUNCT,   FSM_DPX, "(",        "(:,;)" },
+    {  6,  7, TT_LIST,    FSM_DP,  nullptr,    "(:,;)" },
+    {  6,  7, TT_LITERAL, FSM_DP,  nullptr,    "(:,;)" },
+    {  7,  8, TT_PUNCT,   FSM_SOB, "(",        nullptr },
+    {  8,  0, TT_PUNCT,   FSM_EOB, ")",        nullptr },
+    {  8, 13, TT_LITERAL, FSM_KEY, "metadata", nullptr },
+    {  8, 16, TT_LITERAL, FSM_KEY, "reference",":;"    },
+    {  8,  9, TT_LITERAL, FSM_KEY, nullptr,    nullptr },
+    {  9,  8, TT_PUNCT,   FSM_END, ";",        nullptr },
+    {  9, 10, TT_PUNCT,   FSM_NOP, ":",        nullptr },
+ // we can't allow this because the syntax is squiffy
+ // would prefer to require a ; after the last option
+ // (and delete all the other cases like this too)
+ // {  9,  0, TT_PUNCT,   FSM_EOB, ")",        ""      },
     { 10, 12, TT_STRING,  FSM_OPT, nullptr,    nullptr },
     { 10, 11, TT_LITERAL, FSM_OPT, nullptr,    nullptr },
     { 11, 12, TT_STRING,  FSM_VAL, nullptr,    nullptr },
     { 11, 12, TT_LITERAL, FSM_VAL, nullptr,    nullptr },
     { 11,  8, TT_PUNCT,   FSM_END, ";",        nullptr },
-    { 11,  0, TT_PUNCT,   FSM_EOB, ")",        "" },
+    { 11,  0, TT_PUNCT,   FSM_EOB, ")",        ""      },
     { 11, 10, TT_PUNCT,   FSM_SET, ",",        nullptr },
     { 12,  8, TT_PUNCT,   FSM_END, ";",        nullptr },
-    { 12,  0, TT_PUNCT,   FSM_EOB, ")",        "" },
+    { 12,  0, TT_PUNCT,   FSM_EOB, ")",        ""      },
     { 12, 10, TT_PUNCT,   FSM_SET, ",",        nullptr },
     { 13, 14, TT_PUNCT,   FSM_NOP, ":",        nullptr },
     { 14,  8, TT_PUNCT,   FSM_END, ";",        "(:,;)" },
     { 14, 14, TT_NONE,    FSM_SET, ",",        nullptr },
     { 14, 14, TT_NONE,    FSM_ADD, nullptr,    nullptr },
     { 15,  0, TT_LITERAL, FSM_INC, nullptr,    nullptr },
-    { 16, 14, TT_PUNCT,   FSM_NOP, ":",        ";" },
+    { 16, 14, TT_PUNCT,   FSM_NOP, ":",        ";"     },
 };
 
 static const State* get_state(int num, TokenType type, const string& tok)
@@ -470,19 +473,14 @@ static const State* get_state(int num, TokenType type, const string& tok)
 struct RuleParseState
 {
     RuleTreeNode rtn;
-    OptTreeNode* otn;
+    OptTreeNode* otn = nullptr;
 
     string key;
     string opt;
     string val;
 
-    bool tbd;
-
-    RuleParseState()
-    { otn = nullptr; }
+    bool tbd = false;
 };
-
-static void parse_body(const char*, RuleParseState&, struct SnortConfig*);
 
 static bool exec(
     FsmAction act, string& tok,
@@ -501,11 +499,11 @@ static bool exec(
         parse_rule_proto(sc, tok.c_str(), rps.rtn);
         break;
     case FSM_HDR:
-        parse_rule_nets(sc, "any", true, rps.rtn);
-        parse_rule_ports(sc, "any", true, rps.rtn);
-        parse_rule_dir(sc, "->", rps.rtn);
-        parse_rule_nets(sc, "any", false, rps.rtn);
-        parse_rule_ports(sc, "any", false, rps.rtn);
+        parse_rule_nets(sc, "any", true, rps.rtn, true);
+        parse_rule_ports(sc, "any", true, rps.rtn, true);
+        parse_rule_dir(sc, "->", rps.rtn, true);
+        parse_rule_nets(sc, "any", false, rps.rtn, true);
+        parse_rule_ports(sc, "any", false, rps.rtn, true);
         rps.otn = parse_rule_open(sc, rps.rtn);
         break;
     case FSM_SIP:
@@ -515,7 +513,7 @@ static bool exec(
         parse_rule_ports(sc, tok.c_str(), true, rps.rtn);
         break;
     case FSM_SPX:
-        parse_rule_ports(sc, "any", true, rps.rtn);
+        parse_rule_ports(sc, "any", true, rps.rtn, true);
         // fall thru ...
     case FSM_DIR:
         parse_rule_dir(sc, tok.c_str(), rps.rtn);
@@ -527,7 +525,7 @@ static bool exec(
         parse_rule_ports(sc, tok.c_str(), false, rps.rtn);
         break;
     case FSM_DPX:
-        parse_rule_ports(sc, "any", false, rps.rtn);
+        parse_rule_ports(sc, "any", false, rps.rtn, true);
         // fall thru ...
     case FSM_SOB:
         rps.otn = parse_rule_open(sc, rps.rtn);
@@ -539,14 +537,10 @@ static bool exec(
     {
         if ( rps.tbd )
             exec(FSM_END, tok, rps, sc);
-        const char* extra = parse_rule_close(sc, rps.rtn, rps.otn);
-        if ( extra )
-            parse_body(extra, rps, sc);
-        else
-        {
-            rps.otn = nullptr;
-            rules++;
-        }
+
+        parse_rule_close(sc, rps.rtn, rps.otn);
+        rps.otn = nullptr;
+        rules++;
         break;
     }
     case FSM_KEY:
@@ -573,7 +567,7 @@ static bool exec(
         rps.tbd = false;
         break;
     case FSM_END:
-        if ( rps.opt.size() )
+        if ( !rps.opt.empty() )
             parse_rule_opt_set(sc, rps.key.c_str(), rps.opt.c_str(), rps.val.c_str());
         parse_rule_opt_end(sc, rps.key.c_str(), rps.otn);
         rps.opt.clear();
@@ -586,7 +580,7 @@ static bool exec(
             rps.opt += tok;
         else
         {
-            if ( rps.val.size() )
+            if ( !rps.val.empty() )
                 rps.val += " ";
             rps.val += tok;
         }
@@ -604,40 +598,25 @@ static bool exec(
     return false;
 }
 
-// parse_body() is called at the end of a stub rule to parse the detection
-// options in an so rule.  similar to parse_stream() except we start in a
-// different state.
-static void parse_body(const char* extra, RuleParseState& rps, struct SnortConfig* sc)
+// FIXIT-L escaping should not be by option name
+// probably should remove content escaping except for \" so
+// that individual rule options can do whatever
+static int get_escape(const string& s)
 {
-    stringstream is(extra);
+    if ( s == "pcre" )
+        return 0;  // no escape, option goes to ;
 
-    string tok;
-    TokenType type;
-    bool esc = true;
+    else if ( s == "regex" || s == "sd_pattern" )
+        return -1; // no escape, option goes to "
 
-    int num = 8;
-    const char* punct = "(:,;)";
-
-    while ( (type = get_token(is, tok, punct, esc)) )
-    {
-        ++tokens;
-        const State* s = get_state(num, type, tok);
-
-        exec(s->action, tok, rps, sc);
-
-        num = s->next;
-        esc = (rps.key != "pcre");
-
-        if ( s->punct )
-            punct = s->punct;
-    }
+    return 1;      // escape, option goes to "
 }
 
-void parse_stream(istream& is, struct SnortConfig* sc)
+void parse_stream(istream& is, SnortConfig* sc)
 {
     string tok;
     TokenType type;
-    bool esc = true;
+    int esc = 1;
 
     int num = 0;
     const char* punct = fsm[0].punct;
@@ -657,7 +636,7 @@ void parse_stream(istream& is, struct SnortConfig* sc)
             break;
 
         num = s->next;
-        esc = (rps.key != "pcre");
+        esc = get_escape(rps.key);
 
         if ( s->punct )
             punct = s->punct;

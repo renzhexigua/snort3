@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,39 +17,175 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "log/messages.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <sys/types.h>
-#include <dirent.h>
-#include <fnmatch.h>
+#include "messages.h"
 
-#include <stdarg.h>
-#include <syslog.h>
-#include <errno.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <signal.h>
-#include <unistd.h>
-#include <pcap.h>
-#include <timersub.h>
+#include <cassert>
+#include <cstdarg>
 #include <string.h>
-#include <grp.h>
-#include <pwd.h>
-#include <netdb.h>
-#include <limits.h>
-#include <fcntl.h>
+#include <syslog.h>
 
 #include "main/snort_config.h"
-#include "main/snort_debug.h"
-#include "packet_io/sfdaq.h"
+#include "parser/parser.h"
 #include "time/packet_time.h"
-#include "sfip/sf_ip.h"
+#include "utils/util_cstring.h"
+
+using namespace snort;
 
 static int already_fatal = 0;
+
+static unsigned parse_errors = 0;
+static unsigned parse_warnings = 0;
+static unsigned reload_errors = 0;
+
+static std::string reload_errors_description;
+
+void reset_parse_errors()
+{
+    parse_errors = 0;
+    reload_errors = 0;
+}
+
+unsigned get_parse_errors()
+{
+    unsigned tmp = parse_errors;
+    parse_errors = 0;
+    return tmp;
+}
+
+unsigned get_parse_warnings()
+{
+    unsigned tmp = parse_warnings;
+    parse_warnings = 0;
+    return tmp;
+}
+
+void reset_reload_errors()
+{
+    reload_errors = 0;
+    reload_errors_description.clear();
+}
+
+unsigned get_reload_errors()
+{
+    return reload_errors;
+}
+
+std::string& get_reload_errors_description()
+{
+    return reload_errors_description;
+}
+
+static void log_message(FILE* file, const char* type, const char* msg)
+{
+    const char* file_name;
+    unsigned file_line;
+    get_parse_location(file_name, file_line);
+
+    if ( file_line )
+        LogMessage(file, "%s: %s:%d %s\n", type, file_name, file_line, msg);
+
+    else if ( file_name )
+        LogMessage(file, "%s: %s: %s\n", type, file_name, msg);
+
+    else
+        LogMessage(file, "%s: %s\n", type, msg);
+}
+
+namespace snort
+{
+void ParseWarning(WarningGroup wg, const char* format, ...)
+{
+    if ( !(SnortConfig::get_conf()->warning_flags & (1 << wg)) )
+        return;
+
+    char buf[STD_BUF+1];
+    va_list ap;
+
+    va_start(ap, format);
+    vsnprintf(buf, STD_BUF, format, ap);
+    va_end(ap);
+
+    buf[STD_BUF] = '\0';
+    log_message(stderr, "WARNING", buf);
+
+    parse_warnings++;
+}
+
+void ParseError(const char* format, ...)
+{
+    char buf[STD_BUF+1];
+    va_list ap;
+
+    va_start(ap, format);
+    vsnprintf(buf, STD_BUF, format, ap);
+    va_end(ap);
+
+    buf[STD_BUF] = '\0';
+    log_message(stderr, "ERROR", buf);
+
+    parse_errors++;
+}
+
+void ReloadError(const char* format, ...)
+{
+    char buf[STD_BUF+1];
+    va_list ap;
+
+    va_start(ap, format);
+    vsnprintf(buf, sizeof(buf), format, ap);
+    va_end(ap);
+
+    buf[sizeof(buf)-1] = '\0';
+    log_message(stderr, "ERROR", buf);
+
+    if ( reload_errors_description.empty() )
+        reload_errors_description = buf;
+    else
+    {
+        reload_errors_description += ",";
+        reload_errors_description += buf;
+    }
+
+    reload_errors++;
+}
+
+[[noreturn]] void ParseAbort(const char* format, ...)
+{
+    char buf[STD_BUF+1];
+    va_list ap;
+
+    va_start(ap, format);
+    vsnprintf(buf, STD_BUF, format, ap);
+    va_end(ap);
+
+    buf[STD_BUF] = '\0';
+
+    const char* file_name;
+    unsigned file_line;
+    get_parse_location(file_name, file_line);
+
+    if ( file_line )
+        FatalError("%s:%u %s\n", file_name, file_line, buf);
+    else
+        FatalError("%s\n", buf);
+}
+
+static void WriteLogMessage(FILE* fh, bool prefer_fh, const char* format, va_list& ap)
+{
+    if ( prefer_fh or !SnortConfig::log_syslog() )
+    {
+        vfprintf(fh, format, ap);
+        return;
+    }
+    char buf[STD_BUF+1];
+    vsnprintf(buf, STD_BUF, format, ap);
+    buf[STD_BUF] = '\0';
+    syslog(LOG_DAEMON | LOG_NOTICE, "%s", buf);
+}
 
 /*
  * Function: LogMessage(const char *, ...)
@@ -63,31 +199,26 @@ static int already_fatal = 0;
  */
 void LogMessage(const char* format,...)
 {
-    char buf[STD_BUF+1];
+    if ( SnortConfig::log_quiet() )
+        return;
+
     va_list ap;
-
-    if (snort_conf == NULL)
-    {
-        va_start(ap, format);
-        vfprintf(stdout, format, ap);
-        va_end(ap);
-        return;
-    }
-    if (SnortConfig::log_quiet() && !SnortConfig::daemon_mode() && !SnortConfig::log_syslog())
-        return;
-
     va_start(ap, format);
 
-    if (SnortConfig::daemon_mode() || SnortConfig::log_syslog())
-    {
-        vsnprintf(buf, STD_BUF, format, ap);
-        buf[STD_BUF] = '\0';
-        syslog(LOG_DAEMON | LOG_NOTICE, "%s", buf);
-    }
-    else
-    {
-        vfprintf(stdout, format, ap);
-    }
+    WriteLogMessage(stdout, false, format, ap);
+
+    va_end(ap);
+}
+
+void LogMessage(FILE* fh, const char* format,...)
+{
+    if ( fh == stdout and SnortConfig::log_quiet() )
+        return;
+
+    va_list ap;
+    va_start(ap, format);
+
+    WriteLogMessage(fh, (fh != stdout && fh != stderr), format, ap);
 
     va_end(ap);
 }
@@ -104,19 +235,13 @@ void LogMessage(const char* format,...)
  */
 void WarningMessage(const char* format,...)
 {
-    char buf[STD_BUF+1];
     va_list ap;
-
-    if (snort_conf == NULL)
-        return;
-
-    if (SnortConfig::log_quiet() && !SnortConfig::daemon_mode() && !SnortConfig::log_syslog())
-        return;
 
     va_start(ap, format);
 
-    if (SnortConfig::daemon_mode() || SnortConfig::log_syslog())
+    if ( SnortConfig::log_syslog() )
     {
+        char buf[STD_BUF+1];
         vsnprintf(buf, STD_BUF, format, ap);
         buf[STD_BUF] = '\0';
         syslog(LOG_DAEMON | LOG_WARNING, "%s", buf);
@@ -141,13 +266,13 @@ void WarningMessage(const char* format,...)
  */
 void ErrorMessage(const char* format,...)
 {
-    char buf[STD_BUF+1];
     va_list ap;
 
     va_start(ap, format);
 
-    if ( snort_conf && (SnortConfig::daemon_mode() || SnortConfig::log_syslog()) )
+    if ( SnortConfig::log_syslog() )
     {
+        char buf[STD_BUF+1];
         vsnprintf(buf, STD_BUF, format, ap);
         buf[STD_BUF] = '\0';
         syslog(LOG_CONS | LOG_DAEMON | LOG_ERR, "%s", buf);
@@ -157,55 +282,6 @@ void ErrorMessage(const char* format,...)
         vfprintf(stderr, format, ap);
     }
     va_end(ap);
-}
-
-/*
- * Function: ErrorMessageThrottled(ThrottleInfo *,const char *, ...)
- *
- * Purpose: Print a message to stderr, and throttle when
- *          too many messages are printed.
- *
- * Arguments: throttleInfo => point to the saved throttle state information
- *            format => the formatted error string to print out
- *            ... => format commands/fillers
- *
- * Returns: void function
- */
-
-void ErrorMessageThrottled(ThrottleInfo* throttleInfo, const char* format,...)
-{
-    char buf[STD_BUF+1];
-    va_list ap;
-    time_t current_time = packet_time();
-
-    if ((snort_conf == NULL)||(!throttleInfo))
-        return;
-
-    throttleInfo->count++;
-    DEBUG_WRAP(DebugMessage(DEBUG_INIT,
-        "current_time: %d, throttle (%p): count " STDu64 ", last update: %d\n",
-        (int)current_time, throttleInfo, throttleInfo->count, (int)throttleInfo->lastUpdate); )
-    /*Note: we only output the first error message,
-     * and the statistics after at least duration_to_log seconds
-     * when the same type of error message is printed out again */
-    if (current_time - (time_t)throttleInfo->duration_to_log > throttleInfo->lastUpdate)
-    {
-        int index;
-        va_start(ap, format);
-        index = vsnprintf(buf, STD_BUF, format, ap);
-        va_end(ap);
-
-        if (index && (throttleInfo->count > 1))
-        {
-            snprintf(&buf[index - 1], STD_BUF-index,
-                " (suppressed " STDu64 " times in the last %d seconds).\n",
-                throttleInfo->count, (int)(current_time - throttleInfo->lastUpdate));
-        }
-
-        ErrorMessage("%s",buf);
-        throttleInfo->lastUpdate = current_time;
-        throttleInfo->count = 0;
-    }
 }
 
 /*
@@ -219,7 +295,7 @@ void ErrorMessageThrottled(ThrottleInfo* throttleInfo, const char* format,...)
  *
  * Returns: void function
  */
-NORETURN void FatalError(const char* format,...)
+[[noreturn]] void FatalError(const char* format,...)
 {
     char buf[STD_BUF+1];
     va_list ap;
@@ -238,15 +314,19 @@ NORETURN void FatalError(const char* format,...)
 
     buf[STD_BUF] = '\0';
 
-    if ((snort_conf != NULL) && (SnortConfig::daemon_mode() || SnortConfig::log_syslog()))
-    {
+    if ( SnortConfig::log_syslog() )
         syslog(LOG_CONS | LOG_DAEMON | LOG_ERR, "FATAL ERROR: %s", buf);
-    }
     else
     {
         fprintf(stderr, "FATAL: %s", buf);
         fprintf(stderr,"Fatal Error, Quitting..\n");
     }
+
+    // guard against FatalError calls from non-main thread (which should not happen!)
+    if ( !in_main_thread() )
+        abort();
+
+    SnortConfig::cleanup_fatal_error();
 
 #if 0
     // FIXIT-M need to stop analyzers / workers
@@ -264,129 +344,182 @@ NORETURN void FatalError(const char* format,...)
     }
 }
 
-void PrintPacketData(const uint8_t* data, const uint32_t len)
+NORETURN_ASSERT void log_safec_error(const char* msg, void*, int e)
 {
-    uint32_t i, j;
-    uint32_t total_len = 0;
-    uint8_t hex_buf[16];
-    uint8_t char_buf[16];
-    const char* length_chars =
-        "       0  1  2  3  4  5  6  7   8  9 10 11 12 13 14 15\n"
-        "------------------------------------------------------\n";
+    static THREAD_LOCAL unsigned safec_errors = 0;
 
-    LogMessage("%s", length_chars);
+    if ( ++safec_errors < 1000 )
+        ErrorMessage("SafeC error %i: %s\n", e, msg);
 
-    for (i = 0; i <= len; i++)
-    {
-        if ((i%16 == 0) && (i != 0))
-        {
-            LogMessage("%04x  ", total_len);
-            total_len += 16;
-
-            for (j = 0; j < 16; j++)
-            {
-                LogMessage("%02x ", hex_buf[j]);
-                if (j == 7)
-                    LogMessage(" ");
-            }
-
-            LogMessage(" ");
-
-            for (j = 0; j < 16; j++)
-            {
-                LogMessage("%c", char_buf[j]);
-                if (j == 7)
-                    LogMessage(" ");
-            }
-
-            LogMessage("\n");
-        }
-
-        if (i == len)
-            break;
-
-        hex_buf[i%16] = data[i];
-
-        if (isprint((int)data[i]))
-            char_buf[i%16] = data[i];
-        else
-            char_buf[i%16] = '.';
-    }
-
-    if ((i-total_len) > 0)
-    {
-        LogMessage("%04x  ", total_len);
-
-        for (j = 0; j < i-total_len; j++)
-        {
-            LogMessage("%02x ", hex_buf[j]);
-            if (j == 7)
-                LogMessage(" ");
-        }
-
-        if (j < 8)
-            LogMessage(" ");
-        LogMessage("%*s", (16-j)*3, "");
-        LogMessage(" ");
-
-        for (j = 0; j < i-total_len; j++)
-        {
-            LogMessage("%c", char_buf[j]);
-            if (j == 7)
-                LogMessage(" ");
-        }
-    }
-
-    LogMessage("\n");
+    assert(false);
 }
 
-char* ObfuscateIpToText(const sfip_t* ip)
+#define CAPTION "%*s: "
+#define SUB_CAPTION "%*s = "
+
+void ConfigLogger::log_option(const char* caption)
 {
-    static THREAD_LOCAL char ip_buf1[INET6_ADDRSTRLEN];
-    static THREAD_LOCAL char ip_buf2[INET6_ADDRSTRLEN];
-    static THREAD_LOCAL int buf_num = 0;
-    int buf_size = INET6_ADDRSTRLEN;
-    char* ip_buf;
-
-    if (buf_num)
-        ip_buf = ip_buf2;
-    else
-        ip_buf = ip_buf1;
-
-    buf_num ^= 1;
-    ip_buf[0] = 0;
-
-    if (ip == NULL)
-        return ip_buf;
-
-    if (!sfip_is_set(snort_conf->obfuscation_net))
-    {
-        if (ip->is_ip6())
-            SnortSnprintf(ip_buf, buf_size, "x:x:x:x::x:x:x:x");
-        else
-            SnortSnprintf(ip_buf, buf_size, "xxx.xxx.xxx.xxx");
-    }
-    else
-    {
-        sfip_t tmp;
-        char* tmp_buf;
-
-        sfip_copy(tmp, ip);
-
-        if (sfip_is_set(snort_conf->homenet))
-        {
-            if (sfip_contains(&snort_conf->homenet, &tmp) == SFIP_CONTAINS)
-                sfip_obfuscate(&snort_conf->obfuscation_net, &tmp);
-        }
-        else
-        {
-            sfip_obfuscate(&snort_conf->obfuscation_net, &tmp);
-        }
-
-        tmp_buf = sfip_to_str(&tmp);
-        SnortSnprintf(ip_buf, buf_size, "%s", tmp_buf);
-    }
-
-    return ip_buf;
+    LogMessage("%*s:\n", indention, caption);
 }
+
+bool ConfigLogger::log_flag(const char* caption, bool flag, bool subopt)
+{
+    auto fmt = subopt ? SUB_CAPTION "%s\n" : CAPTION "%s\n";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    LogMessage(fmt, ind, caption, flag ? "enabled" : "disabled");
+    return flag;
+}
+
+void ConfigLogger::log_limit(const char* caption, int val, int unlim, int disable, bool subopt)
+{
+    auto fmt = subopt ? SUB_CAPTION "%d%s\n" : CAPTION "%d%s\n";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    if ( val == disable )
+        LogMessage(fmt, ind, caption, val, " (disabled)");
+    else if ( val == unlim )
+        LogMessage(fmt, ind, caption, val, " (unlimited)");
+    else
+        LogMessage(fmt, ind, caption, val, "");
+}
+
+void ConfigLogger::log_limit(const char* caption, int val, int unlim, bool subopt)
+{
+    auto fmt = subopt ? SUB_CAPTION "%d%s\n" : CAPTION "%d%s\n";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    if ( val == unlim )
+        LogMessage(fmt, ind, caption, val, " (unlimited)");
+    else
+        LogMessage(fmt, ind, caption, val, "");
+}
+
+void ConfigLogger::log_limit(const char* caption, int64_t val, int64_t unlim, bool subopt)
+{
+    auto fmt = subopt ? SUB_CAPTION "%" PRId64 "%s\n" : CAPTION "%" PRId64 "%s\n";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    if ( val == unlim )
+        LogMessage(fmt, ind, caption, val, " (unlimited)");
+    else
+        LogMessage(fmt, ind, caption, val, "");
+}
+
+void ConfigLogger::log_value(const char* caption, int n, const char* descr, bool subopt)
+{
+    auto fmt = subopt ? SUB_CAPTION "%" PRId32 " (%s)\n" : CAPTION "%" PRId32 " (%s)\n";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    LogMessage(fmt, ind, caption, n, descr);
+}
+
+void ConfigLogger::log_value(const char* caption, int32_t n, bool subopt)
+{
+    auto fmt = subopt ? SUB_CAPTION "%" PRId32 "\n" : CAPTION "%" PRId32 "\n";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    LogMessage(fmt, ind, caption, n);
+}
+
+void ConfigLogger::log_value(const char* caption, uint32_t n, bool subopt)
+{
+    auto fmt = subopt ? SUB_CAPTION "%" PRIu32 "\n" : CAPTION "%" PRIu32 "\n";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    LogMessage(fmt, ind, caption, n);
+}
+
+void ConfigLogger::log_value(const char* caption, int64_t n, bool subopt)
+{
+    auto fmt = subopt ? SUB_CAPTION "%" PRId64 "\n" : CAPTION "%" PRId64 "\n";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    LogMessage(fmt, ind, caption, n);
+}
+
+void ConfigLogger::log_value(const char* caption, uint64_t n, bool subopt)
+{
+    auto fmt = subopt ? SUB_CAPTION "%" PRIu64 "\n" : CAPTION "%" PRIu64 "\n";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    LogMessage(fmt, ind, caption, n);
+}
+
+void ConfigLogger::log_value(const char* caption, double n, bool subopt)
+{
+    auto fmt = subopt ? SUB_CAPTION "%lf\n" : CAPTION "%lf\n";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    LogMessage(fmt, ind, caption, n);
+}
+
+void ConfigLogger::log_value(const char* caption, const char* str, bool subopt)
+{
+    if ( !str or !str[0] )
+        return;
+
+    auto fmt = subopt ? SUB_CAPTION "%s\n" : CAPTION "%s\n";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    LogMessage(fmt, ind, caption, str);
+}
+
+void ConfigLogger::log_list(const char* caption, const char* list, const char* prefix, bool subopt)
+{
+    if ( !list or !list[0] )
+        return;
+
+    auto delim_symbol = subopt ? "=" : ":";
+    auto ind = subopt ? indention + strlen(caption) + 2 : indention;
+
+    const char* const delim = (caption and caption[0]) ? delim_symbol : " ";
+    const char* const head_fmt = "%*s%s%.0s%s\n";
+    const char* const tail_fmt = "%*.0s%.0s%s%s\n";
+    const char* fmt = head_fmt;
+
+    std::stringstream ss(list);
+    std::string res;
+    std::string val;
+
+    while (ss >> val)
+    {
+        if ( res.length() + val.length() > max_line_len )
+        {
+            LogMessage(fmt, ind, caption, delim, prefix, res.c_str());
+            fmt = tail_fmt;
+            res.clear();
+        }
+        res += ' ' + val;
+    }
+
+    LogMessage(fmt, ind, caption, delim, prefix, res.c_str());
+}
+
+void ConfigLogger::log_list(const char* list)
+{
+    if ( !list or !list[0] )
+        return;
+
+    std::stringstream ss(list);
+    std::string res;
+    std::string val;
+
+    while (ss >> val)
+    {
+        if ( res.length() + val.length() > max_line_len )
+        {
+            LogMessage("\t\t%s\n", res.c_str());
+            res.clear();
+        }
+
+        if (!res.empty())
+            res += ' ';
+
+        res += val;
+    }
+
+    LogMessage("\t\t%s\n", res.c_str());
+}
+} //namespace snort
 

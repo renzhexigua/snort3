@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,11 +17,14 @@
 //--------------------------------------------------------------------------
 // cd_erspan3.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
-#include <arpa/inet.h>
-#include "framework/codec.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "codecs/codec_module.h"
-#include "protocols/protocol_ids.h"
-#include "protocols/packet.h"
+#include "framework/codec.h"
+
+using namespace snort;
 
 #define CD_ERSPAN3_NAME "erspan3"
 #define CD_ERSPAN3_HELP "support for encapsulated remote switched port analyzer - type 3"
@@ -34,12 +37,12 @@ static const RuleMap erspan3_rules[] =
     { 0, nullptr }
 };
 
-class Erspan3Module : public CodecModule
+class Erspan3Module : public BaseCodecModule
 {
 public:
-    Erspan3Module() : CodecModule(CD_ERSPAN3_NAME, CD_ERSPAN3_HELP) { }
+    Erspan3Module() : BaseCodecModule(CD_ERSPAN3_NAME, CD_ERSPAN3_HELP) { }
 
-    const RuleMap* get_rules() const
+    const RuleMap* get_rules() const override
     { return erspan3_rules; }
 };
 
@@ -47,9 +50,8 @@ class Erspan3Codec : public Codec
 {
 public:
     Erspan3Codec() : Codec(CD_ERSPAN3_NAME) { }
-    ~Erspan3Codec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
 };
 
@@ -57,7 +59,7 @@ struct ERSpanType3Hdr
 {
     uint16_t ver_vlan;
     uint16_t flags_spanId;
-    uint32_t time_stamp; // adding an underscore so function can be called timestamp()
+    uint32_t timestamp;
     uint16_t pad0;
     uint16_t pad1;
     uint32_t pad2;
@@ -65,36 +67,13 @@ struct ERSpanType3Hdr
 
     inline uint16_t version() const
     { return ntohs(ver_vlan) >> 12; }
-
-    inline uint16_t vlan() const
-    { return ntohs(ver_vlan) & 0xfff; }
-
-    inline uint16_t span_id() const
-    { return ntohs(flags_spanId) & 0x03ff; }
-
-    inline uint32_t timestamp() const
-    { return ntohs(time_stamp); }
 };
 
-constexpr uint16_t ETHERTYPE_ERSPAN_TYPE3 = 0x22eb;
 } // anonymous namespace
 
-void Erspan3Codec::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(ETHERTYPE_ERSPAN_TYPE3); }
+void Erspan3Codec::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::ETHERTYPE_ERSPAN_TYPE3); }
 
-/*
- * Function: DecodeERSPANType3(uint8_t *, uint32_t, Packet *)
- *
- * Purpose: Decode Encapsulated Remote Switch Packet Analysis Type 3
- *          This will decode ERSPAN Type 3 Headers
- *
- * Arguments: pkt => ptr to the packet data
- *            len => length from here to the end of the packet
- *            p   => pointer to decoded packet struct
- *
- * Returns: void function
- *
- */
 bool Erspan3Codec::decode(const RawData& raw, CodecData& codec, DecodeData&)
 {
     const ERSpanType3Hdr* const erSpan3Hdr =
@@ -113,7 +92,7 @@ bool Erspan3Codec::decode(const RawData& raw, CodecData& codec, DecodeData&)
         return false;
     }
 
-    codec.next_prot_id = ETHERTYPE_TRANS_ETHER_BRIDGING;
+    codec.next_prot_id = ProtocolId::ETHERTYPE_TRANS_ETHER_BRIDGING;
     codec.lyr_len = sizeof(ERSpanType3Hdr);
     return true;
 }
@@ -158,11 +137,11 @@ static const CodecApi erspan3_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_erspan3[] =
+#endif
 {
     &erspan3_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_erspan3 = &erspan3_api.base;
-#endif
 

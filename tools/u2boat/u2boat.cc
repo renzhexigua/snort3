@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,29 +16,23 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-// Author: Ryan Jordan <ryan.jordan@sourcefire.com>
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <ctype.h>
-#include <unistd.h>
-#include <string.h>
-#include <errno.h>
-#include <stdint.h>
-
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <pcap.h>
+// u2boat.cc author Ryan Jordan <ryan.jordan@sourcefire.com>
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include "u2boat.h"
+#include <pcap.h>
+#include <unistd.h>
 
-#define FAILURE -1
+#include <cctype>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
+
+#include "../u2spewfoo/u2_common.h"
+
+#define FAILURE (-1)
 #define SUCCESS 0
 
 #define PCAP_MAGIC_NUMBER 0xa1b2c3d4
@@ -58,7 +52,7 @@ static int ConvertLog(FILE* input, FILE* output, const char* format)
     u2record tmp_record;
 
     /* Determine conversion function */
-    int (* ConvertRecord)(u2record*, FILE*) = NULL;
+    int (* ConvertRecord)(u2record*, FILE*) = nullptr;
 
     /* This will become an if/else series once more formats are supported.
      * Callbacks are used so that this comparison only needs to happen once. */
@@ -67,7 +61,7 @@ static int ConvertLog(FILE* input, FILE* output, const char* format)
         ConvertRecord = PcapConversion;
     }
 
-    if (ConvertRecord == NULL)
+    if (ConvertRecord == nullptr)
     {
         fprintf(stderr, "Error setting conversion routine, aborting...\n");
         return FAILURE;
@@ -75,7 +69,7 @@ static int ConvertLog(FILE* input, FILE* output, const char* format)
 
     /* Initialize the record's data pointer */
     tmp_record.data = (uint8_t*)malloc(MAX_U2RECORD_DATA_LENGTH * sizeof(uint8_t));
-    if (tmp_record.data == NULL)
+    if (tmp_record.data == nullptr)
     {
         fprintf(stderr, "Error allocating memory, aborting...\n");
         return FAILURE;
@@ -93,10 +87,10 @@ static int ConvertLog(FILE* input, FILE* output, const char* format)
             break;
         }
     }
-    if (tmp_record.data != NULL)
+    if (tmp_record.data != nullptr)
     {
         free(tmp_record.data);
-        tmp_record.data = NULL;
+        tmp_record.data = nullptr;
     }
     if (ferror(input))
     {
@@ -180,7 +174,7 @@ static int PcapConversion(u2record* rec, FILE* output)
 
     /* Write to the pcap file */
     pcap_data = rec->data + sizeof(Serial_Unified2Packet) - 4;
-    pcap_dump( (u_char*)output, &pcap_hdr, (u_char*)pcap_data);
+    pcap_dump( (uint8_t*)output, &pcap_hdr, (uint8_t*)pcap_data);
 
     return SUCCESS;
 }
@@ -212,14 +206,14 @@ static int GetRecord(FILE* input, u2record* rec)
     if (rec->length > buffer_size)
     {
         tmp = (uint8_t*)malloc(rec->length * sizeof(uint8_t));
-        if (tmp == NULL)
+        if (tmp == nullptr)
         {
             fprintf(stderr, "Error: memory allocation failed.\n");
             return FAILURE;
         }
         else
         {
-            if (rec->data != NULL)
+            if (rec->data != nullptr)
             {
                 free(rec->data);
             }
@@ -230,7 +224,7 @@ static int GetRecord(FILE* input, u2record* rec)
     items_read = fread(rec->data, sizeof(uint8_t), rec->length, input);
     if (items_read != rec->length)
     {
-        fprintf(stderr, "Error: incomplete record. %d of %u bytes read.\n",
+        fprintf(stderr, "Error: incomplete record. %u of %u bytes read.\n",
             items_read, rec->length);
         return FAILURE;
     }
@@ -240,12 +234,12 @@ static int GetRecord(FILE* input, u2record* rec)
 
 int main(int argc, char* argv[])
 {
-    char* input_filename = NULL;
-    char* output_filename = NULL;
-    const char* output_type = NULL;
+    char* input_filename = nullptr;
+    char* output_filename = nullptr;
+    const char* output_type = nullptr;
 
-    FILE* input_file = NULL;
-    FILE* output_file = NULL;
+    FILE* input_file = nullptr;
+    FILE* output_file = nullptr;
 
     int c, errnum;
     opterr = 0;
@@ -281,12 +275,12 @@ int main(int argc, char* argv[])
     output_filename = argv[optind+1];
 
     /* Check inputs */
-    if (input_filename == NULL)
+    if (input_filename == nullptr)
     {
         fprintf(stderr, "Error: Input filename must be specified.\n");
         return FAILURE;
     }
-    if (output_type == NULL)
+    if (output_type == nullptr)
     {
         fprintf(stdout, "Defaulting to pcap output.\n");
         output_type = "pcap";
@@ -296,20 +290,21 @@ int main(int argc, char* argv[])
         fprintf(stderr, "Invalid output type. Valid types are: pcap\n");
         return FAILURE;
     }
-    if (output_filename == NULL)
+    if (output_filename == nullptr)
     {
         fprintf(stderr, "Error: Output filename must be specified.\n");
         return FAILURE;
     }
 
     /* Open the files */
-    if ((input_file = fopen(input_filename, "r")) == NULL)
+    if ((input_file = fopen(input_filename, "r")) == nullptr)
     {
         fprintf(stderr, "Unable to open file: %s\n", input_filename);
         return FAILURE;
     }
-    if ((output_file = fopen(output_filename, "w")) == NULL)
+    if ((output_file = fopen(output_filename, "w")) == nullptr)
     {
+        fclose(input_file);
         fprintf(stderr, "Unable to open/create file: %s\n", output_filename);
         return FAILURE;
     }

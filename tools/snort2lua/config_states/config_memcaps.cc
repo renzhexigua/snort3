@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -35,8 +35,7 @@ class Memcap : public ConversionState
 {
 public:
     Memcap(Converter& c) : ConversionState(c) { }
-    virtual ~Memcap() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 
 template<const std::string* snort_option,
@@ -46,8 +45,7 @@ bool Memcap<snort_option, lua_table, lua_option>::convert(std::istringstream& da
 {
     std::string memcap;
 
-    if ((!(data_stream >> memcap)) ||
-        (memcap.compare("memcap")))
+    if ((!(data_stream >> memcap)) || (memcap != "memcap"))
     {
         return false;
     }

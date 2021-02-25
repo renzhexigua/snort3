@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2011-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,49 +16,18 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-//
 
-//Author: Hui Cao <huica@cisco.com>
-
-#include "sip_utils.h"
+// sip_utils.cc author: Hui Cao <huica@cisco.com>
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "snort_types.h"
-#include <ctype.h>
 
-/********************************************************************
- * Function: SIP_IsEmptyStr()
- *
- * Checks if string is NULL, empty or just spaces.
- * String must be 0 terminated.
- *
- * Arguments:
- *  char * - string to check
- *
- * Returns:
- *  1  if string is NULL, empty or just spaces
- *  0  otherwise
- *
- ********************************************************************/
-int SIP_IsEmptyStr(char* str)
-{
-    char* end;
+#include "sip_utils.h"
 
-    if (str == NULL)
-        return 1;
+#include <cstring>
 
-    end = str + strlen(str);
-
-    while ((str < end) && isspace((int)*str))
-        str++;
-
-    if (str == end)
-        return 1;
-
-    return 0;
-}
+#include "hash/hash_key_operations.h"
 
 /*
  * Trim spaces non-destructively on both sides of string : '', \t, \n, \r
@@ -66,19 +35,19 @@ int SIP_IsEmptyStr(char* str)
  * Note: end point to the location start + length,
  *       not necessary the real end of string if not end with \0
  */
-int SIP_TrimSP(const char* start, const char* end, char** new_start, char** new_end)
+int SIP_TrimSP(const char* start, const char* end, const char** new_start, const char** new_end)
 {
-    char* before;
-    char* after;
+    const char* before;
+    const char* after;
 
     if (start >= end )
     {
-        *new_start = (char*)start;
+        *new_start = start;
         *new_end = *new_start;
         return 0;
     }
 
-    before = (char*)start;
+    before = start;
 
     // Trim the starting spaces
     while ((before < end) && isspace((int)*before))
@@ -88,13 +57,13 @@ int SIP_TrimSP(const char* start, const char* end, char** new_start, char** new_
     // This is an empty string
     if (before == end)
     {
-        *new_start = (char*)end;
+        *new_start = end;
         *new_end = *new_start;
         return 0;
     }
 
     // Trim the ending spaces
-    after = (char*)end - 1;
+    after = end - 1;
     while ((before < after) && isspace((int)*after))
     {
         after--;
@@ -119,12 +88,10 @@ int SIP_TrimSP(const char* start, const char* end, char** new_start, char** new_
  *
  ********************************************************************/
 
-SIPMethodNode* SIP_FindMethod(SIPMethodlist methods, char* methodName, unsigned int length)
+SIPMethodNode* SIP_FindMethod(SIPMethodlist methods, const char* methodName, unsigned int length)
 {
-    SIPMethodNode* method = NULL;
-
-    method = methods;
-    while (NULL != method)
+    SIPMethodNode* method = methods;
+    while (nullptr != method)
     {
         if ((length == strlen(method->methodName))&&
             (strncasecmp(method->methodName, methodName, length) == 0))
@@ -152,17 +119,18 @@ SIPMethodNode* SIP_FindMethod(SIPMethodlist methods, char* methodName, unsigned 
  ********************************************************************/
 uint32_t strToHash(const char* str, int length)
 {
-    uint32_t a,b,c,tmp;
-    int i,j,k,l;
-    a = b = c = 0;
+    uint32_t a = 0, b = 0, c = 0;
+    int i,j;
+
     for (i=0,j=0; i<length; i+=4)
     {
-        tmp = 0;
-        k = length - i;
+        uint32_t tmp = 0;
+        int k = length - i;
+
         if (k > 4)
             k=4;
 
-        for (l=0; l<k; l++)
+        for (int l=0; l<k; l++)
         {
             tmp |= *(str + i + l) << l*8;
         }
@@ -187,7 +155,7 @@ uint32_t strToHash(const char* str, int length)
             j = 0;
         }
     }
-    final (a,b,c);
+    finalize(a,b,c);
     return c;
 }
 

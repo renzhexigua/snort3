@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,44 +16,33 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-//
 
 /*
  * SSH preprocessor
  * Author: Chris Sherwin
  * Contributors: Adam Keeton, Ryan Jordan
- *
- *
- * Alert for Gobbles, CRC32, protocol mismatch (Cisco catalyst vulnerability),
- * and a SecureCRT vulnerability.  Will also alert if the client or server
- * traffic appears to flow the wrong direction, or if packets appear
- * malformed/spoofed.
- *
  */
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <assert.h>
-#include <string.h>
-#include <stdio.h>
-#include <sys/types.h>
-
-#include "snort_types.h"
-#include "snort_debug.h"
-
 #include "ssh.h"
+
+#include "detection/detection_engine.h"
+#include "events/event_queue.h"
+#include "log/messages.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+#include "stream/stream.h"
+
 #include "ssh_module.h"
-#include "profiler.h"
-#include "stream/stream_api.h"
-#include "file_api/file_api.h"
-#include "parser.h"
-#include "framework/inspector.h"
-#include "utils/sfsnprintfappend.h"
-#include "target_based/snort_protocols.h"
+#include "ssh_splitter.h"
+
+using namespace snort;
 
 THREAD_LOCAL ProfileStats sshPerfStats;
-THREAD_LOCAL SimpleStats sshstats;
+THREAD_LOCAL SshStats sshstats;
 
 /*
  * Function prototype(s)
@@ -63,47 +52,33 @@ static unsigned int ProcessSSHProtocolVersionExchange(SSH_PROTO_CONF*, SSHData*,
 static unsigned int ProcessSSHKeyExchange(SSHData*, Packet*, uint8_t, unsigned int);
 static unsigned int ProcessSSHKeyInitExchange(SSHData*, Packet*, uint8_t, unsigned int);
 
-unsigned SshFlowData::flow_id = 0;
+unsigned SshFlowData::inspector_id = 0;
+
+SshFlowData::SshFlowData() : FlowData(inspector_id)
+{
+    session = {};
+    sshstats.concurrent_sessions++;
+    if(sshstats.max_concurrent_sessions < sshstats.concurrent_sessions)
+        sshstats.max_concurrent_sessions = sshstats.concurrent_sessions;
+}
+
+SshFlowData::~SshFlowData()
+{
+    assert(sshstats.concurrent_sessions > 0);
+    sshstats.concurrent_sessions--;
+}
 
 SSHData* SetNewSSHData(Packet* p)
 {
     SshFlowData* fd = new SshFlowData;
-    p->flow->set_application_data(fd);
+    p->flow->set_flow_data(fd);
     return &fd->session;
 }
 
-static SSHData* get_session_data(Flow* flow)
+SSHData* get_session_data(const Flow* flow)
 {
-    SshFlowData* fd = (SshFlowData*)flow->get_application_data(
-        SshFlowData::flow_id);
-
-    return fd ? &fd->session : NULL;
-}
-
-static void PrintSshConf(SSH_PROTO_CONF* config)
-{
-    if (config == NULL)
-        return;
-
-    LogMessage("SSH config: \n");
-    LogMessage("    Max Encrypted Packets: %d %s \n",
-        config->MaxEncryptedPackets,
-        config->MaxEncryptedPackets
-        == SSH_DEFAULT_MAX_ENC_PKTS ?
-        "(Default)" : "");
-    LogMessage("    Max Server Version String Length: %d %s \n",
-        config->MaxServerVersionLen,
-        config->MaxServerVersionLen
-        == SSH_DEFAULT_MAX_SERVER_VERSION_LEN ?
-        "(Default)" : "");
-
-    LogMessage("    MaxClientBytes: %d %s \n",
-        config->MaxClientBytes,
-        config->MaxClientBytes
-        == SSH_DEFAULT_MAX_CLIENT_BYTES ?
-        "(Default)" : "");
-
-    LogMessage("\n");
+    SshFlowData* fd = (SshFlowData*)flow->get_flow_data(SshFlowData::inspector_id);
+    return fd ? &fd->session : nullptr;
 }
 
 /* Returns the true length of the ssh packet, including
@@ -116,7 +91,7 @@ static void PrintSshConf(SSH_PROTO_CONF* config)
  * p: Pointer to the SSH packet.
  * buflen: the size of packet buffer.
 */
-static unsigned int SSHPacket_GetLength(SSH2Packet* p, size_t buflen)
+static unsigned int SSHPacket_GetLength(const SSH2Packet* p, size_t buflen)
 {
     unsigned int ssh_length;
 
@@ -148,67 +123,41 @@ static unsigned int SSHPacket_GetLength(SSH2Packet* p, size_t buflen)
  */
 static void snort_ssh(SSH_PROTO_CONF* config, Packet* p)
 {
-    SSHData* sessp = NULL;
-    uint8_t direction;
-    unsigned int offset = 0;
-    uint32_t search_dir_ver, search_dir_keyinit;
-    PROFILE_VARS;
+    Profile profile(sshPerfStats);
 
-    MODULE_PROFILE_START(sshPerfStats);
+    // Attempt to get a previously allocated SSH block.
+    SSHData* sessp = get_session_data(p->flow);
 
-    /* Attempt to get a previously allocated SSH block. */
-    sessp = get_session_data(p->flow);
-
-    if (sessp == NULL)
-    {
-        /* Check the stream session. If it does not currently
-         * have our SSH data-block attached, create one.
-         */
-        sessp = SetNewSSHData(p);
-
-        if ( !sessp )
-        {
-            /* Could not get/create the session data for this packet. */
-            MODULE_PROFILE_END(sshPerfStats);
-            return;
-        }
-
-    }
-
-
-    /* Don't process if we've missed packets */
+    // Don't process if we've missed packets
     if (sessp->state_flags & SSH_FLG_MISSED_PACKETS)
-    {
-        MODULE_PROFILE_END(sshPerfStats);
         return;
-    }
 
-    /* Make sure this preprocessor should run.
-       check if we're waiting on stream reassembly */
+    // Make sure this preprocessor should run.
+    // check if we're waiting on stream reassembly
     if ( p->packet_flags & PKT_STREAM_INSERT )
-    {
-        MODULE_PROFILE_END(sshPerfStats);
         return;
-    }
 
-    /* If we picked up mid-stream or missed any packets (midstream pick up
-     *      * means we've already missed packets) set missed packets flag and make
-     *           * sure we don't do any more reassembly on this session */
-    if ((stream.get_session_flags(p->flow) & SSNFLAG_MIDSTREAM)
-        || stream.missed_packets(p->flow, SSN_DIR_BOTH))
+    // If we picked up mid-stream or missed any packets (midstream pick up
+    // means we've already missed packets) set missed packets flag and make
+    // sure we don't do any more reassembly on this session
+    if ( p->test_session_flags(SSNFLAG_MIDSTREAM)
+        || Stream::missed_packets(p->flow, SSN_DIR_BOTH) )
     {
-        /* Order only matters if the packets are not encrypted */
+        // Order only matters if the packets are not encrypted
         if ( !(sessp->state_flags & SSH_FLG_SESS_ENCRYPTED ))
         {
             sessp->state_flags |= SSH_FLG_MISSED_PACKETS;
-
-            MODULE_PROFILE_END(sshPerfStats);
             return;
         }
     }
+    sshstats.total_bytes += p->dsize;
 
-    /* Get the direction of the packet. */
-    if ( p->packet_flags & PKT_FROM_SERVER )
+    uint8_t direction;
+    uint32_t search_dir_ver;
+    uint32_t search_dir_keyinit;
+
+    // Get the direction of the packet.
+    if ( p->is_from_server() )
     {
         direction = SSH_DIR_FROM_SERVER;
         search_dir_ver = SSH_FLG_SERV_IDSTRING_SEEN;
@@ -220,28 +169,28 @@ static void snort_ssh(SSH_PROTO_CONF* config, Packet* p)
         search_dir_ver = SSH_FLG_CLIENT_IDSTRING_SEEN;
         search_dir_keyinit = SSH_FLG_CLIENT_SKEY_SEEN | SSH_FLG_CLIENT_KEXINIT_SEEN;
     }
+
+    unsigned int offset = 0;
+
     if ( !(sessp->state_flags & SSH_FLG_SESS_ENCRYPTED ))
     {
-        /* If server and client have not performed the protocol
-         * version exchange yet, must look for version strings.
-          */
+        // If server and client have not performed the protocol
+        // version exchange yet, must look for version strings.
         if ( !(sessp->state_flags & search_dir_ver) )
         {
             offset = ProcessSSHProtocolVersionExchange(config, sessp, p, direction);
             if (!offset)
-            {
-                /*Error processing protovers exchange msg */
-                MODULE_PROFILE_END(sshPerfStats);
+                // Error processing protovers exchange msg
                 return;
-            }
-            /* found protocol version.  Stream reassembly might have appended an ssh packet,
-             * such as the key exchange init.  Thus call ProcessSSHKeyInitExchange() too.
-             */
+
+            // found protocol version.
+            // Stream reassembly might have appended an ssh packet,
+            // such as the key exchange init.
+            // Thus call ProcessSSHKeyInitExchange() too.
         }
 
-        /* Expecting to see the key init exchange at this point
-         * (in SSH2) or the actual key exchange if SSH1
-         */
+        // Expecting to see the key init exchange at this point
+        // (in SSH2) or the actual key exchange if SSH1
         if ( !(sessp->state_flags & search_dir_keyinit) )
         {
             offset = ProcessSSHKeyInitExchange(sessp, p, direction, offset);
@@ -249,33 +198,26 @@ static void snort_ssh(SSH_PROTO_CONF* config, Packet* p)
             if (!offset)
             {
                 if ( !(sessp->state_flags & SSH_FLG_SESS_ENCRYPTED ))
-                {
-                    MODULE_PROFILE_END(sshPerfStats);
                     return;
-                }
             }
         }
 
-        /* If SSH2, need to process the actual key exchange msgs.
-         * The actual key exchange type was negotiated in the
-         * key exchange init msgs. SSH1 won't arrive here.
-         */
+        // If SSH2, need to process the actual key exchange msgs.
+        // The actual key exchange type was negotiated in the
+        // key exchange init msgs. SSH1 won't arrive here.
         offset = ProcessSSHKeyExchange(sessp, p, direction, offset);
         if (!offset)
-        {
-            MODULE_PROFILE_END(sshPerfStats);
             return;
-        }
     }
+
     if ( (sessp->state_flags & SSH_FLG_SESS_ENCRYPTED ))
     {
-        /* Traffic on this session is currently encrypted.
-         * Two of the major SSH exploits, SSH1 CRC-32 and
-          * the Challenge-Response Overflow attack occur within
-         * the encrypted portion of the SSH session. Therefore,
-         * the only way to detect these attacks is by examining
-         * amounts of data exchanged for anomalies.
-           */
+        // Traffic on this session is currently encrypted.
+        // Two of the major SSH exploits, SSH1 CRC-32 and
+        // the Challenge-Response Overflow attack occur within
+        // the encrypted portion of the SSH session. Therefore,
+        // the only way to detect these attacks is by examining
+        // amounts of data exchanged for anomalies.
         sessp->num_enc_pkts++;
 
         if ( sessp->num_enc_pkts <= config->MaxEncryptedPackets )
@@ -283,58 +225,43 @@ static void snort_ssh(SSH_PROTO_CONF* config, Packet* p)
             if ( direction == SSH_DIR_FROM_CLIENT )
             {
                 if (!offset)
-                {
                     sessp->num_client_bytes += p->dsize;
-                }
+
                 else
-                {
                     sessp->num_client_bytes += (p->dsize - offset);
-                }
 
                 if ( sessp->num_client_bytes >= config->MaxClientBytes )
                 {
-                    /* Probable exploit in progress.*/
+                    // Probable exploit in progress.
                     if (sessp->version == SSH_VERSION_1)
-                    {
-                        {
-                            SnortEventqAdd(GID_SSH, SSH_EVENT_CRC32);
+                        DetectionEngine::queue_event(GID_SSH, SSH_EVENT_CRC32);
 
-                            stream.stop_inspection(p->flow, p, SSN_DIR_BOTH, -1, 0);
-                        }
-                    }
                     else
-                    {
-                        {
-                            SnortEventqAdd(GID_SSH, SSH_EVENT_RESPOVERFLOW);
+                        DetectionEngine::queue_event(GID_SSH, SSH_EVENT_RESPOVERFLOW);
 
-                            stream.stop_inspection(p->flow, p, SSN_DIR_BOTH, -1, 0);
-                        }
-                    }
+                    Stream::stop_inspection(p->flow, p, SSN_DIR_BOTH, -1, 0);
                 }
             }
+
             else
             {
-                /*
-                 * Have seen a server response, so
-                 * this appears to be a valid exchange.
-                 * Reset suspicious byte count to zero.
-                 */
+                 // Have seen a server response, so this appears to be a valid
+                 // exchange. Reset suspicious byte count to zero
                 sessp->num_client_bytes = 0;
             }
         }
+
         else
         {
-            /* Have already examined more than the limit
-             * of encrypted packets. Both the Gobbles and
-             * the CRC32 attacks occur during authentication
-             * and therefore cannot be used late in an
-             * encrypted session. For performance purposes,
-             * stop examining this session.
-             */
-            stream.stop_inspection(p->flow, p, SSN_DIR_BOTH, -1, 0);
+            // Have already examined more than the limit
+            // of encrypted packets. Both the Gobbles and
+            // the CRC32 attacks occur during authentication
+            // and therefore cannot be used late in an
+            // encrypted session. For performance purposes,
+            // stop examining this session.
+            Stream::stop_inspection(p->flow, p, SSN_DIR_BOTH, -1, 0);
         }
     }
-    MODULE_PROFILE_END(sshPerfStats);
 }
 
 /* Checks if the string 'str' is 'max' bytes long or longer.
@@ -342,7 +269,7 @@ static void snort_ssh(SSH_PROTO_CONF* config, Packet* p)
  * returns 1 otherwise.
 */
 
-static inline int SSHCheckStrlen(char* str, int max)
+static inline int SSHCheckStrlen(const char* str, int max)
 {
     if ( memchr(str, '\0', max) )
         return 0;           /* str size is <= max bytes */
@@ -365,9 +292,8 @@ static inline int SSHCheckStrlen(char* str, int max)
 static unsigned int ProcessSSHProtocolVersionExchange(SSH_PROTO_CONF* config, SSHData* sessionp,
     Packet* p, uint8_t direction)
 {
-    char* version_stringp = (char*)p->data;
-    uint8_t version;
-    char* version_end;
+    const char* version_stringp = (const char*)p->data;
+    const char* version_end;
 
     /* Get the version. */
     if ( p->dsize >= 6 &&
@@ -377,11 +303,11 @@ static unsigned int ProcessSSHProtocolVersionExchange(SSH_PROTO_CONF* config, SS
             && (version_stringp[7] == '9'))
         {
             /* SSH 1.99 which is the same as SSH2.0 */
-            version = SSH_VERSION_2;
+            sessionp->version = SSH_VERSION_2;
         }
         else
         {
-            version = SSH_VERSION_1;
+            sessionp->version = SSH_VERSION_1;
         }
 
         /* CAN-2002-0159 */
@@ -396,16 +322,21 @@ static unsigned int ProcessSSHProtocolVersionExchange(SSH_PROTO_CONF* config, SS
              * continue checking after that point*/
             (SSHCheckStrlen(&version_stringp[6], config->MaxServerVersionLen-6)))
         {
-            SnortEventqAdd(GID_SSH, SSH_EVENT_SECURECRT);
+            DetectionEngine::queue_event(GID_SSH, SSH_EVENT_SECURECRT);
         }
     }
     else if ( p->dsize >= 6 &&
         !strncasecmp(version_stringp, "SSH-2.", 6))
     {
-        version = SSH_VERSION_2;
+        sessionp->version = SSH_VERSION_2;
     }
     else
     {
+        /* unknown version */
+        sessionp->version =  SSH_VERSION_UNKNOWN;
+
+        DetectionEngine::queue_event(GID_SSH, SSH_EVENT_VERSION);
+
         return 0;
     }
 
@@ -422,8 +353,7 @@ static unsigned int ProcessSSHProtocolVersionExchange(SSH_PROTO_CONF* config, SS
         break;
     }
 
-    sessionp->version = version;
-    version_end = (char*)memchr(version_stringp, '\n', p->dsize);
+    version_end = (const char*)memchr(version_stringp, '\n', p->dsize);
     if (version_end)
         return ((version_end - version_stringp) + 1);
     /* incomplete version string, should end with \n or \r\n for sshv2 */
@@ -445,7 +375,7 @@ static unsigned int ProcessSSHProtocolVersionExchange(SSH_PROTO_CONF* config, SS
 static unsigned int ProcessSSHKeyInitExchange(SSHData* sessionp, Packet* p,
     uint8_t direction, unsigned int offset)
 {
-    SSH2Packet* ssh2p = NULL;
+    const SSH2Packet* ssh2p = nullptr;
     uint16_t dsize = p->dsize;
     const unsigned char* data = p->data;
     unsigned int ssh_length = 0;
@@ -471,7 +401,7 @@ static unsigned int ProcessSSHKeyInitExchange(SSHData* sessionp, Packet* p,
         if ( dsize < 4 )
         {
             {
-                SnortEventqAdd(GID_SSH, SSH_EVENT_PAYLOAD_SIZE);
+                DetectionEngine::queue_event(GID_SSH, SSH_EVENT_PAYLOAD_SIZE);
             }
 
             return 0;
@@ -489,7 +419,7 @@ static unsigned int ProcessSSHKeyInitExchange(SSHData* sessionp, Packet* p,
         if ( dsize < length )
         {
             {
-                SnortEventqAdd(GID_SSH, SSH_EVENT_PAYLOAD_SIZE);
+                DetectionEngine::queue_event(GID_SSH, SSH_EVENT_PAYLOAD_SIZE);
             }
 
             return 0;
@@ -505,13 +435,13 @@ static unsigned int ProcessSSHKeyInitExchange(SSHData* sessionp, Packet* p,
         {
             if (offset == 0)
             {
-                SnortEventqAdd(GID_SSH, SSH_EVENT_PAYLOAD_SIZE);
+                DetectionEngine::queue_event(GID_SSH, SSH_EVENT_PAYLOAD_SIZE);
             }
 
             return 0;
         }
 
-        message_type = *( (uint8_t*)(data + padding_length + 4));
+        message_type = *( (const uint8_t*)(data + padding_length + 4));
 
         switch ( message_type )
         {
@@ -524,7 +454,7 @@ static unsigned int ProcessSSHKeyInitExchange(SSHData* sessionp, Packet* p,
             else
             {
                 /* Server msg not from server. */
-                SnortEventqAdd(GID_SSH, SSH_EVENT_WRONGDIR);
+                DetectionEngine::queue_event(GID_SSH, SSH_EVENT_WRONGDIR);
             }
             break;
         case SSH_MSG_V1_CMSG_SESSION_KEY:
@@ -536,7 +466,7 @@ static unsigned int ProcessSSHKeyInitExchange(SSHData* sessionp, Packet* p,
             else
             {
                 /* Client msg not from client. */
-                SnortEventqAdd(GID_SSH, SSH_EVENT_WRONGDIR);
+                DetectionEngine::queue_event(GID_SSH, SSH_EVENT_WRONGDIR);
             }
             break;
         default:
@@ -568,7 +498,7 @@ static unsigned int ProcessSSHKeyInitExchange(SSHData* sessionp, Packet* p,
         }
 
         /* Overlay the SSH2 binary data packet struct on the packet */
-        ssh2p = (SSH2Packet*)data;
+        ssh2p = (const SSH2Packet*)data;
         if ( dsize < SSH2_HEADERLEN + 1)
         {
             /* Invalid packet length. */
@@ -593,11 +523,6 @@ static unsigned int ProcessSSHKeyInitExchange(SSHData* sessionp, Packet* p,
     }
     else
     {
-        {
-            /* Unrecognized version. */
-            SnortEventqAdd(GID_SSH, SSH_EVENT_VERSION);
-        }
-
         return 0;
     }
 
@@ -622,10 +547,8 @@ static unsigned int ProcessSSHKeyInitExchange(SSHData* sessionp, Packet* p,
 static unsigned int ProcessSSHKeyExchange(SSHData* sessionp, Packet* p,
     uint8_t direction, unsigned int offset)
 {
-    SSH2Packet* ssh2p = NULL;
     uint16_t dsize = p->dsize;
     const unsigned char* data = p->data;
-    unsigned int ssh_length;
     bool next_packet = true;
     unsigned int npacket_offset = 0;
 
@@ -640,8 +563,8 @@ static unsigned int ProcessSSHKeyExchange(SSHData* sessionp, Packet* p,
 
     while (next_packet)
     {
-        ssh2p = (SSH2Packet*)(data + npacket_offset);
-        ssh_length = SSHPacket_GetLength(ssh2p, dsize);
+        const SSH2Packet* ssh2p = (const SSH2Packet*)(data + npacket_offset);
+        unsigned ssh_length = SSHPacket_GetLength(ssh2p, dsize);
 
         if (ssh_length == 0)
         {
@@ -651,7 +574,7 @@ static unsigned int ProcessSSHKeyExchange(SSHData* sessionp, Packet* p,
             }
             {
                 /* Invalid packet length. */
-                SnortEventqAdd(GID_SSH, SSH_EVENT_PAYLOAD_SIZE);
+                DetectionEngine::queue_event(GID_SSH, SSH_EVENT_PAYLOAD_SIZE);
             }
 
             return 0;
@@ -668,7 +591,7 @@ static unsigned int ProcessSSHKeyExchange(SSHData* sessionp, Packet* p,
             else
             {
                 /* Client msg from server. */
-                SnortEventqAdd(GID_SSH, SSH_EVENT_WRONGDIR);
+                DetectionEngine::queue_event(GID_SSH, SSH_EVENT_WRONGDIR);
             }
             break;
         case SSH_MSG_KEXDH_REPLY:
@@ -684,7 +607,7 @@ static unsigned int ProcessSSHKeyExchange(SSHData* sessionp, Packet* p,
             else
             {
                 /* Server msg from client. */
-                SnortEventqAdd(GID_SSH, SSH_EVENT_WRONGDIR);
+                DetectionEngine::queue_event(GID_SSH, SSH_EVENT_WRONGDIR);
             }
             break;
         case SSH_MSG_KEXDH_GEX_REQ:
@@ -696,7 +619,7 @@ static unsigned int ProcessSSHKeyExchange(SSHData* sessionp, Packet* p,
             else
             {
                 /* Server msg from client. */
-                SnortEventqAdd(GID_SSH, SSH_EVENT_WRONGDIR);
+                DetectionEngine::queue_event(GID_SSH, SSH_EVENT_WRONGDIR);
             }
             break;
         case SSH_MSG_KEXDH_GEX_GRP:
@@ -708,7 +631,7 @@ static unsigned int ProcessSSHKeyExchange(SSHData* sessionp, Packet* p,
             else
             {
                 /* Client msg from server. */
-                SnortEventqAdd(GID_SSH, SSH_EVENT_WRONGDIR);
+                DetectionEngine::queue_event(GID_SSH, SSH_EVENT_WRONGDIR);
             }
             break;
         case SSH_MSG_KEXDH_GEX_INIT:
@@ -720,7 +643,7 @@ static unsigned int ProcessSSHKeyExchange(SSHData* sessionp, Packet* p,
             else
             {
                 /* Server msg from client. */
-                SnortEventqAdd(GID_SSH, SSH_EVENT_WRONGDIR);
+                DetectionEngine::queue_event(GID_SSH, SSH_EVENT_WRONGDIR);
             }
             break;
         case SSH_MSG_NEWKEYS:
@@ -728,12 +651,16 @@ static unsigned int ProcessSSHKeyExchange(SSHData* sessionp, Packet* p,
              * key exchange. Both server and client should
              * send one, but as per Alex Kirk's note on this,
              * in some implementations the server does not
-             * actually send this message. So receving a new
+             * actually send this message. So receiving a new
              * keys msg from the client is sufficient.
              */
             if ( direction == SSH_DIR_FROM_CLIENT )
             {
-                sessionp->state_flags |= SSH_FLG_NEWKEYS_SEEN;
+                sessionp->state_flags |= SSH_FLG_CLIENT_NEWKEYS_SEEN;
+            }
+            else
+            {
+                sessionp->state_flags |= SSH_FLG_SERVER_NEWKEYS_SEEN;
             }
             break;
         default:
@@ -788,10 +715,12 @@ class Ssh : public Inspector
 {
 public:
     Ssh(SSH_PROTO_CONF*);
-    ~Ssh();
+    ~Ssh() override;
 
-    void show(SnortConfig*) override;
+    void show(const SnortConfig*) const override;
     void eval(Packet*) override;
+    class StreamSplitter* get_splitter(bool to_server) override
+    { return new SshSplitter(to_server); }
 
 private:
     SSH_PROTO_CONF* config;
@@ -808,15 +737,21 @@ Ssh::~Ssh()
         delete config;
 }
 
-void Ssh::show(SnortConfig*)
+void Ssh::show(const SnortConfig*) const
 {
-    PrintSshConf(config);
+    if ( !config )
+        return;
+
+    ConfigLogger::log_value("max_encrypted_packets", config->MaxEncryptedPackets);
+    ConfigLogger::log_value("max_client_bytes", config->MaxClientBytes);
+    ConfigLogger::log_value("max_server_version_len", config->MaxServerVersionLen);
 }
 
 void Ssh::eval(Packet* p)
 {
     // precondition - what we registered for
     assert(p->has_tcp_data());
+    assert(p->flow);
 
     ++sshstats.total_packets;
     snort_ssh(config, p);
@@ -863,7 +798,7 @@ const InspectApi ssh_api =
         mod_dtor
     },
     IT_SERVICE,
-    (uint16_t)PktType::PDU,
+    PROTO_BIT__PDU,
     nullptr, // buffers
     "ssh",
     ssh_init,

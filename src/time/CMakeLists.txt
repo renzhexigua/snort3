@@ -1,25 +1,34 @@
-
-set (TIME_INCLUDES
-    cpuclock.h
-    profiler.h
-    ppm.h
+set ( TIME_INCLUDES
+    clock_defs.h
+    packet_time.h
+    stopwatch.h
 )
 
-add_library( time  STATIC
-    packet_time.cc 
-    packet_time.h 
-    ppm.cc 
-    ppm.h 
-    ppm_module.cc
-    ppm_module.h
-    profiler.cc 
-    periodic.cc 
-    periodic.h 
+set ( TIME_INTERNAL_SOURCES
+    packet_time.cc
+    periodic.cc
+    periodic.h
     timersub.h
+)
+
+if ( USE_TSC_CLOCK )
+    list ( APPEND TIME_INCLUDES tsc_clock.h )
+    list ( APPEND TIME_INTERNAL_SOURCES tsc_clock.cc )
+endif ( USE_TSC_CLOCK )
+
+add_library ( time OBJECT
+    ${TIME_INTERNAL_SOURCES}
     ${TIME_INCLUDES}
 )
-
 
 install (FILES ${TIME_INCLUDES}
     DESTINATION "${INCLUDE_INSTALL_PATH}/time"
 )
+
+add_catch_test( periodic_test
+    NO_TEST_SOURCE
+    SOURCES
+        periodic.cc
+)
+
+add_subdirectory(test)

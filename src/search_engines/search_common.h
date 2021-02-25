@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -19,7 +19,24 @@
 #ifndef SEARCH_COMMON_H
 #define SEARCH_COMMON_H
 
-typedef int (* MpseCallback)(void* id, void* tree, int index, void* data, void* neg_list);
+namespace snort
+{
+    struct SnortConfig;
+}
+
+struct MpseAgent
+{
+    int (* build_tree)(snort::SnortConfig*, void* id, void** tree);
+    int (* negate_list)(void* id, void** list);
+
+    void (* user_free)(void*);
+    void (* tree_free)(void**);
+    void (* list_free)(void**);
+};
+
+// interface to Mpse and SearchTool
+
+typedef int (* MpseMatch)(void* user, void* tree, int index, void* context, void* list);
 
 #endif
 

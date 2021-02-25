@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2010-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -18,23 +18,24 @@
 //--------------------------------------------------------------------------
 // Author: Ryan Jordan <ryan.jordan@sourcefire.com>
 
-#include "ips_byte_extract.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include "snort_types.h"
-#include "parser.h"
-#include "detection/detection_defines.h"
-#include "detection_util.h"
-#include "sfhashfcn.h"
-#include "profiler.h"
-#include "extract.h"
-#include "framework/ips_option.h"
+#include "detection/treenodes.h"
 #include "framework/cursor.h"
-#include "framework/parameter.h"
+#include "framework/endianness.h"
+#include "framework/ips_option.h"
 #include "framework/module.h"
+#include "hash/hash_key_operations.h"
+#include "log/messages.h"
+#include "protocols/packet.h"
+#include "profiler/profiler.h"
+#include "utils/util.h"
+
+#include "extract.h"
+
+using namespace snort;
 
 static THREAD_LOCAL ProfileStats byteExtractPerfStats;
 
@@ -43,8 +44,6 @@ static THREAD_LOCAL ProfileStats byteExtractPerfStats;
 #define s_help \
     "rule option to convert data to an integer variable"
 
-#define MAX_BYTES_TO_GRAB 4
-
 struct ByteExtractData
 {
     uint32_t bytes_to_grab;
@@ -52,25 +51,22 @@ struct ByteExtractData
     uint8_t relative_flag;
     uint8_t data_string_convert_flag;
     uint8_t align;
-    int8_t endianess;
+    uint8_t endianness;
     uint32_t base;
     uint32_t multiplier;
+    uint32_t bitmask_val;
     int8_t var_number;
     char* name;
 };
 
-/* Storage for extracted variables */
-static char* variable_names[NUM_BYTE_EXTRACT_VARS];
-static THREAD_LOCAL uint32_t extracted_values[NUM_BYTE_EXTRACT_VARS];
-
 class ByteExtractOption : public IpsOption
 {
 public:
-    ByteExtractOption(const ByteExtractData& c) : IpsOption(s_name)
+    ByteExtractOption(const ByteExtractData& c) : IpsOption(s_name, RULE_OPTION_TYPE_BUFFER_USE)
     { config = c; }
 
-    ~ByteExtractOption()
-    { free(config.name); }
+    ~ByteExtractOption() override
+    { snort_free(config.name); }
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
@@ -81,7 +77,7 @@ public:
     bool is_relative() override
     { return (config.relative_flag == 1); }
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     ByteExtractData config;
@@ -93,48 +89,49 @@ private:
 
 uint32_t ByteExtractOption::hash() const
 {
-    uint32_t a,b,c;
-    const ByteExtractData* data = (ByteExtractData*)&config;
-
-    a = data->bytes_to_grab;
-    b = data->offset;
-    c = data->base;
+    uint32_t a = config.bytes_to_grab;
+    uint32_t b = config.offset;
+    uint32_t c = config.base;
 
     mix(a,b,c);
 
-    a += (data->relative_flag << 24 |
-        data->data_string_convert_flag << 16 |
-        data->align << 8 |
-        data->endianess);
-    b += data->multiplier;
-    c += data->var_number;
+    a += (config.relative_flag << 24 |
+        config.data_string_convert_flag << 16 |
+        config.align << 8 |
+        config.endianness);
+    b += config.multiplier;
+    c += config.var_number;
 
     mix(a,b,c);
-    mix_str(a,b,c,get_name());
 
-    final(a,b,c);
+    a += config.bitmask_val;
+    b += IpsOption::hash();
+
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool ByteExtractOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(s_name, ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    ByteExtractOption& rhs = (ByteExtractOption&)ips;
-    ByteExtractData* left = (ByteExtractData*)&config;
-    ByteExtractData* right = (ByteExtractData*)&rhs.config;
+    const ByteExtractOption& rhs = (const ByteExtractOption&)ips;
+    const ByteExtractData* left = &config;
+    const ByteExtractData* right = &rhs.config;
 
     if ((left->bytes_to_grab == right->bytes_to_grab) &&
         (left->offset == right->offset) &&
         (left->relative_flag == right->relative_flag) &&
         (left->data_string_convert_flag == right->data_string_convert_flag) &&
         (left->align == right->align) &&
-        (left->endianess == right->endianess) &&
+        (left->endianness == right->endianness) &&
         (left->base == right->base) &&
         (left->multiplier == right->multiplier) &&
-        (left->var_number == right->var_number))
+        (left->var_number == right->var_number) &&
+        (left->bitmask_val == right->bitmask_val))
     {
         return true;
     }
@@ -142,20 +139,14 @@ bool ByteExtractOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int ByteExtractOption::eval(Cursor& c, Packet* p)
+IpsOption::EvalStatus ByteExtractOption::eval(Cursor& c, Packet* p)
 {
+    RuleProfile profile(byteExtractPerfStats);
+
     ByteExtractData* data = &config;
-    int ret, bytes_read;
-    uint32_t* value;
 
-    PROFILE_VARS;
-    MODULE_PROFILE_START(byteExtractPerfStats);
-
-    if (data == NULL || p == NULL)
-    {
-        MODULE_PROFILE_END(byteExtractPerfStats);
-        return DETECTION_OPTION_NO_MATCH;
-    }
+    if (data == nullptr || p == nullptr)
+        return NO_MATCH;
 
     const uint8_t* start = c.buffer();
     int dsize = c.size();
@@ -164,153 +155,70 @@ int ByteExtractOption::eval(Cursor& c, Packet* p)
     ptr += data->offset;
 
     const uint8_t* end = start + dsize;
-    value = &(extracted_values[data->var_number]);
 
-    /* check bounds */
+    // check bounds
     if (ptr < start || ptr >= end)
+        return NO_MATCH;
+
+    uint8_t endian = data->endianness;
+    if (data->endianness == ENDIAN_FUNC)
     {
-        MODULE_PROFILE_END(byteExtractPerfStats);
-        return DETECTION_OPTION_NO_MATCH;
+        if (!p->endianness ||
+            !p->endianness->get_offset_endianness(ptr - p->data, endian))
+            return NO_MATCH;
     }
 
-    /* do the extraction */
+    // do the extraction
+    int ret = 0;
+    int bytes_read = 0;
+    uint32_t value;
     if (data->data_string_convert_flag == 0)
     {
-        ret = byte_extract(data->endianess, data->bytes_to_grab, ptr, start, end, value);
+        ret = byte_extract(endian, data->bytes_to_grab, ptr, start, end, &value);
         if (ret < 0)
-        {
-            MODULE_PROFILE_END(byteExtractPerfStats);
-            return DETECTION_OPTION_NO_MATCH;
-        }
+            return NO_MATCH;
+
         bytes_read = data->bytes_to_grab;
     }
     else
     {
-        ret = string_extract(data->bytes_to_grab, data->base, ptr, start, end, value);
+        ret = string_extract(data->bytes_to_grab, data->base, ptr, start, end, &value);
         if (ret < 0)
-        {
-            MODULE_PROFILE_END(byteExtractPerfStats);
-            return DETECTION_OPTION_NO_MATCH;
-        }
+            return NO_MATCH;
+
         bytes_read = ret;
     }
 
-    /* mulitply */
-    *value *= data->multiplier;
+    if (data->bitmask_val != 0 )
+    {
+        uint32_t num_tailing_zeros_bitmask = getNumberTailingZerosInBitmask(data->bitmask_val);
+        value = value & data->bitmask_val;
+        if ( value && num_tailing_zeros_bitmask )
+        {
+            value = value >> num_tailing_zeros_bitmask;
+        }
+    }
+
+    /* multiply */
+    value *= data->multiplier;
 
     /* align to next 32-bit or 16-bit boundary */
-    if ((data->align == 4) && (*value % 4))
+    if ((data->align == 4) && (value % 4))
     {
-        *value = *value + 4 - (*value % 4);
+        value = value + 4 - (value % 4);
     }
-    else if ((data->align == 2) && (*value % 2))
+    else if ((data->align == 2) && (value % 2))
     {
-        *value = *value + 2 - (*value % 2);
+        value = value + 2 - (value % 2);
     }
+
+    SetVarValueByIndex(value, data->var_number);
 
     /* advance cursor */
-    c.add_pos(bytes_read);
+    c.add_pos(data->offset + bytes_read);
 
     /* this rule option always "matches" if the read is performed correctly */
-    MODULE_PROFILE_END(byteExtractPerfStats);
-    return DETECTION_OPTION_MATCH;
-}
-
-static void init_var_names()
-{
-    for (int i = 0; i < NUM_BYTE_EXTRACT_VARS; i++)
-    {
-        variable_names[i] = NULL;
-    }
-}
-
-static void clear_var_names()
-{
-    for (int i = 0; i < NUM_BYTE_EXTRACT_VARS; i++)
-    {
-        free(variable_names[i]);
-        variable_names[i] = NULL;
-    }
-}
-
-//-------------------------------------------------------------------------
-// public methods
-//-------------------------------------------------------------------------
-
-/* Given a variable name, retrieve its index. For use by other options. */
-int8_t GetVarByName(const char* name)
-{
-    int i;
-
-    if (name == NULL)
-        return BYTE_EXTRACT_NO_VAR;
-
-    for (i = 0; i < NUM_BYTE_EXTRACT_VARS; i++)
-    {
-        if (variable_names[i] != NULL && strcmp(variable_names[i], name) == 0)
-            return i;
-    }
-
-    return BYTE_EXTRACT_NO_VAR;
-}
-
-/* If given an OptFpList with no byte_extracts, clear the variable_names array */
-static void ClearVarNames(OptFpList* fpl)
-{
-    while (fpl != NULL)
-    {
-        IpsOption* opt = (IpsOption*)fpl->context;
-
-        if ( !strcmp(opt->get_name(), s_name) )
-            return;
-
-        fpl = fpl->next;
-    }
-    clear_var_names();
-}
-
-/* Add a variable's name to the variable_names array
-   Returns: variable index
-*/
-static int8_t AddVarNameToList(ByteExtractData* data)
-{
-    int i;
-
-    for (i = 0; i < NUM_BYTE_EXTRACT_VARS; i++)
-    {
-        if (variable_names[i] == NULL)
-        {
-            variable_names[i] = SnortStrdup(data->name);
-            break;
-        }
-        else if ( strcmp(variable_names[i], data->name) == 0 )
-        {
-            break;
-        }
-    }
-
-    return i;
-}
-
-/* Setters & Getters for extracted values */
-int GetByteExtractValue(uint32_t* dst, int8_t var_number)
-{
-    if (dst == NULL || var_number >= NUM_BYTE_EXTRACT_VARS)
-        return BYTE_EXTRACT_NO_VAR;
-
-    *dst = extracted_values[var_number];
-
-    return 0;
-}
-
-int SetByteExtractValue(uint32_t value, int8_t var_number)
-{
-    if (var_number >= NUM_BYTE_EXTRACT_VARS)
-        return BYTE_EXTRACT_NO_VAR;
-
-    extracted_values[var_number] = value;
-
-    return 0;
+    return MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -348,7 +256,13 @@ static bool ByteExtractVerify(ByteExtractData* data)
         return false;
     }
 
-    if (data->name && isdigit(data->name[0]))
+    if (!data->name)
+    {
+        ParseError("byte_extract rule option must include variable name.");
+        return false;
+    }
+
+    if (isdigit(data->name[0]))
     {
         ParseError("byte_extract rule option has a name which starts with a digit. "
             "Variable names must start with a letter.");
@@ -362,16 +276,13 @@ static bool ByteExtractVerify(ByteExtractData* data)
             "argument.");
         return false;
     }
-    unsigned e1 = ffs(data->endianess);
-    unsigned e2 = ffs(data->endianess >> e1);
 
-    if ( e1 && e2 )
+    if (numBytesInBitmask(data->bitmask_val) > data->bytes_to_grab)
     {
-        ParseError("byte_extract rule option has multiple arguments "
-            "specifying the type of string conversion. Use only "
-            "one of 'dec', 'hex', or 'oct'.");
+        ParseError("Number of bytes in \"bitmask\" value is greater than bytes to extract.");
         return false;
     }
+
     return true;
 }
 
@@ -420,13 +331,16 @@ static const Parameter s_params[] =
     { "dec", Parameter::PT_IMPLIED, nullptr, nullptr,
       "convert from decimal string" },
 
+    { "bitmask", Parameter::PT_INT, "0x1:0xFFFFFFFF", nullptr,
+      "applies as an AND to the extracted value before storage in 'name'" },
+
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
 
 class ExtractModule : public Module
 {
 public:
-    ExtractModule() : Module(s_name, s_help, s_params) { }
+    ExtractModule() : Module(s_name, s_help, s_params) { data.multiplier = 1; }
 
     bool begin(const char*, int, SnortConfig*) override;
     bool end(const char*, int, SnortConfig*) override;
@@ -435,7 +349,11 @@ public:
     ProfileStats* get_profile() const override
     { return &byteExtractPerfStats; }
 
-    ByteExtractData data;
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    ByteExtractData data = {};
 };
 
 bool ExtractModule::begin(const char*, int, SnortConfig*)
@@ -447,37 +365,39 @@ bool ExtractModule::begin(const char*, int, SnortConfig*)
 
 bool ExtractModule::end(const char*, int, SnortConfig*)
 {
+    if ( !data.endianness )
+        data.endianness = ENDIAN_BIG;
     return ByteExtractVerify(&data);
 }
 
 bool ExtractModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("~count") )
-        data.bytes_to_grab = v.get_long();
+        data.bytes_to_grab = v.get_uint8();
 
     else if ( v.is("~offset") )
-        data.offset = v.get_long();
+        data.offset = v.get_int32();
 
     else if ( v.is("~name") )
-        data.name = strdup(v.get_string());
+        data.name = snort_strdup(v.get_string());
 
     else if ( v.is("relative") )
         data.relative_flag = 1;
 
     else if ( v.is("align") )
-        data.align = v.get_long();
+        data.align = v.get_uint8();
 
     else if ( v.is("multiplier") )
-        data.multiplier = v.get_long();
+        data.multiplier = v.get_uint16();
 
     else if ( v.is("big") )
-        data.endianess |= ENDIAN_BIG;
+        set_byte_order(data.endianness, ENDIAN_BIG, "byte_extract");
 
     else if ( v.is("little") )
-        data.endianess |= ENDIAN_LITTLE;
+        set_byte_order(data.endianness, ENDIAN_LITTLE, "byte_extract");
 
     else if ( v.is("dce") )
-        data.endianess |= ENDIAN_FUNC;
+        set_byte_order(data.endianness, ENDIAN_FUNC, "byte_extract");
 
     else if ( v.is("string") )
     {
@@ -492,6 +412,9 @@ bool ExtractModule::set(const char*, Value& v, SnortConfig*)
 
     else if ( v.is("oct") )
         data.base = 8;
+
+    else if ( v.is("bitmask") )
+        data.bitmask_val = v.get_uint32();
 
     else
         return false;
@@ -513,18 +436,17 @@ static void mod_dtor(Module* m)
     delete m;
 }
 
-static IpsOption* byte_extract_ctor(Module* p, OptTreeNode* otn)
+static IpsOption* byte_extract_ctor(Module* p, OptTreeNode*)
 {
     ExtractModule* m = (ExtractModule*)p;
     ByteExtractData& data = m->data;
 
-    ClearVarNames(otn->opt_func);
-    data.var_number = AddVarNameToList(&data);
+    data.var_number = AddVarNameToList(data.name);
 
-    if (data.var_number >= NUM_BYTE_EXTRACT_VARS)
+    if (data.var_number == IPS_OPTIONS_NO_VAR)
     {
-        ParseError("Rule has more than %d byte_extract variables.",
-            NUM_BYTE_EXTRACT_VARS);
+        ParseError("Rule has more than %d variables.",
+            NUM_IPS_OPTIONS_VARS);
         return nullptr;
     }
     return new ByteExtractOption(data);
@@ -533,16 +455,6 @@ static IpsOption* byte_extract_ctor(Module* p, OptTreeNode* otn)
 static void byte_extract_dtor(IpsOption* p)
 {
     delete p;
-}
-
-static void byte_extract_init(SnortConfig*)
-{
-    init_var_names();
-}
-
-static void byte_extract_term(SnortConfig*)
-{
-    clear_var_names();
 }
 
 static const IpsApi byte_extract_api =
@@ -560,9 +472,9 @@ static const IpsApi byte_extract_api =
         mod_dtor
     },
     OPT_TYPE_DETECTION,
-    NUM_BYTE_EXTRACT_VARS, 0,
-    byte_extract_init,
-    byte_extract_term,
+    0, 0,
+    nullptr,
+    nullptr,
     nullptr,  // tinit
     nullptr,  // tterm
     byte_extract_ctor,
@@ -570,5 +482,12 @@ static const IpsApi byte_extract_api =
     nullptr
 };
 
-const BaseApi* ips_byte_extract = &byte_extract_api.base;
-
+#ifdef BUILDING_SO
+SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_byte_extract[] =
+#endif
+{
+    &byte_extract_api.base,
+    nullptr
+};

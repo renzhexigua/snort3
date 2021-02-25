@@ -1,29 +1,33 @@
-/****************************************************************************
- * Copyright (C) 2015 Cisco and/or its affiliates. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License Version 2 as
- * published by the Free Software Foundation.  You may not use, modify or
- * distribute this program under any other version of the GNU General
- * Public License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
- *
- ****************************************************************************/
+//--------------------------------------------------------------------------
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
+//
+// This program is free software; you can redistribute it and/or modify it
+// under the terms of the GNU General Public License Version 2 as published
+// by the Free Software Foundation.  You may not use, modify or distribute
+// this program under any other version of the GNU General Public License.
+//
+// This program is distributed in the hope that it will be useful, but
+// WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+//--------------------------------------------------------------------------
 
-#include <sys/types.h>
-#include "snort_types.h"
-#include "snort_debug.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include "imap_paf.h"
+
+#include "protocols/packet.h"
+#include "stream/stream.h"
+
 #include "imap.h"
+
+using namespace snort;
 
 extern IMAPToken imap_resps[];
 
@@ -32,21 +36,21 @@ static inline ImapPafData* get_state(Flow* flow, bool c2s)
     if ( !flow )
         return nullptr;
 
-    ImapSplitter* s = (ImapSplitter*)stream.get_splitter(flow, c2s);
-    return s ? &s->state : nullptr;
+    ImapSplitter* s = (ImapSplitter*)Stream::get_splitter(flow, c2s);
+    return (s and s->is_paf()) ? &s->state : nullptr;
 }
 
 static inline void reset_data_states(ImapPafData* pfdata)
 {
     // reset MIME info
-    file_api->reset_mime_paf_state(&(pfdata->mime_info));
+    reset_mime_paf_state(&(pfdata->mime_info));
 
     // reset server info
     pfdata->imap_state = IMAP_PAF_CMD_IDENTIFIER;
 
     // reset fetch data information information
     pfdata->imap_data_info.paren_cnt = 0;
-    pfdata->imap_data_info.next_letter = 0;
+    pfdata->imap_data_info.next_letter = nullptr;
     pfdata->imap_data_info.length = 0;
 }
 
@@ -73,7 +77,7 @@ static bool parse_literal_length(const uint8_t ch, uint32_t* len)
         }
     }
     else if (ch != '}')
-        *len = 0;                      //  ALERT!!  charachter should be a digit or ''}''
+        *len = 0;                      //  ALERT!!  character should be a digit or ''}''
 
     return true;
 }
@@ -199,18 +203,13 @@ static bool find_data_end_mime_data(const uint8_t ch, ImapPafData* pfdata)
     if (literal_complete(pfdata)
         && check_imap_data_end(&(pfdata->data_end_state), ch))
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_IMAP, "IMAP PAF: End of Data!\n"); );
         reset_data_states(pfdata);
         return true;
     }
 
     // check for mime flush point
-    if (file_api->process_mime_paf_data(&(pfdata->mime_info), ch))
-    {
-        DEBUG_WRAP(DebugMessage(DEBUG_IMAP, "IMAP PAF: Mime Boundary found."
-            " Flushing data!\n"); );
+    if (process_mime_paf_data(&(pfdata->mime_info), ch))
         return true;
-    }
 
     return false;
 }
@@ -427,8 +426,6 @@ static StreamSplitter::Status imap_paf_server(ImapPafData* pfdata,
 
     if (flush_len)
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_IMAP, "IMAP PAF: flushing data!\n"); );
-
         // flush at the final termination sequence
         *fp = flush_len;
         return StreamSplitter::FLUSH;
@@ -458,12 +455,10 @@ static StreamSplitter::Status imap_paf_client(const uint8_t* data, uint32_t len,
 {
     const char* pch;
 
-    pch = (char *)memchr (data, '\n', len);
+    pch = (const char *)memchr (data, '\n', len);
 
-    if (pch != NULL)
+    if (pch != nullptr)
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_IMAP, "IMAP PAF: Flushing client"
-            " data!\n"); );
         *fp = (uint32_t)(pch - (const char*)data) + 1;
         return StreamSplitter::FLUSH;
     }
@@ -480,7 +475,6 @@ ImapSplitter::ImapSplitter(bool c2s) : StreamSplitter(c2s)
     reset_data_states(&state);
 }
 
-ImapSplitter::~ImapSplitter() { }
 
 /* Function: imap_paf()
 
@@ -503,27 +497,20 @@ ImapSplitter::~ImapSplitter() { }
 */
 
 StreamSplitter::Status ImapSplitter::scan(
-    Flow* , const uint8_t* data, uint32_t len,
+    Packet*, const uint8_t* data, uint32_t len,
     uint32_t flags, uint32_t* fp)
 {
     ImapPafData* pfdata = &state;
 
     if (flags & PKT_FROM_SERVER)
-    {
-        DEBUG_WRAP(DebugMessage(DEBUG_IMAP, "PAF: From server.\n"); );
         return imap_paf_server(pfdata, data, len, fp);
-    }
     else
-    {
-        DEBUG_WRAP(DebugMessage(DEBUG_IMAP, "PAF: From client.\n"); );
         return imap_paf_client(data, len, fp);
-    }
 }
 
-bool imap_is_data_end(void* session)
+bool imap_is_data_end(Flow* ssn)
 {
-    Flow* ssn = (Flow*)session;
     ImapPafData* s = get_state(ssn, true);
-    return s->end_of_data;
+    return s ? s->end_of_data : false;
 }
 

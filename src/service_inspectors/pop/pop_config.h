@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -19,15 +19,31 @@
 
 #ifndef POP_CONFIG_H
 #define POP_CONFIG_H
+// Configuration for Pop service inspector
 
-#include "file_api/file_api.h"
+#include "mime/file_mime_process.h"
 
 struct POP_PROTO_CONF
 {
-    uint32_t memcap;
-    DecodeConfig decode_conf;
-    MAIL_LogConfig log_config;
+    snort::DecodeConfig decode_conf;
+    snort::MailLogConfig log_config;
 };
+
+struct PopStats
+{
+    PegCount packets;
+    PegCount total_bytes;
+    PegCount sessions;
+    PegCount concurrent_sessions;
+    PegCount max_concurrent_sessions;
+    PegCount start_tls;
+    PegCount ssl_search_abandoned;
+    PegCount ssl_srch_abandoned_early;
+    snort::MimeStats mime_stats;
+};
+
+extern const PegInfo pop_peg_names[];
+extern THREAD_LOCAL PopStats popstats;
 
 #endif
 

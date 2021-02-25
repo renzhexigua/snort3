@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class DeadCode : public ConversionState
 {
 public:
     DeadCode(Converter& c) : ConversionState(c) { }
-    virtual ~DeadCode() { }
-    virtual bool convert(std::istringstream& data_stream)
+    bool convert(std::istringstream& data_stream) override
     {
         data_stream.setstate(std::ios::eofbit); // these deleted, not failures
         return true;
@@ -47,7 +46,7 @@ static ConversionState* config_true_no_opt_ctor(Converter& c)
 {
     c.get_table_api().open_table(*lua_table);
 
-    if (snort_option->compare(*lua_option))
+    if (*snort_option != *lua_option)
     {
         c.get_table_api().add_diff_option_comment(
             "config " + *snort_option + ":", *lua_option);
@@ -76,7 +75,7 @@ static ConversionState* config_false_no_opt_ctor(Converter& c)
     c.get_table_api().open_table(*lua_table);
 
     // WARNING:  THIS WILL SEGFAULT if any variable is nullptr!!
-    if (snort_option->compare(*lua_option))
+    if (*snort_option != *lua_option)
         c.get_table_api().add_diff_option_comment("config " + *snort_option + ":", *lua_option);
 
     c.get_table_api().add_option(*lua_option, false);
@@ -84,6 +83,8 @@ static ConversionState* config_false_no_opt_ctor(Converter& c)
     return new DeadCode(c);
 }
 
+#if 0
+// currently unused - for future reference
 template<const std::string* snort_option,
 const std::string* lua_table>
 static ConversionState* config_false_no_opt_ctor(Converter& c)
@@ -93,6 +94,7 @@ static ConversionState* config_false_no_opt_ctor(Converter& c)
     c.get_table_api().close_table();
     return new DeadCode(c);
 }
+#endif
 } // namespace
 
 /*************************************************
@@ -108,6 +110,7 @@ static const std::string ips = "ips";
 static const std::string packets = "packets";
 static const std::string process = "process";
 static const std::string output = "output";
+static const std::string rewrite = "rewrite";
 
 /*************************************************
  **********  addressspace_agnostic  **********
@@ -166,19 +169,6 @@ static const ConvertMap daemon_api =
 const ConvertMap* daemon_map = &daemon_api;
 
 /*************************************************
- *************  decode_data_link  ****************
- *************************************************/
-
-static const std::string decode_data_link = "decode_data_link";
-static const ConvertMap decode_data_link_api =
-{
-    decode_data_link,
-    config_true_no_opt_ctor<& decode_data_link, & daq>,
-};
-
-const ConvertMap* decode_data_link_map = &decode_data_link_api;
-
-/*************************************************
  *****************  dirty_pig  *******************
  *************************************************/
 
@@ -192,19 +182,17 @@ static const ConvertMap dirty_pig_api =
 const ConvertMap* dirty_pig_map = &dirty_pig_api;
 
 /*************************************************
- *****************  disable_inline_init_failopen  *******************
+ *****  disable rewrite rules with replace *******
  *************************************************/
 
-static const std::string disable_inline_init_failopen = "disable_inline_init_failopen";
-static const std::string enable_inline_init_failopen = "enable_inline_init_failopen";
-static const ConvertMap disable_inline_init_failopen_api =
+static const std::string disable_replace = "disable_replace";
+static const ConvertMap disable_replace_api =
 {
-    disable_inline_init_failopen,
-    config_false_no_opt_ctor<& disable_inline_init_failopen, & packets,
-    & enable_inline_init_failopen>,
+    disable_replace,
+    config_true_no_opt_ctor<& disable_replace, & rewrite>,
 };
 
-const ConvertMap* disable_inline_init_failopen_map = &disable_inline_init_failopen_api;
+const ConvertMap* disable_replace_map = &disable_replace_api;
 
 /*************************************************
  ***************  dump_chars_only  ***************
@@ -275,19 +263,6 @@ static const ConvertMap enable_deep_teredo_inspection_api =
 const ConvertMap* enable_deep_teredo_inspection_map = &enable_deep_teredo_inspection_api;
 
 /*************************************************
- ******************  enable_gtp ******************
- *************************************************/
-
-static const std::string enable_gtp = "enable_gtp";
-static const ConvertMap enable_gtp_api =
-{
-    enable_gtp,
-    config_true_no_opt_ctor<& enable_gtp, & udp>
-};
-
-const ConvertMap* enable_gtp_map = &enable_gtp_api;
-
-/*************************************************
  **********  enable_mpls_overlapping_ip **********
  *************************************************/
 
@@ -299,32 +274,6 @@ static const ConvertMap enable_mpls_overlapping_ip_api =
 };
 
 const ConvertMap* enable_mpls_overlapping_ip_map = &enable_mpls_overlapping_ip_api;
-
-/*************************************************
- *************  log_ipv6_extra_data  *************
- *************************************************/
-
-static const std::string log_ipv6_extra_data = "log_ipv6_extra_data";
-static const ConvertMap log_ipv6_extra_data_api =
-{
-    log_ipv6_extra_data,
-    config_true_no_opt_ctor<& log_ipv6_extra_data, & output>
-};
-
-const ConvertMap* log_ipv6_extra_data_map = &log_ipv6_extra_data_api;
-
-/*************************************************
- ********************  nolog  ********************
- *************************************************/
-
-static const std::string nolog = "nolog";
-static const ConvertMap nolog_api =
-{
-    nolog,
-    config_true_no_opt_ctor<& nolog, & output>
-};
-
-const ConvertMap* nolog_map = &nolog_api;
 
 /*************************************************
  ********************  nopcre  *******************
@@ -339,19 +288,6 @@ static const ConvertMap nopcre_api =
 };
 
 const ConvertMap* nopcre_map = &nopcre_api;
-
-/*************************************************
- ******************  no_promisc  *****************
- *************************************************/
-
-static const std::string no_promisc = "no_promisc";
-static const ConvertMap no_promisc_api =
-{
-    no_promisc,
-    config_true_no_opt_ctor<& no_promisc, & daq>
-};
-
-const ConvertMap* no_promisc_map = &no_promisc_api;
 
 /*************************************************
  ******************  obfuscate  ******************

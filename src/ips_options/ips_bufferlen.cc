@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,20 +21,14 @@
 #include "config.h"
 #endif
 
-#include <ctype.h>
-#include <stdlib.h>
-
-#include "snort_types.h"
-#include "snort_debug.h"
-#include "sfhashfcn.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
-#include "framework/range.h"
-#include "framework/ips_option.h"
-#include "framework/inspector.h"
 #include "framework/cursor.h"
+#include "framework/ips_option.h"
 #include "framework/module.h"
+#include "framework/range.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
+
+using namespace snort;
 
 #define s_name "bufferlen"
 
@@ -46,17 +40,18 @@ static THREAD_LOCAL ProfileStats lenCheckPerfStats;
 class LenOption : public IpsOption
 {
 public:
-    LenOption(const RangeCheck& c) :
-        IpsOption(s_name)
-    { config = c; }
+    LenOption(const RangeCheck& c, bool r) :
+        IpsOption(s_name, RULE_OPTION_TYPE_BUFFER_USE)
+    { config = c; relative = r; }
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     RangeCheck config;
+    bool relative;
 };
 
 //-------------------------------------------------------------------------
@@ -65,49 +60,50 @@ private:
 
 uint32_t LenOption::hash() const
 {
-    uint32_t a,b,c;
+    uint32_t a = config.op;
+    uint32_t b = config.min;
+    uint32_t c = config.max;
 
-    a = config.op;
-    b = config.min;
-    c = config.max;
+    mix(a,b,c);
+    a += IpsOption::hash();
 
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
-
+    finalize(a,b,c);
     return c;
 }
 
 bool LenOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    LenOption& rhs = (LenOption&)ips;
-    return ( config == rhs.config );
+    const LenOption& rhs = (const LenOption&)ips;
+    return ( config == rhs.config and relative == rhs.relative );
 }
 
-int LenOption::eval(Cursor& c, Packet*)
+IpsOption::EvalStatus LenOption::eval(Cursor& c, Packet*)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
+    RuleProfile profile(lenCheckPerfStats);
+    unsigned n = relative ? c.length() : c.size();
 
-    PROFILE_VARS;
-    MODULE_PROFILE_START(lenCheckPerfStats);
+    if ( config.eval(n) )
+        return MATCH;
 
-    if ( config.eval(c.length()) )
-        rval = DETECTION_OPTION_MATCH;
-
-    MODULE_PROFILE_END(lenCheckPerfStats);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
 // module
 //-------------------------------------------------------------------------
 
+#define RANGE "0:65535"
+
 static const Parameter s_params[] =
 {
-    { "~range", Parameter::PT_STRING, nullptr, nullptr,
-      "len | min<>max | <max | >min" },
+    { "~range", Parameter::PT_INTERVAL, RANGE, nullptr,
+      "check that total length of current buffer is in given range" },
+
+    { "relative", Parameter::PT_IMPLIED, nullptr, nullptr,
+      "use remaining length (from current position) instead of total length" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -123,7 +119,12 @@ public:
     ProfileStats* get_profile() const override
     { return &lenCheckPerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     RangeCheck data;
+    bool relative = false;
 };
 
 bool LenModule::begin(const char*, int, SnortConfig*)
@@ -134,10 +135,16 @@ bool LenModule::begin(const char*, int, SnortConfig*)
 
 bool LenModule::set(const char*, Value& v, SnortConfig*)
 {
-    if ( !v.is("~range") )
+    if ( v.is("~range") )
+        return data.validate(v.get_string(), RANGE);
+
+    if ( v.is("relative") )
+        relative = true;
+
+    else
         return false;
 
-    return data.parse(v.get_string());
+    return true;
 }
 
 //-------------------------------------------------------------------------
@@ -157,7 +164,7 @@ static void mod_dtor(Module* m)
 static IpsOption* len_ctor(Module* p, OptTreeNode*)
 {
     LenModule* m = (LenModule*)p;
-    return new LenOption(m->data);
+    return new LenOption(m->data, m->relative);
 }
 
 static void len_dtor(IpsOption* p)
@@ -192,11 +199,11 @@ static const IpsApi len_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_bufferlen[] =
+#endif
 {
     &len_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_bufferlen = &len_api.base;
-#endif
 

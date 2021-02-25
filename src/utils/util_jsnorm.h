@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 1998-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,31 +16,32 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-// Writen by Bhagyashree Bantwal <bbantwal@sourcefire.com>
+// util_jsnorm.h author Bhagyashree Bantwal <bbantwal@sourcefire.com>
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-#include <ctype.h>
+#ifndef UTIL_JSNORM_H
+#define UTIL_JSNORM_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+// Javascript Normalization
 
+#include "main/snort_types.h"
+
+namespace snort
+{
 #define ALERT_SPACES_EXCEEDED   0x1
 #define ALERT_LEVELS_EXCEEDED   0x2
-#define ALERT_MIXED_ENCODINGS 0x4
+#define ALERT_MIXED_ENCODINGS   0x4
 
 #define MAX_ALLOWED_OBFUSCATION 1
 
-typedef struct
+struct JSState
 {
     int allowed_spaces;
     int allowed_levels;
     uint16_t alerts;
-}JSState;
+};
 
-int JSNormalizeDecode(char*, uint16_t, char*, uint16_t destlen, char**, int*, JSState*, uint8_t*);
-void InitJSNormLookupTable(void);
+SO_PUBLIC int JSNormalizeDecode(
+    const char*, uint16_t, char*, uint16_t destlen, const char**, int*, JSState*, uint8_t*);
+}
+#endif
 

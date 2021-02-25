@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,36 +20,23 @@
 #ifndef PROTOCOLS_PACKET_H
 #define PROTOCOLS_PACKET_H
 
-/*  I N C L U D E S  **********************************************************/
+#include <daq_common.h>
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
-#include <stddef.h>
-#include <sys/types.h>
-
-#ifndef WIN32
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <net/if.h>
-#else
-#include <netinet/in_systm.h>
-#ifndef IFNAMSIZ
-#define IFNAMESIZ MAX_ADAPTER_NAME
-#endif
-#endif
-
-extern "C" {
-#include <daq.h>
-#include <sfbpf_dlt.h>
-}
-
-#include "main/snort_types.h"
+#include "flow/flow.h"
 #include "framework/decode_data.h"
-#include "protocols/layer.h"
+#include "main/snort_types.h"
+#include "target_based/snort_protocols.h"
 
-/*  D E F I N E S  ************************************************************/
+
+namespace snort
+{
+class Active;
+class Endianness;
+class Flow;
+class ActiveAction;
+class IpsContext;
+class Obfuscator;
+class SFDAQInstance;
 
 /* packet status flags */
 #define PKT_REBUILT_FRAG     0x00000001  /* is a rebuilt fragment */
@@ -67,9 +54,9 @@ extern "C" {
 
 #define PKT_PDU_HEAD         0x00000100  /* start of PDU */
 #define PKT_PDU_TAIL         0x00000200  /* end of PDU */
-#define PKT_HTTP_DECODE      0x00000400  /* this packet has normalized http */
+#define PKT_DETECT_LIMIT     0x00000400  /* alt_dsize is valid */
 
-#define PKT_ALLOW_MULTIPLE_DETECT 0x00000800  /* packet has either pipelined mime attachements
+#define PKT_ALLOW_MULTIPLE_DETECT 0x00000800  /* packet has either pipelined mime attachments
                                                  or pipeline http requests */
 #define PKT_PAYLOAD_OBFUSCATE     0x00001000
 
@@ -80,7 +67,7 @@ extern "C" {
 
 #define PKT_PSEUDO           0x00020000  /* is a pseudo packet */
 #define PKT_MODIFIED         0x00040000  /* packet had normalizations, etc. */
-#define PKT_RESIZED          0x000c0000  /* packet has new size; must set modified too */
+#define PKT_RESIZED          0x00080000  /* packet has new size */
 
 // neither of these flags will be set for (full) retransmissions or non-data segments
 // a partial overlap results in out of sequence condition
@@ -90,42 +77,33 @@ extern "C" {
 
 #define PKT_FILE_EVENT_SET   0x00400000
 #define PKT_IGNORE           0x00800000  /* this packet should be ignored, based on port */
-#define PKT_UNUSED_FLAGS     0xfe000000
+#define PKT_RETRANSMIT       0x01000000  // packet is a re-transmitted pkt.
+#define PKT_RETRY            0x02000000  /* this packet is being re-evaluated from the internal retry queue */
+#define PKT_USE_DIRECT_INJECT 0x04000000  /* Use ioctl when injecting. */
+#define PKT_UNUSED_FLAGS     0xf8000000
 
-// 0x40000000 are available
+#define PKT_TS_OFFLOADED        0x01
+
 #define PKT_PDU_FULL (PKT_PDU_HEAD | PKT_PDU_TAIL)
 
 enum PseudoPacketType
 {
     PSEUDO_PKT_IP,
     PSEUDO_PKT_TCP,
-    PSEUDO_PKT_DCE_RPKT,
+    PSEUDO_PKT_USER,
     PSEUDO_PKT_DCE_SEG,
     PSEUDO_PKT_DCE_FRAG,
     PSEUDO_PKT_SMB_SEG,
     PSEUDO_PKT_SMB_TRANS,
-    PSEUDO_PKT_PS,
-    PSEUDO_PKT_SDF,
     PSEUDO_PKT_MAX
 };
 
-/* We must twiddle to align the offset the ethernet header and align
- * the IP header on solaris -- maybe this will work on HPUX too.
- */
-#if defined (SOLARIS) || defined (SUNOS) || defined (__sparc__) || defined(__sparc64__) || \
-    defined (HPUX)
-#define SPARC_TWIDDLE       2
-#else
-#define SPARC_TWIDDLE       0
-#endif
-
 /* default mpls flags */
 #define DEFAULT_MPLS_PAYLOADTYPE      MPLS_PAYLOADTYPE_IPV4
-#define DEFAULT_LABELCHAIN_LENGTH    -1
+#define DEFAULT_LABELCHAIN_LENGTH    (-1)
 
 constexpr int32_t MAX_PORTS = 65536;
 constexpr uint16_t NUM_IP_PROTOS = 256;
-constexpr int16_t SFTARGET_UNKNOWN_PROTOCOL = -1;
 constexpr uint8_t TCP_OPTLENMAX = 40; /* (((2^4) - 1) * 4  - TCP_HEADER_LEN) */
 constexpr uint8_t DEFAULT_LAYERMAX = 40;
 
@@ -134,22 +112,42 @@ constexpr uint8_t DEFAULT_LAYERMAX = 40;
 // payload data only, no headers.
 struct SO_PUBLIC Packet
 {
-    class Flow* flow;   /* for session tracking */
+    Packet(bool packet_data = true);
+    ~Packet();
+
+    Packet(const Packet&) = delete;
+    Packet& operator=(const Packet&) = delete;
+
+    Flow* flow;   /* for session tracking */
+    Endianness* endianness;
+    Obfuscator* obfuscator;
 
     uint32_t packet_flags;      /* special flags for the packet */
     uint32_t xtradata_mask;
-    uint16_t proto_bits;        /* protocols contained within this packet */
-    int16_t application_protocol_ordinal;
+    uint32_t proto_bits;        /* protocols contained within this packet */
 
-    uint16_t alt_dsize;         /* the dsize of a packet before munging (used for log)*/
+    uint16_t alt_dsize;         /* size for detection (iff PKT_DETECT_LIMIT) */
+
     uint8_t num_layers;         /* index into layers for next encap */
-    uint8_t ip_proto_next;      /* the protocol ID after IP and all IP6 extension */
+    // FIXIT-M Consider moving ip_proto_next below `pkth`.
+    IpProtocol ip_proto_next;      /* the protocol ID after IP and all IP6 extension */
+    bool disable_inspect;
+    mutable FilteringState filtering_state;
 
-    // nothing after this point is zeroed ...
+    // nothing after this point is zeroed by reset() ...
+    IpsContext* context;
+    Active* active;
+    Active* active_inst;
+    ActiveAction** action;
+    ActiveAction* action_inst;
+
+    DAQ_Msg_h daq_msg;              // DAQ message this packet came from
+    SFDAQInstance* daq_instance;    // DAQ instance the message came from
 
     // Everything beyond this point is set by PacketManager::decode()
-    const DAQ_PktHdr_t* pkth;    // packet meta data
+    const DAQ_PktHdr_t* pkth;   // packet meta data
     const uint8_t* pkt;         // raw packet data
+    uint32_t pktlen;            // raw packet data length
 
     // These are both set before PacketManager::decode() returns
     const uint8_t* data;        /* packet payload pointer */
@@ -161,10 +159,12 @@ struct SO_PUBLIC Packet
     PseudoPacketType pseudo_type;    // valid only when PKT_PSEUDO is set
     uint32_t iplist_id;
 
-    // for correlating configuration with event output
-    uint16_t user_policy_id;
+    uint32_t user_inspection_policy_id;
+    uint32_t user_ips_policy_id;
+    uint32_t user_network_policy_id;
 
-    uint8_t ps_proto;  // Used for portscan and unified2 logging
+    uint8_t vlan_idx;
+    uint8_t ts_packet_flags; // FIXIT-M packet flags should always be thread safe
 
     // IP_MAXPACKET is the minimum allowable max_dsize
     // there is no requirement that all data fit into an IP datagram
@@ -173,6 +173,9 @@ struct SO_PUBLIC Packet
     static const uint32_t max_dsize = IP_MAXPACKET;
 
     /*  Boolean functions - general information about this packet */
+    inline bool is_eth() const
+    { return ((proto_bits & PROTO_BIT__ETH) != 0); }
+
     inline bool has_ip() const
     { return ptrs.ip_api.is_ip(); }
 
@@ -198,17 +201,40 @@ struct SO_PUBLIC Packet
     { return (ptrs.get_pkt_type() == PktType::PDU) or (ptrs.get_pkt_type() == PktType::FILE); }
 
     inline bool is_cooked() const
-    { return packet_flags & PKT_PSEUDO; }
+    { return ((packet_flags & PKT_PSEUDO) != 0); }
 
     inline bool is_fragment() const
     { return ptrs.decode_flags & DECODE_FRAG; }
 
+    inline bool is_udp_tunneled() const
+    {
+        if (proto_bits & PROTO_BIT__UDP_TUNNELED)
+        {
+            assert(ptrs.udph);
+            return true;
+        }
+
+        return false;
+    }
+
     inline bool has_tcp_data() const
     { return (proto_bits & PROTO_BIT__TCP) and data and dsize; }
+
+    inline bool has_udp_data() const
+    { return (proto_bits & PROTO_BIT__UDP) and data and dsize; }
 
     /* Get general, non-boolean information */
     inline PktType type() const
     { return ptrs.get_pkt_type(); } // defined in codec.h
+
+    void set_detect_limit(uint16_t n)
+    {
+        alt_dsize = n;
+        packet_flags |= PKT_DETECT_LIMIT;
+    }
+
+    uint16_t get_detect_limit()
+    { return (packet_flags & PKT_DETECT_LIMIT) ? alt_dsize : dsize; }
 
     const char* get_type() const;
     const char* get_pseudo_type() const;
@@ -221,7 +247,7 @@ struct SO_PUBLIC Packet
      *     eth::ip4::udp::teredo::ip6::hop_opts::ipv6_routing::tcp
      * this function return 6 == IPPROTO_TCP == IPPROTO_ID_TCP
      */
-    inline uint8_t get_ip_proto_next() const
+    inline IpProtocol get_ip_proto_next() const
     { return ip_proto_next; }
 
     /* Similar to above. However, this function
@@ -242,33 +268,88 @@ struct SO_PUBLIC Packet
      *    ....
      * }
      */
-    bool get_ip_proto_next(uint8_t& lyr, uint8_t& proto) const;
+    bool get_ip_proto_next(uint8_t& lyr, IpProtocol& proto) const;
 
-    inline void reset()
-    {
-        memset(this, 0, offsetof(Packet, pkth));
-        ptrs.reset();
-    }
-    bool from_client()
+    void reset();
+    void release_helpers();
+
+    bool is_from_client() const
     { return (packet_flags & PKT_FROM_CLIENT) != 0; }
 
-    bool from_server()
+    bool is_from_server() const
     { return (packet_flags & PKT_FROM_SERVER) != 0; }
 
-    bool is_portscan()
-    { return is_cooked() and (pseudo_type == PSEUDO_PKT_PS); }
+    bool is_from_client_originally() const
+    { return (!flow || flow->flags.client_initiated) ? is_from_client() : is_from_server(); }
 
-    bool is_full_pdu()
+    bool is_from_server_originally() const
+    { return (!flow || flow->flags.client_initiated) ? is_from_server() : is_from_client(); }
+
+    bool is_from_application_client() const;
+
+    bool is_from_application_server() const;
+
+    bool is_full_pdu() const
     { return (packet_flags & PKT_PDU_FULL) == PKT_PDU_FULL; }
 
-    bool is_pdu_start()
+    bool is_pdu_start() const
     { return (packet_flags & PKT_PDU_HEAD) != 0; }
 
-    bool has_paf_payload()
+    bool has_paf_payload() const
     { return (packet_flags & PKT_REBUILT_STREAM) or is_full_pdu(); }
 
-    bool is_rebuilt()
+    bool is_rebuilt() const
     { return (packet_flags & (PKT_REBUILT_STREAM|PKT_REBUILT_FRAG)) != 0; }
+
+    bool is_retry() const
+    { return (packet_flags & PKT_RETRY) != 0; }
+
+    bool is_offloaded() const
+    { return (ts_packet_flags & PKT_TS_OFFLOADED) != 0; }
+
+    void set_offloaded()
+    { ts_packet_flags |= PKT_TS_OFFLOADED; }
+
+    void clear_offloaded()
+    { ts_packet_flags &= (~PKT_TS_OFFLOADED); }
+
+    bool is_detection_enabled(bool to_server);
+
+    bool is_inter_group_flow() const
+    { return (pkth->flags & DAQ_PKT_FLAG_SIGNIFICANT_GROUPS) != 0; }
+
+    bool test_session_flags(uint32_t);
+
+    SnortProtocolId get_snort_protocol_id();
+
+    void set_snort_protocol_id(SnortProtocolId proto_id)
+    {
+        assert( ptrs.get_pkt_type() != PktType::PDU);
+
+        if ( flow )
+            flow->ssn_state.snort_protocol_id = proto_id;
+    }
+
+    uint16_t get_flow_vlan_id() const;
+
+    int16_t get_ingress_group() const
+    {
+        if (is_inter_group_flow())
+            return pkth->ingress_group;
+
+        return DAQ_PKTHDR_UNKNOWN;
+    }
+
+    int16_t get_egress_group() const
+    {
+        if (is_inter_group_flow())
+            return pkth->egress_group;
+
+        return DAQ_PKTHDR_UNKNOWN;
+    }
+
+private:
+    bool allocated;
 };
 
 /* Macros to deal with sequence numbers - p810 TCP Illustrated vol 2 */
@@ -278,33 +359,71 @@ struct SO_PUBLIC Packet
 #define SEQ_GEQ(a,b) ((int)((a) - (b)) >= 0)
 #define SEQ_EQ(a,b)  ((int)((a) - (b)) == 0)
 
-#define BIT(i) (0x1 << (i-1))
+#define BIT(i) (0x1 << ((i)-1))
 
-static inline void SetExtraData(Packet* p, const uint32_t xid)
-{ p->xtradata_mask |= BIT(xid); }
+inline void SetExtraData(Packet* p, const uint32_t xid) { p->xtradata_mask |= BIT(xid); }
 
-static inline uint16_t EXTRACT_16BITS(const uint8_t* const p)
-{ return ntohs(*(uint16_t*)(p)); }
+inline uint16_t extract_16bits(const uint8_t* const p)
+{ return ntohs(*(const uint16_t*)(p)); }
 
-#ifdef WORDS_MUSTALIGN
-
-#if defined(__GNUC__)
-/* force word-aligned ntohl parameter */
-static inline uint32_t EXTRACT_32BITS(const uint8_t* p)
+inline uint32_t extract_32bits(const uint8_t* p)
 {
-    uint32_t tmp;
-    memmove(&tmp, p, sizeof(uint32_t));
-    return ntohl(tmp);
+    assert(p);
+
+    return ntohl(*(const uint32_t*)p);
 }
 
-#endif /* __GNUC__ */
+inline uint16_t alignedNtohs(const uint16_t* ptr)
+{
+    uint16_t value;
 
+    if (ptr == nullptr)
+        return 0;
+
+    value = *ptr;
+
+#ifdef WORDS_BIGENDIAN
+    return ((value & 0xff00) >> 8) | ((value & 0x00ff) << 8);
 #else
+    return value;
+#endif
+}
 
-/* allows unaligned ntohl parameter - dies w/SIGBUS on SPARCs */
-static inline uint32_t EXTRACT_32BITS(const uint8_t* p)
-{ return ntohl(*(uint32_t*)p); }
-#endif /* WORDS_MUSTALIGN */
+inline uint32_t alignedNtohl(const uint32_t* ptr)
+{
+    uint32_t value;
 
+    if (ptr == nullptr)
+        return 0;
+
+    value = *ptr;
+
+#ifdef WORDS_BIGENDIAN
+    return ((value & 0xff000000) >> 24) | ((value & 0x00ff0000) >> 8)  |
+           ((value & 0x0000ff00) << 8)  | ((value & 0x000000ff) << 24);
+#else
+    return value;
+#endif
+}
+
+inline uint64_t alignedNtohq(const uint64_t* ptr)
+{
+    uint64_t value;
+
+    if (ptr == nullptr)
+        return 0;
+
+    value = *ptr;
+
+#ifdef WORDS_BIGENDIAN
+    return ((value & 0xff00000000000000) >> 56) | ((value & 0x00ff000000000000) >> 40) |
+           ((value & 0x0000ff0000000000) >> 24) | ((value & 0x000000ff00000000) >> 8)  |
+           ((value & 0x00000000ff000000) << 8)  | ((value & 0x0000000000ff0000) << 24) |
+           ((value & 0x000000000000ff00) << 40) | ((value & 0x00000000000000ff) << 56);
+#else
+    return value;
+#endif
+}
+}
 #endif
 

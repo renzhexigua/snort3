@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,19 +17,20 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "stream_ip.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <assert.h>
+#include "stream_ip.h"
 
-#include "ip_module.h"
-#include "ip_defrag.h"
-#include "ip_session.h"
 #include "log/messages.h"
-#include "protocols/packet.h"
+
+#include "ip_defrag.h"
+#include "ip_ha.h"
+#include "ip_module.h"
+#include "ip_session.h"
+
+using namespace snort;
 
 /* max frags in a single frag tracker */
 #define DEFAULT_MAX_FRAGS 8192
@@ -58,12 +59,6 @@ StreamIpConfig::StreamIpConfig()
     frag_engine.min_fragment_length = 0;
 }
 
-static void ip_show(StreamIpConfig* pc)
-{
-    LogMessage("Stream IP config:\n");
-    LogMessage("    Timeout: %d seconds\n", pc->session_timeout);
-}
-
 //-------------------------------------------------------------------------
 // inspector stuff
 //-------------------------------------------------------------------------
@@ -72,15 +67,12 @@ class StreamIp : public Inspector
 {
 public:
     StreamIp(StreamIpConfig*);
-    ~StreamIp();
+    ~StreamIp() override;
 
     bool configure(SnortConfig*) override;
-    void show(SnortConfig*) override;
+    void show(const SnortConfig*) const override;
 
-    void tinit() override;
-    void tterm() override;
-
-    void eval(Packet*) override;
+    NORETURN_ASSERT void eval(Packet*) override;
 
 public:
     StreamIpConfig* config;
@@ -105,23 +97,16 @@ bool StreamIp::configure(SnortConfig* sc)
     return true;
 }
 
-void StreamIp::tinit()
+void StreamIp::show(const SnortConfig*) const
 {
-    defrag->tinit();
+    if ( !config )
+        return;
+
+    defrag->show();
+    ConfigLogger::log_value("session_timeout", config->session_timeout);
 }
 
-void StreamIp::tterm()
-{
-    defrag->tterm();
-}
-
-void StreamIp::show(SnortConfig* sc)
-{
-    ip_show(config);
-    defrag->show(sc);
-}
-
-void StreamIp::eval(Packet*)
+NORETURN_ASSERT void StreamIp::eval(Packet*)
 {
     // session::process() instead
     assert(false);
@@ -148,6 +133,16 @@ static Module* mod_ctor()
 
 static void mod_dtor(Module* m)
 { delete m; }
+
+static void ip_tinit()
+{
+    IpHAManager::tinit();
+}
+
+static void ip_tterm()
+{
+    IpHAManager::tterm();
+}
 
 static Inspector* ip_ctor(Module* m)
 {
@@ -180,13 +175,13 @@ static const InspectApi ip_api =
         mod_dtor
     },
     IT_STREAM,
-    (unsigned)PktType::IP,
+    PROTO_BIT__IP,
     nullptr, // buffers
     nullptr, // service
     nullptr, // pinit
     nullptr, // pterm
-    nullptr, // tinit
-    nullptr, // tterm
+    ip_tinit, // tinit
+    ip_tterm, // tterm
     ip_ctor,
     ip_dtor,
     ip_ssn,

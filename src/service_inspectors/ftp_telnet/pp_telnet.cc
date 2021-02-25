@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -33,7 +33,7 @@
  *
  * Arguments:  None
  *
- * Effect:  The telnet nogiation data is removed from the data
+ * Effect:  The telnet negotiation data is removed from the data
  *
  * Comments:
  *
@@ -41,19 +41,21 @@
 
 /* your preprocessor header file goes here */
 
-#include "pp_telnet.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <sys/types.h>
+#include "pp_telnet.h"
 
-#include "telnet_module.h"
+#include "detection/detection_engine.h"
+#include "detection/detection_util.h"
+#include "protocols/packet.h"
+#include "stream/stream.h"
+
 #include "ftpp_return_codes.h"
-#include "snort_debug.h"
-#include "stream/stream_api.h"
-#include "detection_util.h"
+#include "telnet_module.h"
+
+using namespace snort;
 
 #define NUL 0x00
 #define CR 0x0d
@@ -65,17 +67,16 @@
  */
 #define CONSECUTIVE_8BIT_THRESHOLD 3
 
-static THREAD_LOCAL DataBuffer DecodeBuffer;
-
-void reset_telnet_buffer()
+void reset_telnet_buffer(Packet* p)
 {
-    DecodeBuffer.len = 0;
+    DetectionEngine::get_alt_buffer(p).len = 0;
 }
 
-const uint8_t* get_telnet_buffer(unsigned& len)
+const uint8_t* get_telnet_buffer(Packet* p, unsigned& len)
 {
-    len = DecodeBuffer.len;
-    return len ? DecodeBuffer.data : nullptr;
+    const DataBuffer& buf = DetectionEngine::get_alt_buffer(p);
+    len = buf.len;
+    return len ? buf.data : nullptr;
 }
 
 /*
@@ -92,17 +93,18 @@ const uint8_t* get_telnet_buffer(unsigned& len)
  *
  */
 int normalize_telnet(
-    TELNET_SESSION* tnssn, Packet* p,
-    int iMode, char ignoreEraseCmds)
+    TELNET_SESSION* tnssn, Packet* p, DataBuffer& buf,
+    int iMode, char ignoreEraseCmds, bool on_ftp_channel)
 {
     int ret = FTPP_NORMALIZED;
-    const unsigned char* read_ptr, * sb_start = NULL;
-    int saw_ayt = 0;
-    const unsigned char* start = DecodeBuffer.data;
+    const unsigned char* read_ptr, * sb_start = nullptr;
     unsigned char* write_ptr;
     const unsigned char* end;
     int normalization_required = 0;
     int consec_8bit_chars = 0;
+
+    const unsigned char* start = buf.data;
+    buf.len = 0;
 
     /* Telnet commands are handled in here.
     * They can be 2 bytes long -- ie, IAC NOP, IAC AYT, etc.
@@ -118,7 +120,7 @@ int normalize_telnet(
     read_ptr = p->data;
     end = p->data + p->dsize;
 
-    /* look to see if we have any telnet negotiaion codes in the data */
+    /* look to see if we have any telnet negotiation codes in the data */
     while (!normalization_required && (read_ptr < end))
     {
         /* look for the start of a negotiation string */
@@ -129,8 +131,12 @@ int normalize_telnet(
         }
         else
         {
+            if ( on_ftp_channel )
+            {
+                return FTPP_SUCCESS;
+            }
             /* Okay, it wasn't an IAC also its a midstream pickup */
-            if (*read_ptr > 0x7F && stream.is_midstream(p->flow))
+            if (*read_ptr > 0x7F && Stream::is_midstream(p->flow))
             {
                 consec_8bit_chars++;
                 if (consec_8bit_chars > CONSECUTIVE_8BIT_THRESHOLD)
@@ -143,12 +149,12 @@ int normalize_telnet(
                     if (tnssn)
                     {
                         tnssn->encr_state = 1;
-                        SnortEventqAdd(GID_TELNET, TELNET_ENCRYPTED);
+                        DetectionEngine::queue_event(GID_TELNET, TELNET_ENCRYPTED);
 
                         if (!tnssn->telnet_conf->check_encrypted_data)
                         {
                             /* Mark this session & packet as one to ignore */
-                            stream.stop_inspection(p->flow, p, SSN_DIR_BOTH, -1, 0);
+                            Stream::stop_inspection(p->flow, p, SSN_DIR_BOTH, -1, 0);
                             /* No point to do further normalization */
                             return FTPP_ALERT;
                         }
@@ -167,7 +173,6 @@ int normalize_telnet(
 
     if (!normalization_required)
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_FTPTELNET, "Nothing to process!\n"); );
         if (tnssn && iMode == FTPP_SI_CLIENT_MODE)
             tnssn->consec_ayt = 0;
         return FTPP_SUCCESS;
@@ -183,23 +188,24 @@ int normalize_telnet(
     /* rewind the data stream to p->data */
     read_ptr = p->data;
 
-    /* setup for overwriting the negotaiation strings with
+    /* setup for overwriting the negotiation strings with
     * the follow-on data
     */
-    write_ptr = (unsigned char*)DecodeBuffer.data;
+    write_ptr = (unsigned char*)buf.data;
 
     /* walk thru the remainder of the packet */
     while ((read_ptr < end) &&
-        (write_ptr < ((unsigned char*)DecodeBuffer.data) + sizeof(DecodeBuffer.data)))
+        (write_ptr < ((unsigned char*)buf.data) + sizeof(buf.data)))
     {
-        saw_ayt = 0;
         /* if the following byte isn't a subnegotiation initialization */
         if (((read_ptr + 1) < end) &&
             (*read_ptr == (unsigned char)TNC_IAC) &&
             (*(read_ptr + 1) != (unsigned char)TNC_SB))
         {
+            int saw_ayt = 0;
+
             /* NOPs are two bytes long */
-            switch (*((unsigned char*)(read_ptr + 1)))
+            switch (*((const unsigned char*)(read_ptr + 1)))
             {
             case TNC_NOP:
                 read_ptr += 2;
@@ -212,6 +218,7 @@ int normalize_telnet(
                     if (write_ptr  > start)
                     {
                         write_ptr--;
+                        buf.len--;
                     }
                 }
                 break;
@@ -225,6 +232,7 @@ int normalize_telnet(
                     {
                         /* Go to previous char */
                         write_ptr--;
+                        buf.len--;
 
                         if ((*write_ptr == CR) &&
                             ((*(write_ptr+1) == NUL) || (*(write_ptr+1) == LF)) )
@@ -234,6 +242,7 @@ int normalize_telnet(
                              * beginning of this line
                              */
                             write_ptr+=2;
+                            buf.len+=2;
                             break;
                         }
                     }
@@ -250,7 +259,7 @@ int normalize_telnet(
                         tnssn->telnet_conf->ayt_threshold))
                     {
                         /* Alert on consecutive AYT commands */
-                        SnortEventqAdd(GID_TELNET, TELNET_AYT_OVERFLOW);
+                        DetectionEngine::queue_event(GID_TELNET, TELNET_AYT_OVERFLOW);
                         tnssn->consec_ayt = 0;
                         return FTPP_ALERT;
                     }
@@ -284,6 +293,7 @@ int normalize_telnet(
                 * in the data stream since it was escaped */
                 read_ptr++; /* skip past the first IAC */
                 *write_ptr++ = *read_ptr++;
+                buf.len++;
                 break;
             case TNC_WILL:
             case TNC_WONT:
@@ -340,12 +350,12 @@ int normalize_telnet(
                     if (tnssn)
                     {
                         tnssn->encr_state = 1;
-                        SnortEventqAdd(GID_TELNET, TELNET_ENCRYPTED);
+                        DetectionEngine::queue_event(GID_TELNET, TELNET_ENCRYPTED);
 
                         if (!tnssn->telnet_conf->check_encrypted_data)
                         {
                             /* Mark this session & packet as one to ignore */
-                            stream.stop_inspection(p->flow, p, SSN_DIR_BOTH, -1, 0);
+                            Stream::stop_inspection(p->flow, p, SSN_DIR_BOTH, -1, 0);
                             /* No point to do further normalization */
                             return FTPP_ALERT;
                         }
@@ -365,7 +375,7 @@ int normalize_telnet(
                 if ((*read_ptr == (unsigned char)TNC_IAC) &&
                     (*(read_ptr+1) == (unsigned char)TNC_SE))
                 {
-                    sb_start = NULL;
+                    sb_start = nullptr;
                     break;
                 }
                 read_ptr++;
@@ -386,7 +396,7 @@ int normalize_telnet(
                 else
                 {
                     /* Alert on SB without SE */
-                    SnortEventqAdd(GID_TELNET, TELNET_SB_NO_SE);
+                    DetectionEngine::queue_event(GID_TELNET, TELNET_SB_NO_SE);
                     ret = FTPP_ALERT;
                 }
 
@@ -404,13 +414,8 @@ int normalize_telnet(
         }
         else
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_FTPTELNET,
-                "overwriting %2X(%c) with %2X(%c)\n",
-                (unsigned char)(*write_ptr&0xFF), *write_ptr,
-                (unsigned char)(*read_ptr & 0xFF), *read_ptr); );
-
             /* overwrite the negotiation bytes with the follow-on bytes */
-            switch (*((unsigned char*)(read_ptr)))
+            switch (*((const unsigned char*)(read_ptr)))
             {
             case 0x7F: /* Delete */
             case 0x08: /* Backspace/Ctrl-H */
@@ -418,11 +423,13 @@ int normalize_telnet(
                 if (write_ptr > start)
                 {
                     write_ptr--;
+                    buf.len--;
                 }
                 read_ptr++;
                 break;
             default:
                 *write_ptr++ = *read_ptr++;
+                buf.len++;
                 break;
             }
 

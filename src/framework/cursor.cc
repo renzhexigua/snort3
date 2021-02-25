@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,11 +17,20 @@
 //--------------------------------------------------------------------------
 // cursor.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include <cassert>
+
 #include "cursor.h"
+
 #include "detection/detection_util.h"
-#include "framework/inspector.h"
-#include "flow/flow.h"
 #include "protocols/packet.h"
+
+using namespace snort;
+
+unsigned CursorData::cursor_data_id = 0;
 
 Cursor::Cursor(Packet* p)
 {
@@ -30,26 +39,72 @@ Cursor::Cursor(Packet* p)
 
 Cursor::Cursor(const Cursor& rhs)
 {
-    *this = rhs;
-    delta = 0;
+    name = rhs.name;
+    buf = rhs.buf;
+    sz = rhs.sz;
+    pos = rhs.pos;
+
+    if (rhs.data)
+    {
+        data = new CursorDataVec;
+
+        for (CursorData*& cd : *rhs.data)
+            data->push_back(cd->clone());
+    }
+}
+
+CursorData* Cursor::get_data(unsigned id) const
+{
+    if (data)
+    {
+        for (CursorData*& cd : *data)
+        {
+            if (cd->get_id() == id)
+                return cd;
+        }
+    }
+
+    return nullptr;
+}
+
+void Cursor::set_data(CursorData* cd)
+{
+    assert(cd);
+
+    if (data)
+    {
+        unsigned id = cd->get_id();
+        for (CursorData*& old : *data)
+        {
+            if (old->get_id() == id)
+            {
+                delete old;
+                old = cd;
+                return;
+            }
+        }
+    }
+    else
+    {
+        data = new CursorDataVec;
+    }
+
+    data->push_back(cd);
 }
 
 void Cursor::reset(Packet* p)
 {
     InspectionBuffer buf;
 
+    // FIXIT-M should this be converted to get_fp_buf()?
     if ( p->flow and p->flow->gadget and
         p->flow->gadget->get_buf(buf.IBT_ALT, p, buf) )
     {
         set("alt_data", buf.data, buf.len);
     }
-    else if ( IsLimitedDetect(p) )
-    {
-        set("pkt_data", p->data, p->alt_dsize);
-    }
     else
     {
-        set("pkt_data", p->data, p->dsize);
+        set("pkt_data", p->data, p->get_detect_limit());
     }
 }
 

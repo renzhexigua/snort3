@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,9 +20,10 @@
 #ifndef PROTOCOLS_TCP_OPTIONS_H
 #define PROTOCOLS_TCP_OPTIONS_H
 
-#include <cstdint>
 #include "main/snort_types.h"
 
+namespace snort
+{
 struct Packet;
 
 namespace tcp
@@ -84,7 +85,7 @@ const uint8_t TCPOLEN_TIMESTAMP = 10;   /* Timestamp [RFC1323], 10 bytes */
 const uint8_t TCPOLEN_PARTIAL_PERM = 2; /* Partial Order Permitted/ Experimental [RFC1693] */
 const uint8_t TCPOLEN_PARTIAL_SVC = 3;  /*  3 bytes long -- Experimental - [RFC1693] */
 
-/* atleast decode T/TCP options... */
+/* at least decode T/TCP options... */
 const uint8_t TCPOLEN_CC = 6;       /* page 17 of rfc1644 */
 const uint8_t TCPOLEN_CC_NEW = 6;   /* page 17 of rfc1644 */
 const uint8_t TCPOLEN_CC_ECHO = 6;  /* page 17 of rfc1644 */
@@ -92,11 +93,13 @@ const uint8_t TCPOLEN_CC_ECHO = 6;  /* page 17 of rfc1644 */
 const uint8_t TCPOLEN_TRAILER_CSUM = 3;
 const uint8_t TCPOLEN_MD5SIG = 18;
 
+// FIXIT-L reduce all these classes to a simple pointer based approach
+// that doesn't require any reinterpret casts (see also ipv4_options.h)
 struct TcpOption
 {
     TcpOptCode code;
     uint8_t len;
-    uint8_t data[13];  // arbitrary number. choosing 13 to align with 128 bits
+    uint8_t data[40];  // maximum possible
 
     inline uint8_t get_len() const
     { return ((uint8_t)code <= 1) ? 1 : len; }
@@ -106,18 +109,18 @@ struct TcpOption
 
     inline const TcpOption& next() const
     {
-#       if defined(__GNUC__)
+#ifdef __GNUC__
         const uint8_t tmp_len = ((uint8_t)code <= 1) ? 1 : len;
         const uint8_t* const tmp = reinterpret_cast<const uint8_t*>(this);
         const TcpOption* opt = reinterpret_cast<const TcpOption*>(&tmp[tmp_len]);
         return *opt;
 
-#       else
+#else
         if ( (uint8_t)code <= 1 )
             return reinterpret_cast<const TcpOption&>(len);
         else
             return reinterpret_cast<const TcpOption&>(data[len -2]);
-#       endif
+#endif
     }
 };
 
@@ -177,6 +180,7 @@ private:
     const uint8_t* end_ptr;
 };
 } // namespace tcp
+} // namespace snort
 
-#endif /* PROTOCOLS_TCP_OPTIONS_H */
+#endif
 

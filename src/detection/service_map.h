@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -18,30 +18,32 @@
 //--------------------------------------------------------------------------
 
 // service_map.h based fp_create.h by:
-/*
-** Dan Roelker <droelker@sourcefire.com>
-** Marc Norton <mnorton@sourcefire.com>
-**
-** NOTES
-** 5.7.02 - Initial Sourcecode.  Norton/Roelker
-** 6/13/05 - marc norton
-**   Added plugin support for fast pattern match data
-*/
+//
+// Dan Roelker <droelker@sourcefire.com>
+// Marc Norton <mnorton@sourcefire.com>
+
 #ifndef SERVICE_MAP_H
 #define SERVICE_MAP_H
 
+//  for managing rule groups by service
+//  direction to client and to server are separate
+
 #include <vector>
 
-#include "detection/pcrm.h"
 #include "target_based/snort_protocols.h"
 
-struct SFGHASH;
+namespace snort
+{
+struct SnortConfig;
+class GHash;
+}
+struct PortGroup;
 
 //  Service Rule Map Master Table
 struct srmm_table_t
 {
-    SFGHASH* to_srv[SNORT_PROTO_MAX];
-    SFGHASH* to_cli[SNORT_PROTO_MAX];
+    snort::GHash* to_srv;
+    snort::GHash* to_cli;
 };
 
 srmm_table_t* ServiceMapNew();
@@ -50,22 +52,19 @@ void ServiceMapFree(srmm_table_t*);
 srmm_table_t* ServicePortGroupMapNew();
 void ServicePortGroupMapFree(srmm_table_t*);
 
-void fpPrintServicePortGroupSummary(srmm_table_t*);
-int fpCreateServiceMaps(struct SnortConfig*);
+void fpPrintServicePortGroupSummary(snort::SnortConfig*);
+void fpCreateServiceMaps(snort::SnortConfig*);
 
-//  Service/Protocol Oridinal To PortGroup table
+//  Service/Protocol Ordinal To PortGroup table
 typedef std::vector<PortGroup*> PortGroupVector;
 
 struct sopg_table_t
 {
-    sopg_table_t();
-    bool set_user_mode();
-    PortGroup* get_port_group(int proto, bool c2s, int16_t proto_ordinal);
+    sopg_table_t(unsigned size);
+    PortGroup* get_port_group(bool c2s, SnortProtocolId svc);
 
-    PortGroupVector to_srv[SNORT_PROTO_MAX];
-    PortGroupVector to_cli[SNORT_PROTO_MAX];
-
-    bool user_mode;
+    PortGroupVector to_srv;
+    PortGroupVector to_cli;
 };
 
 

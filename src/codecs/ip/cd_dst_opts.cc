@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,11 +21,11 @@
 #include "config.h"
 #endif
 
-#include "framework/codec.h"
-#include "protocols/protocol_ids.h"
-#include "protocols/packet.h"
 #include "codecs/codec_module.h"
+#include "framework/codec.h"
 #include "main/snort_config.h"
+
+using namespace snort;
 
 #define CD_DSTOPTS_NAME "ipv6_dst_opts"
 #define CD_DSTOPTS_HELP "support for ipv6 destination options"
@@ -36,15 +36,14 @@ class Ipv6DSTOptsCodec : public Codec
 {
 public:
     Ipv6DSTOptsCodec() : Codec(CD_DSTOPTS_NAME) { }
-    ~Ipv6DSTOptsCodec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
 };
 
 struct IP6Dest
 {
-    uint8_t ip6dest_nxt;
+    IpProtocol ip6dest_nxt;
     uint8_t ip6dest_len;
     /* options follow */
     uint8_t ip6dest_pad[6];
@@ -61,16 +60,14 @@ bool Ipv6DSTOptsCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
         return false;
     }
 
-    if ( snort_conf->hit_ip6_maxopts(codec.ip6_extension_count) )
-    {
+    if ( codec.conf->hit_ip6_maxopts(codec.ip6_extension_count) )
         codec_event(codec, DECODE_IP6_EXCESS_EXT_HDR);
-        return false;
-    }
 
-    if (dsthdr->ip6dest_nxt == IPPROTO_ROUTING)
+    if (dsthdr->ip6dest_nxt == IpProtocol::ROUTING)
         codec_event(codec, DECODE_IPV6_DSTOPTS_WITH_ROUTING);
 
     codec.lyr_len = sizeof(IP6Dest) + (dsthdr->ip6dest_len << 3);
+
     if (codec.lyr_len > raw.len)
     {
         codec_event(codec, DECODE_IPV6_TRUNCATED_EXT);
@@ -79,19 +76,19 @@ bool Ipv6DSTOptsCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
 
     codec.proto_bits |= PROTO_BIT__IP6_EXT;
     codec.ip6_extension_count++;
-    codec.next_prot_id = dsthdr->ip6dest_nxt;
+    codec.next_prot_id = (ProtocolId)dsthdr->ip6dest_nxt;
     codec.ip6_csum_proto = dsthdr->ip6dest_nxt;
 
     // must be called AFTER setting next_prot_id
-    CheckIPv6ExtensionOrder(codec, IPPROTO_ID_DSTOPTS);
+    CheckIPv6ExtensionOrder(codec, IpProtocol::DSTOPTS);
 
     if ( CheckIPV6HopOptions(raw, codec))
         return true;
     return false;
 }
 
-void Ipv6DSTOptsCodec::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(IPPROTO_ID_DSTOPTS); }
+void Ipv6DSTOptsCodec::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::DSTOPTS); }
 
 //-------------------------------------------------------------------------
 // api
@@ -127,11 +124,11 @@ static const CodecApi ipv6_dstopts_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_dstopts[] =
+#endif
 {
     &ipv6_dstopts_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_dstopts = &ipv6_dstopts_api.base;
-#endif
 

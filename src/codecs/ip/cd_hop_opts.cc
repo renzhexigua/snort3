@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -23,9 +23,9 @@
 
 #include "codecs/codec_module.h"
 #include "framework/codec.h"
-#include "protocols/ipv6.h"
 #include "main/snort_config.h"
-#include "protocols/protocol_ids.h"
+
+using namespace snort;
 
 #define CD_HOPOPTS_NAME "ipv6_hop_opts"
 #define CD_HOPOPTS_HELP "support for IPv6 hop options"
@@ -36,15 +36,14 @@ class Ipv6HopOptsCodec : public Codec
 {
 public:
     Ipv6HopOptsCodec() : Codec(CD_HOPOPTS_NAME) { }
-    ~Ipv6HopOptsCodec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
 };
 
 struct IP6HopByHop
 {
-    uint8_t ip6hbh_nxt;
+    IpProtocol ip6hbh_nxt;
     uint8_t ip6hbh_len;
     /* options follow */
     uint8_t ip6hbh_pad[6];
@@ -65,7 +64,7 @@ bool Ipv6HopOptsCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
         return false;
     }
 
-    if ( snort_conf->hit_ip6_maxopts(codec.ip6_extension_count) )
+    if ( codec.conf->hit_ip6_maxopts(codec.ip6_extension_count) )
     {
         codec_event(codec, DECODE_IP6_EXCESS_EXT_HDR);
         return false;
@@ -78,22 +77,22 @@ bool Ipv6HopOptsCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
         return false;
     }
 
-    codec.next_prot_id = (uint16_t)hbh_hdr->ip6hbh_nxt;
+    codec.next_prot_id = (ProtocolId)hbh_hdr->ip6hbh_nxt;
     codec.ip6_csum_proto = hbh_hdr->ip6hbh_nxt;
     codec.ip6_extension_count++;
     codec.proto_bits |= PROTO_BIT__IP6_EXT;
 
     // must be called AFTER setting next_prot_id
-    CheckIPv6ExtensionOrder(codec, IPPROTO_ID_HOPOPTS);
+    CheckIPv6ExtensionOrder(codec, IpProtocol::HOPOPTS);
     if ( CheckIPV6HopOptions(raw, codec))
         return true;
 
     return false;
 }
 
-void Ipv6HopOptsCodec::get_protocol_ids(std::vector<uint16_t>& v)
+void Ipv6HopOptsCodec::get_protocol_ids(std::vector<ProtocolId>& v)
 {
-    v.push_back(IPPROTO_ID_HOPOPTS);
+    v.emplace_back(ProtocolId::HOPOPTS);
 }
 
 //-------------------------------------------------------------------------
@@ -130,23 +129,15 @@ static const CodecApi ipv6_hopopts_api =
 
 /*  This codec is static to ensure the symbols CheckIPV6HopOptions
  *  and CheckIPv6ExtensionOrder are included in the binary.
- *
- *  If this Codec is no longer static, also edit the file codec_api.cc
  */
-#if 0
 
-#ifdef BUILDING_SO
-SO_PUBLIC const BaseApi* snort_plugins[] =
+//#ifdef BUILDING_SO
+//SO_PUBLIC const BaseApi* snort_plugins[] =
+//#else
+const BaseApi* cd_hopopts[] =
+//#endif
 {
     &ipv6_hopopts_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_hopopts = &ipv6_hopopts_api.base;
-#endif
-
-#else /* 0 */
-const BaseApi* cd_hopopts = &ipv6_hopopts_api.base;
-
-#endif /* 0 */
 

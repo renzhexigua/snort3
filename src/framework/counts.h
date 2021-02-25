@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -21,9 +21,21 @@
 #ifndef COUNTS_H
 #define COUNTS_H
 
+// basic stats support - note that where these are used, the number of
+// elements in stats must be the same as the number of elements in the peg
+// info (and in the same sequence).
+
 #include "main/snort_types.h"
 
 typedef uint64_t PegCount;
+
+enum CountType
+{
+    END,   // sentinel value
+    SUM,   // tracks cumulative total number of items seen (eg #events)
+    NOW,   // gives snapshot of current number of items (eg current #sessions)
+    MAX,   // tracks maximum value seen (eg max #sessions)
+};
 
 struct SimpleStats
 {
@@ -32,13 +44,18 @@ struct SimpleStats
 
 struct PegInfo
 {
+    CountType type;
     const char* name;
     const char* help;
 };
 
-SO_PUBLIC extern const struct PegInfo simple_pegs[];
 
-#define array_size(a) (sizeof(a)/sizeof(a[0]))
+namespace snort
+{
+SO_PUBLIC extern const struct PegInfo simple_pegs[];
+} // namespace snort
+
+#define array_size(a) (sizeof(a)/sizeof((a)[0]))
 
 #endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 1998-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,30 +22,32 @@
  * sf_vartable.h
  * 11/17/06
  *
- * Library for implementing a variable table.
  * All API calls have the prefix "sfvt".
 */
 
 #ifndef SF_VARTABLE_H
 #define SF_VARTABLE_H
 
+// Library for implementing a variable table.
+
 #include <cstdio>
+
 #include "sfip/sf_returns.h"
 
 struct sfip_var_t;
 struct vartable_t;
 
 /* Allocates new variable table */
-vartable_t* sfvt_alloc_table(void);
+vartable_t* sfvt_alloc_table();
 void sfvt_free_table(vartable_t* table);
 
 /* Adds the variable described by "str" to the table "table" */
-SFIP_RET sfvt_add_str(vartable_t* table, const char* str, sfip_var_t**);
-SFIP_RET sfvt_define(vartable_t* table, const char* name, const char* value);
+SfIpRet sfvt_add_str(vartable_t* table, const char* str, sfip_var_t**);
+SfIpRet sfvt_define(vartable_t* table, const char* name, const char* value);
 
 /* Adds the variable described by "str" to the variable "dst",
  * using the vartable for looking variables used within "str" */
-SFIP_RET sfvt_add_to_var(vartable_t* table, sfip_var_t* dst, const char* src);
+SfIpRet sfvt_add_to_var(vartable_t* table, sfip_var_t* dst, const char* src);
 
 /* Looks up a variable from the table using the name as the key */
 sfip_var_t* sfvt_lookup_var(vartable_t* table, const char* name);

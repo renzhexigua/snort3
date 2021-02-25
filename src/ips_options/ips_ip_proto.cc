@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -21,23 +21,17 @@
 #include "config.h"
 #endif
 
-#include <sys/types.h>
-#include <stdlib.h>
-#include <ctype.h>
-#include <errno.h>
 #include <netdb.h>
 
-#include "treenodes.h"
-#include "protocols/packet.h"
-#include "parser.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "hash/hash_key_operations.h"
+#include "log/messages.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+#include "utils/util_cstring.h"
+
+using namespace snort;
 
 #define s_name "ip_proto"
 
@@ -48,23 +42,23 @@ static THREAD_LOCAL ProfileStats ipProtoPerfStats;
 #define IP_PROTO__GREATER_THAN  2
 #define IP_PROTO__LESS_THAN     3
 
-typedef struct _IpProtoData
+struct IpProtoData
 {
-    uint8_t protocol;
+    IpProtocol protocol;
     uint8_t comparison_flag;
-} IpProtoData;
+};
 
 class IpProtoOption : public IpsOption
 {
 public:
     IpProtoOption(const IpProtoData& c) :
-        IpsOption(s_name, RULE_OPTION_TYPE_IP_PROTO)
+        IpsOption(s_name)
     { config = c; }
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
     IpProtoData* get_data()
     { return &config; }
@@ -79,27 +73,24 @@ private:
 
 uint32_t IpProtoOption::hash() const
 {
-    uint32_t a,b,c;
-    const IpProtoData* data = &config;
+    uint32_t a = to_utype(config.protocol);
+    uint32_t b = config.comparison_flag;
+    uint32_t c = IpsOption::hash();
 
-    a = data->protocol;
-    b = data->comparison_flag;
-    c = 0;
-
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool IpProtoOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    IpProtoOption& rhs = (IpProtoOption&)ips;
-    IpProtoData* left = (IpProtoData*)&config;
-    IpProtoData* right = (IpProtoData*)&rhs.config;
+    const IpProtoOption& rhs = (const IpProtoOption&)ips;
+    const IpProtoData* left = &config;
+    const IpProtoData* right = &rhs.config;
 
     if ((left->protocol == right->protocol) &&
         (left->comparison_flag == right->comparison_flag))
@@ -110,53 +101,48 @@ bool IpProtoOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int IpProtoOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus IpProtoOption::eval(Cursor&, Packet* p)
 {
+    RuleProfile profile(ipProtoPerfStats);
+
     IpProtoData* ipd = &config;
-    int rval = DETECTION_OPTION_NO_MATCH;
-    PROFILE_VARS;
 
     if (!p->has_ip())
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"Not IP\n"); );
-        return rval;
+        return NO_MATCH;
     }
 
-    MODULE_PROFILE_START(ipProtoPerfStats);
-
-    const uint8_t ip_proto = p->get_ip_proto_next();
+    const IpProtocol ip_proto = p->get_ip_proto_next();
 
     switch (ipd->comparison_flag)
     {
     case IP_PROTO__EQUAL:
         if (ip_proto == ipd->protocol)
-            rval = DETECTION_OPTION_MATCH;
+            return MATCH;
+
         break;
 
     case IP_PROTO__NOT_EQUAL:
         if (ip_proto != ipd->protocol)
-            rval = DETECTION_OPTION_MATCH;
+            return MATCH;
+
         break;
 
     case IP_PROTO__GREATER_THAN:
         if (ip_proto > ipd->protocol)
-            rval = DETECTION_OPTION_MATCH;
+            return MATCH;
+
         break;
 
     case IP_PROTO__LESS_THAN:
         if (ip_proto < ipd->protocol)
-            rval = DETECTION_OPTION_MATCH;
-        break;
+            return MATCH;
 
-    default:
-        ErrorMessage("%s(%d) Invalid comparison flag.\n",
-            __FILE__, __LINE__);
         break;
     }
 
     /* if the test isn't successful, this function *must* return 0 */
-    MODULE_PROFILE_END(ipProtoPerfStats);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -202,21 +188,19 @@ static void ip_proto_parse(const char* data, IpProtoData* ds_ptr)
             return;
         }
 
-        ds_ptr->protocol = (uint8_t)ip_proto;
+        ds_ptr->protocol = (IpProtocol)ip_proto;
     }
     else
     {
         struct protoent* pt = getprotobyname(data);  // main thread only
 
-        if (pt != NULL)
+        if ( pt and pt->p_proto < NUM_IP_PROTOS )
         {
-            /* p_proto should be a number less than 256 */
-            ds_ptr->protocol = (uint8_t)pt->p_proto;
+            ds_ptr->protocol = (IpProtocol)pt->p_proto;
         }
         else
         {
-            ParseError("invalid protocol name for \"ip_proto\" "
-                "rule option: '%s'.", data);
+            ParseError("invalid protocol name for \"ip_proto\" rule option: '%s'.", data);
             return;
         }
     }
@@ -248,7 +232,11 @@ public:
     ProfileStats* get_profile() const override
     { return &ipProtoPerfStats; }
 
-    IpProtoData data;
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    IpProtoData data = {};
 };
 
 bool IpProtoModule::begin(const char*, int, SnortConfig*)
@@ -308,7 +296,7 @@ static const IpsApi ip_proto_api =
         mod_dtor
     },
     OPT_TYPE_DETECTION,
-    1, PROTO_BIT__IP,
+    0, PROTO_BIT__IP,
     nullptr,
     nullptr,
     nullptr,
@@ -320,11 +308,11 @@ static const IpsApi ip_proto_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_ip_proto[] =
+#endif
 {
     &ip_proto_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_ip_proto = &ip_proto_api.base;
-#endif
 

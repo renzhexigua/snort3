@@ -14,15 +14,20 @@ set( FILE_LIST
     sip_config.h
     sip_module.cc
     sip_module.h
+    sip_splitter.cc
+    sip_splitter.h
     ips_sip.cc
     ips_sip_stat_code.cc
     ips_sip_method.cc
 )
 
-if (STATIC_INSPECTORS)
-    add_library( sip STATIC ${FILE_LIST})
+#FIXIT-M fix dependency loops
+#if (STATIC_INSPECTORS)
+    add_library( sip OBJECT ${FILE_LIST})
 
-else (STATIC_INSPECTORS)
-    add_shared_library(sip inspectors ${FILE_LIST})
+#else (STATIC_INSPECTORS)
+#    add_dynamic_module(sip inspectors ${FILE_LIST})
 
-endif (STATIC_INSPECTORS)
+#endif (STATIC_INSPECTORS)
+
+add_subdirectory ( test )

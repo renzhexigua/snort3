@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2007-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,118 +17,120 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-/*
-**  @file        detection_options.h
-**  @author      Steven Sturges
-**  @brief       Support functions for rule option tree
-**
-**  This implements tree processing for rule options, evaluating common
-**  detection options only once per pattern match.
-*/
+// detection_options.h author Steven Sturges <ssturges@cisco.com>
 
 #ifndef DETECTION_OPTIONS_H
 #define DETECTION_OPTIONS_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+// Support functions for rule option tree
+//
+// This implements tree processing for rule options, evaluating common
+// detection options only once per pattern match.
+//
+// These trees are instantiated at parse time, one per MPSE match state.
+// Eval, profiling, and latency data are attached in an array sized per max
+// packet threads.
 
 #include <sys/time.h>
-#include "main/snort_types.h"
+
 #include "detection/rule_option_types.h"
+#include "time/clock_defs.h"
+#include "main/snort_debug.h"
 
+namespace snort
+{
+class HashNode;
+class XHash;
 struct Packet;
-struct SFXHASH;
+struct SnortConfig;
+}
+struct RuleLatencyState;
 
-typedef int (* eval_func_t)(void* option_data, class Cursor&, Packet*);
+typedef int (* eval_func_t)(void* option_data, class Cursor&, snort::Packet*);
 
+// this is per packet thread
 struct dot_node_state_t
 {
     int result;
     struct
     {
         struct timeval ts;
-        uint64_t packet_number;
+        uint64_t context_num;
         uint32_t rebuild_flag;
+        uint16_t run_num;
         char result;
         char flowbit_failed;
     } last_check;
 
-#ifdef PERF_PROFILING
-    uint64_t ticks;
-    uint64_t ticks_match;
-    uint64_t ticks_no_match;
+    // FIXIT-L perf profiler stuff should be factored of the node state struct
+    hr_duration elapsed;
+    hr_duration elapsed_match;
+    hr_duration elapsed_no_match;
     uint64_t checks;
     uint64_t disables;
-#endif
-#ifdef PPM_MGR
-    uint64_t ppm_disable_cnt;
-    uint64_t ppm_enable_cnt;
-#endif
+
+    unsigned latency_timeouts;
+    unsigned latency_suspends;
+
+    // FIXIT-L perf profiler stuff should be factored of the node state struct
+    void update(hr_duration delta, bool match)
+    {
+        elapsed += delta;
+
+        if ( match )
+            elapsed_match += delta;
+        else
+            elapsed_no_match += delta;
+
+        ++checks;
+    }
 };
 
 struct detection_option_tree_node_t
 {
     eval_func_t evaluate;
+    detection_option_tree_node_t** children;
+    void* option_data;
+    dot_node_state_t* state;
+    struct OptTreeNode* otn;
     int is_relative;
     int num_children;
     int relative_children;
-    void* option_data;
     option_type_t option_type;
-    detection_option_tree_node_t** children;
-    dot_node_state_t* state;
 };
-
-#ifdef PPM_MGR
-struct dot_root_state_t
-{
-    uint64_t ppm_suspend_time;
-    uint64_t ppm_disable_cnt;
-    bool enabled;
-};
-#endif
 
 struct detection_option_tree_root_t
 {
     int num_children;
     detection_option_tree_node_t** children;
-#ifdef PPM_MGR
-    dot_root_state_t* state;
-#endif
+    RuleLatencyState* latency_state;
+
+    struct OptTreeNode* otn;  // first rule in tree
 };
 
 struct detection_option_eval_data_t
 {
-    void* pomd;
     void* pmd;
-    Packet* p;
+    snort::Packet* p;
     char flowbit_failed;
     char flowbit_noalert;
 };
 
-int add_detection_option(
-    struct SnortConfig*, option_type_t type, void* option_data, void** existing_data);
-
-int add_detection_option_tree(
-    struct SnortConfig*, detection_option_tree_node_t* option_tree, void** existing_data);
+// return existing data or add given and return nullptr
+void* add_detection_option(struct snort::SnortConfig*, option_type_t, void*);
+void* add_detection_option_tree(struct snort::SnortConfig*, detection_option_tree_node_t*);
 
 int detection_option_node_evaluate(
-detection_option_tree_node_t*, detection_option_eval_data_t*, class Cursor&);
+    detection_option_tree_node_t*, detection_option_eval_data_t&, const class Cursor&);
 
-void DetectionHashTableFree(SFXHASH*);
-void DetectionTreeHashTableFree(SFXHASH*);
-#ifdef DEBUG_OPTION_TREE
-void print_option_tree(detection_option_tree_node_t* node, int level);
-#endif
-#ifdef PERF_PROFILING
-void detection_option_tree_update_otn_stats(SFXHASH*);
-#endif
+void print_option_tree(detection_option_tree_node_t*, int level);
+void detection_option_tree_update_otn_stats(snort::XHash*);
 
-detection_option_tree_root_t* new_root();
+detection_option_tree_root_t* new_root(OptTreeNode*);
 void free_detection_option_root(void** existing_tree);
 
-detection_option_tree_node_t* new_node(option_type_t type, void* data);
-void free_detection_option_tree(detection_option_tree_node_t* node);
+detection_option_tree_node_t* new_node(option_type_t, void*);
+void free_detection_option_tree(detection_option_tree_node_t*);
 
-#endif /* DETECTION_OPTIONS_H */
+#endif
 

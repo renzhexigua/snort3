@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class Suppress : public ConversionState
 {
 public:
     Suppress(Converter& c) : ConversionState(c) { }
-    virtual ~Suppress() { }
-    virtual bool convert(std::istringstream& data);
+    bool convert(std::istringstream& data) override;
 
 private:
     void fix_separators(std::istringstream& stream);
@@ -93,16 +92,16 @@ bool Suppress::convert(std::istringstream& data_stream)
         if (keyword.empty())
             continue;
 
-        else if (!keyword.compare("track"))
+        else if (keyword == "track")
             tmpval = parse_string_option("track", arg_stream);
 
-        else if (!keyword.compare("gen_id"))
+        else if (keyword == "gen_id")
             tmpval = parse_int_option("gid", arg_stream, false);
 
-        else if (!keyword.compare("sig_id"))
+        else if (keyword == "sig_id")
             tmpval = parse_int_option("sid", arg_stream, false);
 
-        else if (!keyword.compare("ip"))
+        else if (keyword == "ip")
         {
             std::getline(arg_stream, keyword);
             util::trim(keyword);
@@ -117,6 +116,8 @@ bool Suppress::convert(std::istringstream& data_stream)
             retval = false;
         }
     }
+    table_api.close_table();
+    table_api.close_table();
 
     return retval;
 }

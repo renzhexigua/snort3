@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -33,8 +33,7 @@ class Config : public ConversionState
 {
 public:
     Config(Converter& c) : ConversionState(c) { }
-    virtual ~Config() { }
-    virtual bool convert(std::istringstream& data);
+    bool convert(std::istringstream& data) override;
 };
 } // namespace
 
@@ -50,6 +49,9 @@ bool Config::convert(std::istringstream& data_stream)
         const ConvertMap* map = util::find_map(config::config_api, keyword);
         if (map)
         {
+            if (data_stream.peek() == EOF)
+                cv.set_empty_args(true);
+            /* cv.set_state() deletes this ConversionState object, so must return immediately after */
             cv.set_state(map->ctor(cv));
             return true;
         }

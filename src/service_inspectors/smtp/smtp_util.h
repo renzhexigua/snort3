@@ -1,5 +1,6 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2011-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -16,34 +17,25 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-/*************************************************************************
- *
- * smtp_util.h
- *
- * Author: Andy Mullican
- * Author: Todd Wease
- *
- *************************************************************************/
+// smtp_util.h authors Andy Mullican and Todd Wease
 
 #ifndef SMTP_UTIL_H
 #define SMTP_UTIL_H
 
+// SMTP helper functions
+
 #include "smtp_config.h"
-#include "protocols/packet.h"
+
+namespace snort
+{
+struct Packet;
+}
 
 void SMTP_GetEOL(const uint8_t*, const uint8_t*, const uint8_t**, const uint8_t**);
-int SMTP_CopyEmailHdrs(const uint8_t*, int, MAIL_LogState* log_state);
-int SMTP_CopyEmailID(const uint8_t*, int, int, MAIL_LogState* log_state);
-void SMTP_LogFuncs(SMTP_PROTO_CONF* config, Packet* p, MimeState* mime_ssn);
-void SMTP_ResetAltBuffer(void);
+void SMTP_LogFuncs(SmtpProtoConf*, snort::Packet*, snort::MimeSession*);
 
-#ifdef DEBUG_MSGS
-const char* SMTP_PrintBuffer(Packet*);
-#endif
-
-int SMTP_CopyToAltBuffer(const uint8_t*, int);
-const uint8_t* SMTP_GetAltBuffer(unsigned& len);
-void SMTP_ResetAltBuffer();
+int SMTP_CopyToAltBuffer(snort::Packet*, const uint8_t*, int);
+const uint8_t* SMTP_GetAltBuffer(snort::Packet*, unsigned& len);
+void SMTP_ResetAltBuffer(snort::Packet*);
 
 #endif
-

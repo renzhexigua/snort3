@@ -1,137 +1,64 @@
-
-
-macro (add_compile_flags library flags)
-
-    get_target_property(TEMP ${library} COMPILE_FLAGS)
-
-    if(TEMP STREQUAL "TEMP-NOTFOUND")
-        SET(TEMP "") # set to empty string
-    else()
-        SET(TEMP "${TEMP} ") # a space to cleanly separate from existing content
-    endif()
-
-    # append our values
-    SET(TEMP "${TEMP} ${flags} " )
-    set_target_properties(${library} PROPERTIES COMPILE_FLAGS ${TEMP}) 
-endmacro (add_compile_flags)
-
-
-
-macro (add_link_flags library)
-
-    get_target_property(TEMP ${library} LINK_FLAGS)
-
-    if(TEMP STREQUAL "TEMP-NOTFOUND")
-        SET(TEMP "") # set to empty string
-    else()
-        SET(TEMP "${TEMP} ") # a space to cleanly separate from existing content
-    endif()
-
-    # append our values
-    set(TEMP "${TEMP} ${ARGN}" )
-    set_target_properties(${library} PROPERTIES LINK_FLAGS "${TEMP}" )
-
-    message(STATUS "setting library -${library} link flags to --> ${TEMP}")
-endmacro (add_link_flags)
-
 # TO CALL THIS MACRO...
 # PARAMS:
-#       libname :  The library's libname
-#       additional args : the library's sources.  Must have at least one source
-macro (add_shared_library libname install_path)
-
+#       libname :  The module's name
+#       additional args : the module's sources.  Must have at least one source
+macro (add_dynamic_module libname install_path)
     set (sources ${ARGN})
 
-    # Did we get any sources?
-    list(LENGTH sources num_extra_args)
-    if (${num_extra_args} GREATER 0)
-        string (REPLACE ";" " " sources "${sources}")
-
-        add_library (${libname} SHARED ${ARGN} )
-        set_target_properties ( ${libname} 
-            PROPERTIES
+    add_library ( ${libname} MODULE ${sources} )
+    set_target_properties (
+        ${libname}
+        PROPERTIES
             COMPILE_FLAGS "-DBUILDING_SO"
-#            LINK_FLAGS "-export-dynamic -shared"
+            PREFIX ""
+    )
+
+    if (APPLE)
+        set_target_properties (
+            ${libname}
+            PROPERTIES
+                LINK_FLAGS "-undefined dynamic_lookup"
         )
+    endif()
 
-        install (TARGETS ${libname}
-            LIBRARY DESTINATION "lib/${CMAKE_PROJECT_NAME}/${install_path}"
+    install (
+        TARGETS ${libname}
+        LIBRARY
+            DESTINATION "${PLUGIN_INSTALL_PATH}/${install_path}"
+    )
+endmacro (add_dynamic_module)
+
+
+function (add_cpputest testname)
+    if ( ENABLE_UNIT_TESTS )
+        set(multiValueArgs SOURCES LIBS)
+        cmake_parse_arguments(CppUTest "" "" "${multiValueArgs}" ${ARGN})
+        add_executable(${testname} EXCLUDE_FROM_ALL ${testname}.cc ${CppUTest_SOURCES})
+        target_include_directories(${testname} PRIVATE ${CPPUTEST_INCLUDE_DIR})
+        target_link_libraries(${testname} ${CPPUTEST_LIBRARIES} ${CppUTest_LIBS})
+        add_test(${testname} ${testname})
+        add_dependencies(check ${testname})
+    endif ( ENABLE_UNIT_TESTS )
+endfunction (add_cpputest)
+
+
+function (add_catch_test testname)
+    if ( ENABLE_UNIT_TESTS )
+        set(options NO_TEST_SOURCE)
+        set(multiValueArgs SOURCES LIBS)
+        cmake_parse_arguments(Catch "${options}" "" "${multiValueArgs}" ${ARGN})
+        if ( NOT Catch_NO_TEST_SOURCE )
+            set(Test_SOURCE ${testname}.cc)
+        endif()
+        add_executable(${testname}
+            EXCLUDE_FROM_ALL
+            ${Test_SOURCE}
+            ${Catch_SOURCES}
+            $<TARGET_OBJECTS:catch_main>
         )
-    
-    else (${num_extra_args} GREATER 0)
-
-        message (STATUS "add_static_library requires at least one source file!")
-        message (FATAL "usage: add_static_library lib_name source_1 source_2 source_3 ...")
-
-    endif (${num_extra_args} GREATER 0)
-endmacro (add_shared_library)
-
-
-
-macro (set_default_visibility_compile_flag libname)
-    add_compile_flags(${libname} "-fvisibility=default")
-endmacro (set_default_visibility_compile_flag)
-
-
-
-macro (add_target_compile_flags library flags)
-
-    get_target_property(TEMP ${library} COMPILE_DEFINITIONS)
-
-    if(TEMP STREQUAL "TEMP-NOTFOUND")
-        SET(TEMP "") # set to empty string
-    else()
-        SET(TEMP "${TEMP} ") # a space to cleanly separate from existing content
-    endif()
-
-    # append our values
-    SET(TEMP "${TEMP} ${flags} " )
-    set_target_properties(${library} PROPERTIES COMPILE_DEFINITIONS ${TEMP}) 
-endmacro (add_target_compile_flags)
-
-
-macro (set_project_compiler_defines_if_true var flag)
-    if (${var})
-        add_definitions("-D${flag}")
-    endif(${var})
-endmacro (set_project_compiler_defines_if_true)
-
-
-macro (set_project_compiler_defines_if_false var flag)
-    if (NOT ${var})
-        add_definitions("-D${flag}")
-    endif()
-endmacro (set_project_compiler_defines_if_false)
-
-
-macro (set_if_true value var)
-    if (${value})
-        set(${var} "YES")
-    endif()
-endmacro ()
-
-
-macro (set_if_false value var)
-    if(NOT ${value})
-        set(${var} "YES")
-    endif()
-endmacro ()
-
-macro (add_to_list_if_true list value var)
-    if (${value})
-        list(APPEND ${list} ${var})
-    endif()
-endmacro ()
-
-macro (append_to_cache_variable cache_var)
-
-    get_property(cache_value CACHE ${cache_var} PROPERTY VALUE)
-    get_property(cache_type CACHE ${cache_var} PROPERTY TYPE)
-    get_property(cache_help_string CACHE ${cache_var} PROPERTY HELPSTRING)
-    
-    set (tmp ${cache_value} ${ARGN})
-    set(${cache_var} "${tmp}" CACHE ${cache_type} " ${cache_help_string}")
-
-
-    message(STATUS ${cache_var} " ${tmp} " CACHE " " ${cache_type} " ${cache_help_string}")
-endmacro ()
+        target_compile_options(${testname} PRIVATE "-DCATCH_TEST_BUILD")
+        target_link_libraries(${testname} PRIVATE ${Catch_LIBS})
+        add_test(${testname} ${testname})
+        add_dependencies(check ${testname})
+    endif ( ENABLE_UNIT_TESTS )
+endfunction (add_catch_test)

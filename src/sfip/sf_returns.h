@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2007-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,7 +20,7 @@
 #ifndef SF_RETURNS_H
 #define SF_RETURNS_H
 
-enum SFIP_RET
+enum SfIpRet
 {
     SFIP_SUCCESS=0,
     SFIP_FAILURE,
@@ -38,7 +38,8 @@ enum SFIP_RET
     SFIP_LOOKUP_FAILURE,    /* Failed to lookup a variable from the table */
     SFIP_UNMATCHED_BRACKET, /* IP lists that are missing a closing bracket */
     SFIP_NOT_ANY,           /* For !any */
-    SFIP_CONFLICT           /* For IP conflicts in IP lists */
+    SFIP_CONFLICT,          /* For IP conflicts in IP lists */
+    SFIP_LOOKUP_UNAVAILABLE /* var table unavailable */
 };
 
 #endif

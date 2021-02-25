@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -15,21 +15,23 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-//
 
 #ifndef SMTP_CONFIG_H
 #define SMTP_CONFIG_H
 
-#include "file_api/file_api.h"
+// Configuration for SMTP inspector
+
+#include "mime/file_mime_process.h"
 #include "search_engines/search_tool.h"
-enum NORM_TYPES
+
+enum SMTPNormType
 {
     NORMALIZE_NONE = 0,
     NORMALIZE_CMDS,
     NORMALIZE_ALL
 };
 
-enum XLINK2STATE
+enum SMTPXlinkState
 {
     DISABLE_XLINK2STATE = 0,
     ALERT_XLINK2STATE,
@@ -100,13 +102,13 @@ enum SMTPCmdTypeEnum
 struct SMTPCmdConfig
 {
     bool alert;
-    bool normalize;                      /*  1 if we should normalize this command         */
-    int max_line_len;                        /*  Max length of this particular command         */
+    bool normalize;     //  1 if we should normalize this command
+    int max_line_len;   //  Max length of this particular command
 };
 
 struct SMTPSearch
 {
-    char* name;
+    const char* name;
     int name_len;
 };
 
@@ -118,16 +120,17 @@ struct SMTPToken
     SMTPCmdTypeEnum type;
 };
 
-struct SMTP_PROTO_CONF
+struct SmtpProtoConf
 {
-    NORM_TYPES normalize;
+    SMTPNormType normalize;
     bool ignore_tls_data;
-    int max_command_line_len;
-    int max_header_line_len;
-    int max_response_line_len;
-    int xlink2state;
-    MAIL_LogConfig log_config;
-    DecodeConfig decode_conf;
+    int max_auth_command_line_len = 1000;
+    int max_command_line_len = 0;
+    int max_header_line_len = 0;
+    int max_response_line_len = 0;
+    SMTPXlinkState xlink2state;
+    snort::MailLogConfig log_config;
+    snort::DecodeConfig decode_conf;
 
     uint32_t xtra_filename_id;
     uint32_t xtra_mfrom_id;
@@ -135,11 +138,28 @@ struct SMTP_PROTO_CONF
     uint32_t xtra_ehdrs_id;
 
     int num_cmds;
-    SMTPToken* cmds;
-    SMTPCmdConfig* cmd_config;
-    SMTPSearch* cmd_search;
-    SearchTool* cmd_search_mpse;
+    SMTPToken* cmds = nullptr;
+    SMTPCmdConfig* cmd_config = nullptr;
+    SMTPSearch* cmd_search = nullptr;
+    snort::SearchTool* cmd_search_mpse = nullptr;
+
+    void show() const;
 };
 
-#endif
+struct SmtpStats
+{
+    PegCount packets;
+    PegCount total_bytes;
+    PegCount sessions;
+    PegCount concurrent_sessions;
+    PegCount max_concurrent_sessions;
+    PegCount starttls;
+    PegCount ssl_search_abandoned;
+    PegCount ssl_search_abandoned_too_soon;
+    snort::MimeStats mime_stats;
+};
 
+extern const PegInfo smtp_peg_names[];
+extern THREAD_LOCAL SmtpStats smtpstats;
+
+#endif

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,31 +20,28 @@
 #include "config.h"
 #endif
 
-#include <errno.h>
-#include <string>
+#include <array>
+#include <cassert>
 
-#include "snort_types.h"
-#include "snort_bounds.h"
-#include "parser/parser.h"
-#include "sfhashfcn.h"
 #include "framework/cursor.h"
 #include "framework/ips_option.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
-#include "ips_byte_extract.h"
-#include "detection/detection_util.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
 #include "hash/hashes.h"
+#include "hash/hash_key_operations.h"
+#include "log/messages.h"
 #include "parser/parse_utils.h"
+#include "profiler/profiler.h"
+
+#include "extract.h"
+
+using namespace snort;
 
 enum HashPsIdx
 {
     HPI_MD5, HPI_SHA256, HPI_SHA512, HPI_MAX
 };
 
-static THREAD_LOCAL ProfileStats hash_ps[HPI_MAX];
+static THREAD_LOCAL std::array<ProfileStats, HPI_MAX> hash_ps;
 
 struct HashMatchData
 {
@@ -61,7 +58,7 @@ struct HashMatchData
 HashMatchData::HashMatchData()
 {
     length = offset = 0;
-    offset_var = BYTE_EXTRACT_NO_VAR;
+    offset_var = IPS_OPTIONS_NO_VAR;
     relative = negated = false;
 }
 
@@ -71,10 +68,10 @@ class HashOption : public IpsOption
 {
 public:
     HashOption(const char* s, HashPsIdx hpi, HashMatchData* c, HashFunc f, unsigned n) :
-        IpsOption(s, RULE_OPTION_TYPE_OTHER)
+        IpsOption(s, RULE_OPTION_TYPE_BUFFER_USE)
     { config = c; hashf = f; size = n; idx = hpi; assert(n <= MAX_HASH_SIZE); }
 
-    ~HashOption() { delete config; }
+    ~HashOption() override { delete config; }
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
@@ -85,7 +82,7 @@ public:
     bool is_relative() override
     { return config->relative; }
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
     int match(Cursor&);
 
 private:
@@ -101,31 +98,31 @@ private:
 
 uint32_t HashOption::hash() const
 {
-    uint32_t a,b,c;
-    const HashMatchData* hmd = config;
+    uint32_t a = config->negated;
+    uint32_t b = config->relative;
+    uint32_t c = size;
 
-    a = hmd->negated;
-    b = hmd->relative;
-    c = size;
+    mix(a,b,c);
+    a += IpsOption::hash();
 
-    mix_str(a,b,c,hmd->hash.c_str());
+    mix_str(a,b,c,config->hash.c_str());
 
-    a += hmd->length;
-    b += hmd->offset;
-    c += hmd->offset_var;
+    a += config->length;
+    b += config->offset;
+    c += config->offset_var;
 
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool HashOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    HashOption& rhs = (HashOption&)ips;
+    const HashOption& rhs = (const HashOption&)ips;
 
     if (
         config->hash == rhs.config->hash &&
@@ -149,10 +146,10 @@ int HashOption::match(Cursor& c)
     int offset;
 
     /* Get byte_extract variables */
-    if (config->offset_var >= 0 && config->offset_var < NUM_BYTE_EXTRACT_VARS)
+    if (config->offset_var >= 0 && config->offset_var < NUM_IPS_OPTIONS_VARS)
     {
         uint32_t extract;
-        GetByteExtractValue(&extract, config->offset_var);
+        GetVarValueByIndex(&extract, config->offset_var);
         offset = (int)extract;
     }
     else
@@ -168,8 +165,6 @@ int HashOption::match(Cursor& c)
         pos += offset;
     }
 
-    // FIXIT-H should fail if offset is out of bounds
-    // same for content and possibly others too
     if ( pos < 0 )
         pos = 0;
 
@@ -198,12 +193,10 @@ int HashOption::match(Cursor& c)
     return 0;
 }
 
-int HashOption::eval(Cursor& c, Packet*)
+IpsOption::EvalStatus HashOption::eval(Cursor& c, Packet*)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(hash_ps[idx]);
+    RuleProfile profile(hash_ps[idx]);
 
-    int rval = DETECTION_OPTION_NO_MATCH;
     int found = match(c);
 
     if ( found == -1 )
@@ -214,18 +207,14 @@ int HashOption::eval(Cursor& c, Packet*)
            which is not what we want.  */
         found = 0;
     }
+
     else
-    {
         found ^= config->negated;
-    }
 
     if ( found )
-    {
-        rval = DETECTION_OPTION_MATCH;
-    }
+        return MATCH;
 
-    MODULE_PROFILE_END(hash_ps[idx]);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -234,13 +223,14 @@ int HashOption::eval(Cursor& c, Packet*)
 
 static void parse_hash(HashMatchData* hmd, const char* rule)
 {
-    parse_byte_code(rule, hmd->negated, hmd->hash);
+    if (!parse_byte_code(rule, hmd->negated, hmd->hash))
+        ParseError("Invalid hash");
 }
 
 // FIXIT-L refactor for general use?
 static void parse_offset(HashMatchData* hmd, const char* data)
 {
-    if (data == NULL)
+    if (data == nullptr)
     {
         ParseError("missing argument to 'offset' option");
         return;
@@ -249,14 +239,14 @@ static void parse_offset(HashMatchData* hmd, const char* data)
     if (isdigit(data[0]) || data[0] == '-')
     {
         hmd->offset = parse_int(data, "offset");
-        hmd->offset_var = BYTE_EXTRACT_NO_VAR;
+        hmd->offset_var = IPS_OPTIONS_NO_VAR;
     }
     else
     {
         hmd->offset_var = GetVarByName(data);
 
-        if (hmd->offset_var == BYTE_EXTRACT_NO_VAR)
-            ParseError(BYTE_EXTRACT_INVALID_ERR_STR, "content offset", data);
+        if (hmd->offset_var == IPS_OPTIONS_NO_VAR)
+            ParseError(INVALID_VAR_ERR_STR, "content offset", data);
     }
 }
 
@@ -291,7 +281,7 @@ public:
         Module(s, s_help, s_params)
     { hmd = nullptr; idx = hpi; }
 
-    ~HashModule()
+    ~HashModule() override
     { delete hmd; }
 
     bool begin(const char*, int, SnortConfig*) override;
@@ -299,9 +289,12 @@ public:
     bool set(const char*, Value&, SnortConfig*) override;
 
     ProfileStats* get_profile() const override
-    { return hash_ps + idx; }
+    { return &hash_ps[idx]; }
 
     HashMatchData* get_data();
+
+    Usage get_usage() const override
+    { return DETECT; }
 
 private:
     HashMatchData* hmd;
@@ -317,6 +310,7 @@ HashMatchData* HashModule::get_data()
 
 bool HashModule::begin(const char*, int, SnortConfig*)
 {
+    assert(!hmd);
     hmd = new HashMatchData;
     return true;
 }
@@ -341,7 +335,7 @@ bool HashModule::set(const char*, Value& v, SnortConfig*)
         hmd->relative = true;
 
     else if ( v.is("length") )
-        hmd->length = v.get_long();
+        hmd->length = v.get_uint16();
 
     else
         return false;
@@ -499,17 +493,18 @@ static const IpsApi sha512_api =
 // plugins
 //-------------------------------------------------------------------------
 
-#ifdef BUILDING_SO
-SO_PUBLIC const BaseApi* snort_plugins[] =
-{
-    &md5_api.base,
-    &sha256_api.base,
-    &sha512_api.base,
-    nullptr
-};
-#else
+// can't be linked dynamically yet
+//#ifdef BUILDING_SO
+//SO_PUBLIC const BaseApi* snort_plugins[] =
+//{
+//    &md5_api.base,
+//    &sha256_api.base,
+//    &sha512_api.base,
+//    nullptr
+//};
+//#else
 const BaseApi* ips_md5 = &md5_api.base;
 const BaseApi* ips_sha256 = &sha256_api.base;
 const BaseApi* ips_sha512 = &sha512_api.base;
-#endif
+//#endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,66 +17,58 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "port_group.h"
 
-#include <stdlib.h>
+#include "detection/detection_options.h"
+#include "framework/mpse.h"
+#include "framework/mpse_batch.h"
+#include "utils/util.h"
 
 void PortGroup::add_rule()
 {
     rule_count++;
 }
 
-/*
-**
-**  DESCRIPTION
-**    Adds a RULE_NODE to a PortGroup.  This particular
-**    function is specific in that it adds "no content" rules.
-**    A "no content" rule is a snort rule that has no "content"
-**    or "uri" flag, and hence does not need to be pattern
-**    matched.
-**
-**    Each RULE_NODE in a PortGroup is given a RULE_NODE
-**    ID.  This allows us to track particulars as to what
-**    rules have been alerted upon, and allows other neat
-**    things like correlating events on different streams.
-**    The RULE_NODE IDs may not be consecutive, because
-**    we can add RULE_NODES into "content", "uri", and
-**    "no content" lists.
-**
-**  FORMAL INPUTS
-**    PortGroup* - PortGroup to add the rule to.
-**    void* - ptr to the user information
-**
-**  FORMAL OUTPUT
-**    int - 0 is successful, 1 is failure
-**
-*/
+PortGroup* PortGroup::alloc()
+{ return (PortGroup*)snort_calloc(sizeof(PortGroup)); }
+
+void PortGroup::free(PortGroup* pg)
+{
+    pg->delete_nfp_rules();
+
+    for (int i = PM_TYPE_PKT; i < PM_TYPE_MAX; i++)
+    {
+        if (pg->mpsegrp[i])
+        {
+            delete pg->mpsegrp[i];
+            pg->mpsegrp[i] = nullptr;
+        }
+    }
+
+    free_detection_option_root(&pg->nfp_tree);
+    snort_free(pg);
+}
+
 bool PortGroup::add_nfp_rule(void* rd)
 {
     if ( !nfp_head )
     {
-        nfp_head = (RULE_NODE*)calloc(1,sizeof(RULE_NODE) );
-        if ( !nfp_head )
-            return false;
-
-        nfp_tail             = nfp_head;
-        nfp_head->rnNext     = 0;
-        nfp_head->rnRuleData = rd;
+        nfp_head = (RULE_NODE*)snort_alloc(sizeof(RULE_NODE));
+        nfp_tail = nfp_head;
+        nfp_head->rnNext = nullptr;
     }
     else
     {
-        nfp_tail->rnNext = (RULE_NODE*)calloc(1,sizeof(RULE_NODE) );
-        if (!nfp_tail->rnNext)
-            return false;
-
-        nfp_tail             = nfp_tail->rnNext;
-        nfp_tail->rnNext     = 0;
-        nfp_tail->rnRuleData = rd;
+        nfp_tail->rnNext = (RULE_NODE*)snort_alloc(sizeof(RULE_NODE));
+        nfp_tail = nfp_tail->rnNext;
+        nfp_tail->rnNext = nullptr;
     }
 
-    /*
-    **  Set RULE_NODE ID to unique identifier
-    */
+    nfp_tail->rnRuleData = rd;
     nfp_tail->iRuleNodeID = rule_count;
 
     nfp_rule_count++;
@@ -92,7 +84,7 @@ void PortGroup::delete_nfp_rules()
     while (rn)
     {
         RULE_NODE* tmpRn = rn->rnNext;
-        free(rn);
+        snort_free(rn);
         rn = tmpRn;
     }
     nfp_head = nullptr;

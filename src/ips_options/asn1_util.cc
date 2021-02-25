@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -43,24 +43,20 @@
 #include "config.h"
 #endif
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
-#include <sys/types.h>
+#include "asn1_util.h"
 
-#include "utils/util.h"
-#include "ips_options/asn1_util.h"
-#include "main/snort_config.h"
 #include "main/thread.h"
+#include "utils/util.h"
+
+using namespace snort;
 
 /*
 **  Macros
 */
-#define SF_ASN1_CLASS(c)   (((u_char)c) & SF_ASN1_CLASS_MASK)
-#define SF_ASN1_FLAG(c)    (((u_char)c) & SF_ASN1_FLAG_MASK)
-#define SF_ASN1_TAG(c)     (((u_char)c) & SF_ASN1_TAG_MASK)
-#define SF_ASN1_LEN_EXT(c) (((u_char)c) & SF_BER_LEN_MASK)
+#define SF_ASN1_CLASS(c)   (((uint8_t)(c)) & SF_ASN1_CLASS_MASK)
+#define SF_ASN1_FLAG(c)    (((uint8_t)(c)) & SF_ASN1_FLAG_MASK)
+#define SF_ASN1_TAG(c)     (((uint8_t)(c)) & SF_ASN1_TAG_MASK)
+#define SF_ASN1_LEN_EXT(c) (((uint8_t)(c)) & SF_BER_LEN_MASK)
 
 #define ASN1_OOB(s,e,d)      (!(((s) <= (d)) && ((d) < (e))))
 #define ASN1_FATAL_ERR(e)    ((e) < 0)
@@ -81,7 +77,7 @@ static THREAD_LOCAL int node_index;
 **
 **  @return void
 */
-static void asn1_init_node_index(void)
+static void asn1_init_node_index()
 {
     node_index = 0;
 }
@@ -98,10 +94,10 @@ static void asn1_init_node_index(void)
 **  @retval NULL memory allocation failed
 **  @retval !NULL function successful
 */
-static ASN1_TYPE* asn1_node_alloc(void)
+static ASN1_TYPE* asn1_node_alloc()
 {
-    if ((asn1_config.mem == NULL) || (asn1_config.num_nodes <= node_index))
-        return NULL;
+    if ((asn1_config.mem == nullptr) || (asn1_config.num_nodes <= node_index))
+        return nullptr;
 
     return &asn1_config.mem[node_index++];
 }
@@ -115,26 +111,15 @@ static ASN1_TYPE* asn1_node_alloc(void)
 **  an ASN.1 decode.  Pass in the max number of nodes for an ASN.1 decode and
 **  we will track that many.
 **
-**  @return integer
+**  @return none
 **
-**  @retval ASN1_OK function successful
-**  @retval ASN1_ERR_MEM_ALLOC memory allocation failed
-**  @retval ASN1_ERR_INVALID_ARG invalid argument
 */
-void asn1_init_mem(SnortConfig* sc)
+void asn1_init_mem(int asn1_mem)
 {
-    int num_nodes;
+    asn1_config.num_nodes = asn1_mem;
 
-    if (sc->asn1_mem != 0)
-        num_nodes = sc->asn1_mem;
-    else
-        num_nodes = 256;
-
-    if (num_nodes <= 0)
-        return;
-
-    asn1_config.mem = (ASN1_TYPE*)SnortAlloc(sizeof(ASN1_TYPE) * num_nodes);
-    asn1_config.num_nodes = num_nodes;
+    if (asn1_config.num_nodes > 0)
+        asn1_config.mem = (ASN1_TYPE*)snort_calloc(asn1_config.num_nodes, sizeof(ASN1_TYPE));
     node_index = 0;
 }
 
@@ -149,12 +134,12 @@ void asn1_init_mem(SnortConfig* sc)
 **  @return none
 **
 */
-void asn1_free_mem(SnortConfig*)
+void asn1_free_mem()
 {
-    if (asn1_config.mem != NULL)
+    if (asn1_config.mem != nullptr)
     {
-        free(asn1_config.mem);
-        asn1_config.mem = NULL;
+        snort_free(asn1_config.mem);
+        asn1_config.mem = nullptr;
     }
 }
 
@@ -167,7 +152,7 @@ void asn1_free_mem(SnortConfig*)
 **  tag numbers, etc.
 **
 **  @param ASN1_DATA ptr to data
-**  @param u_int ptr to tag num
+**  @param unsigned ptr to tag num
 **
 **  @return integer
 **
@@ -176,10 +161,9 @@ void asn1_free_mem(SnortConfig*)
 **  @retval ASN1_ERR_OOB encoding goes out of bounds
 **  @retval ASN1_ERR_NULL_MEM function arguments are NULL
 */
-static int asn1_decode_tag_num_ext(ASN1_DATA* asn1_data, u_int* tag_num)
+static int asn1_decode_tag_num_ext(ASN1_DATA* asn1_data, unsigned* tag_num)
 {
     int iExtension = 0;
-    u_int new_tag_num;
 
     if (!asn1_data || !tag_num)
         return ASN1_ERR_NULL_MEM;
@@ -196,7 +180,7 @@ static int asn1_decode_tag_num_ext(ASN1_DATA* asn1_data, u_int* tag_num)
         */
         iExtension = SF_ASN1_LEN_EXT(*asn1_data->data);
 
-        new_tag_num = ((*tag_num << 7) | (*asn1_data->data & 0x7f));
+        unsigned new_tag_num = ((*tag_num << 7) | (*asn1_data->data & 0x7f));
         if (*tag_num != 0 && new_tag_num <= *tag_num)
         {
             return ASN1_ERR_OVERLONG_LEN;
@@ -234,7 +218,6 @@ static int asn1_decode_tag_num_ext(ASN1_DATA* asn1_data, u_int* tag_num)
 static int asn1_decode_ident(ASN1_TYPE* asn1_type, ASN1_DATA* asn1_data)
 {
     ASN1_IDENT* ident;
-    int iRet;
 
     if (!asn1_type || !asn1_data)
         return ASN1_ERR_NULL_MEM;
@@ -259,8 +242,7 @@ static int asn1_decode_ident(ASN1_TYPE* asn1_type, ASN1_DATA* asn1_data)
     {
         ident->tag_type = SF_ASN1_TAG_EXTENSION;
 
-        iRet = asn1_decode_tag_num_ext(asn1_data, &ident->tag);
-        if (iRet)
+        if ( asn1_decode_tag_num_ext(asn1_data, &ident->tag) )
         {
             //printf("** decode_ident: ext_len error\n");
             return ASN1_ERR_INVALID_BER_TAG_LEN;
@@ -284,7 +266,7 @@ static int asn1_decode_ident(ASN1_TYPE* asn1_type, ASN1_DATA* asn1_data)
 **  @retval SF_BER_LEN_DEF_SHORT one byte length < 127
 **  @retval SF_BER_LEN_INDEF indeterminate length
 */
-static int asn1_decode_len_type(const u_char* data)
+static int asn1_decode_len_type(const uint8_t* data)
 {
     int iExt;
 
@@ -322,11 +304,9 @@ static int asn1_decode_len_type(const u_char* data)
 **  @retval ASN1_ERR_OOB out of bounds condition
 **  @retval ASN1_OK function successful
 */
-static int asn1_decode_len_ext(ASN1_DATA* asn1_data, u_int* size)
+static int asn1_decode_len_ext(ASN1_DATA* asn1_data, unsigned* size)
 {
     int iBytes;
-    int iCtr;
-    u_int new_size;
 
     if (!asn1_data || !size)
         return ASN1_ERR_NULL_MEM;
@@ -341,9 +321,9 @@ static int asn1_decode_len_ext(ASN1_DATA* asn1_data, u_int* size)
         return ASN1_ERR_OOB;
     }
 
-    for (iCtr = 0; iCtr < iBytes; iCtr++)
+    for (int iCtr = 0; iCtr < iBytes; iCtr++)
     {
-        new_size = ((*size << 8) | (*asn1_data->data));
+        unsigned new_size = ((*size << 8) | (*asn1_data->data));
 
         /*
         **  If we've just added some data to the size, and
@@ -504,16 +484,16 @@ static int asn1_is_eoc(ASN1_TYPE* asn1)
 **  @retval ASN1_ERR_INVALID_ARG invalid argument
 **  @retval ASN1_ERR_OOB out of bounds
 */
-static int asn1_decode_type(const u_char** data, u_int* len, ASN1_TYPE** asn1_type)
+static int asn1_decode_type(const uint8_t** data, unsigned* len, ASN1_TYPE** asn1_type)
 {
     ASN1_DATA asn1data;
-    u_int uiRawLen;
+    unsigned uiRawLen;
     int iRet;
 
     if (!*data)
         return ASN1_ERR_INVALID_ARG;
 
-    *asn1_type = NULL;
+    *asn1_type = nullptr;
 
     /*
     **  Check len first, because if it's 0, then we already decoded a valid
@@ -527,7 +507,7 @@ static int asn1_decode_type(const u_char** data, u_int* len, ASN1_TYPE** asn1_ty
         return ASN1_ERR_OOB;
 
     *asn1_type = asn1_node_alloc();
-    if (*asn1_type == NULL)
+    if (*asn1_type == nullptr)
     {
         return ASN1_ERR_MEM_ALLOC;
     }
@@ -550,7 +530,7 @@ static int asn1_decode_type(const u_char** data, u_int* len, ASN1_TYPE** asn1_ty
     }
 
     /*
-    **  Set this varible here, so we can set the data_len for
+    **  Set this variable here, so we can set the data_len for
     **  indeterminate constructs.
     */
     uiRawLen = asn1data.end - asn1data.data;
@@ -655,15 +635,15 @@ valid:
 **  @retval  ASN1_OK function successful
 **  @retval !ASN1_OK lots of error conditions, figure it out
 */
-int asn1_decode(const u_char* data, u_int len, ASN1_TYPE** asn1_type)
+int asn1_decode(const uint8_t* data, unsigned len, ASN1_TYPE** asn1_type)
 {
     ASN1_TYPE* cur;
-    ASN1_TYPE* child = NULL;
+    ASN1_TYPE* child = nullptr;
     ASN1_TYPE* indef;
     ASN1_TYPE* asnstack[ASN1_MAX_STACK];
 
-    const u_char* end;
-    u_int con_len;
+    const uint8_t* end;
+    unsigned con_len;
     int index = 0;
     int iRet;
 
@@ -692,7 +672,7 @@ int asn1_decode(const u_char* data, u_int len, ASN1_TYPE** asn1_type)
         /*
         **  This is where we decode the ASN.1 constructs.  We do while()
         **  because we may have back to back constructs.  We bail on the
-        **  first indentifier that isn't a construct.
+        **  first identifier that isn't a construct.
         */
         while (cur && cur->ident.flag == SF_ASN1_FLAG_CONSTRUCT)
         {
@@ -724,14 +704,14 @@ int asn1_decode(const u_char* data, u_int len, ASN1_TYPE** asn1_type)
             */
             if (cur->cnext && cur->cnext->eoc)
             {
-                if (index && (indef = asnstack[--index]) != NULL)
+                if (index && (indef = asnstack[--index]) != nullptr)
                 {
                     if (indef->len.type == SF_BER_LEN_INDEF)
                     {
                         indef->len.size = data - indef->data - 2;
                         indef->data_len = indef->len.size;
 
-                        cur->cnext = NULL;
+                        cur->cnext = nullptr;
                         cur = indef;
                         break;
                     }
@@ -763,13 +743,13 @@ int asn1_decode(const u_char* data, u_int len, ASN1_TYPE** asn1_type)
             */
             while (cur->next && cur->next->eoc)
             {
-                if (index && (indef = asnstack[--index]) != NULL)
+                if (index && (indef = asnstack[--index]) != nullptr)
                 {
                     if (indef->len.type == SF_BER_LEN_INDEF)
                     {
                         indef->len.size = data - indef->data - 2;
                         indef->data_len = indef->len.size;
-                        cur->next = NULL;
+                        cur->next = nullptr;
                         cur = indef;
 
                         iRet = asn1_decode_type(&data, &len, &cur->next);
@@ -800,7 +780,7 @@ int asn1_decode(const u_char* data, u_int len, ASN1_TYPE** asn1_type)
         **  check for additional peers for each construct, depending on the
         **  length of the parent construct.
         */
-        while (index && (cur = asnstack[--index]) != NULL)
+        while (index && (cur = asnstack[--index]) != nullptr)
         {
             /*
             **  Get the construct length and set the length appropriately
@@ -830,7 +810,7 @@ int asn1_decode(const u_char* data, u_int len, ASN1_TYPE** asn1_type)
                 */
                 asnstack[index++] = cur;
                 cur   = child;
-                child = NULL;
+                child = nullptr;
             }
 
             iRet = asn1_decode_type(&data, &len, &cur->next);
@@ -841,13 +821,13 @@ int asn1_decode(const u_char* data, u_int len, ASN1_TYPE** asn1_type)
 
             if (cur->next && cur->next->eoc)
             {
-                if (index && (indef = asnstack[--index]) != NULL)
+                if (index && (indef = asnstack[--index]) != nullptr)
                 {
                     if (indef->len.type == SF_BER_LEN_INDEF)
                     {
                         indef->len.size = data - indef->data - 2;
                         indef->data_len = indef->len.size;
-                        cur->next = NULL;
+                        cur->next = nullptr;
                         cur = indef;
                     }
                     else
@@ -942,7 +922,7 @@ int asn1_traverse(ASN1_TYPE* asn1, void* user,
                 continue;
         }
 
-        while (index && (cur = asnstack[--index]) != NULL)
+        while (index && (cur = asnstack[--index]) != nullptr)
         {
             cur = cur->next;
             if (cur)
@@ -981,7 +961,7 @@ int asn1_print_types(ASN1_TYPE* asn1_type, void* user)
         printf("    ");
 
     printf("IDENT - asn1_class: %.2x | flag: %.2x | tag_type: %.2x | "
-        "tag_num: %d\n", asn1_type->ident.asn1_class, asn1_type->ident.flag,
+        "tag_num: %u\n", asn1_type->ident.asn1_class, asn1_type->ident.flag,
         asn1_type->ident.tag_type, asn1_type->ident.tag);
 
     for (iCtr = 0; iCtr < iTabs; iCtr++)
@@ -993,7 +973,7 @@ int asn1_print_types(ASN1_TYPE* asn1_type, void* user)
     for (iCtr = 0; iCtr < iTabs; iCtr++)
         printf("    ");
 
-    printf("DATA | data_len: %d | ", asn1_type->data_len);
+    printf("DATA | data_len: %u | ", asn1_type->data_len);
     if (asn1_type->data)
     {
         for (iCtr = 0; iCtr < asn1_type->data_len; iCtr++)
@@ -1024,99 +1004,4 @@ int asn1_print_types(ASN1_TYPE* asn1_type, void* user)
 
     return 0;
 }
-
-#ifdef I_WANT_MAIN_DAMMIT
-static int BitStringOverflow(ASN1_TYPE* asn1_type)
-{
-    if (!asn1_type)
-        return 0;
-
-    if (asn1_type->ident.tag == SF_ASN1_TAG_BIT_STR && !asn1_type->ident.flag)
-    {
-        if (((asn1_type->len.size - 1)*8) < (u_int)asn1_type->data[0])
-        {
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-/*
-**  Program reads from stdin and decodes the hexadecimal ASN.1 stream
-**  into identifier,len,data.
-*/
-int main(int argc, char** argv)
-{
-    ASN1_TYPE* asn1_type;
-    char line[10000];
-    u_int ctmp;
-    char* buf;
-    int buf_size;
-    int iCtr;
-    int iRet;
-
-    fgets(line, sizeof(line), stdin);
-    buf_size = strlen(line);
-
-    while (buf_size && line[buf_size-1] <= 0x20)
-    {
-        buf_size--;
-        line[buf_size] = 0x00;
-    }
-
-    if (!buf_size)
-    {
-        printf("** No valid characters in data string.\n");
-        return 1;
-    }
-
-    if (buf_size % 2)
-    {
-        printf("** Data must be represent in hex, meaning that there is an "
-            "odd number of characters in the data string.\n");
-        return 1;
-    }
-
-    buf_size >>= 1;
-
-    buf = calloc(1,buf_size + 1);
-    if (!buf)
-    {
-        return 1;
-    }
-
-    for (iCtr = 0; iCtr < buf_size; iCtr++)
-    {
-        if (!(isxdigit(line[iCtr*2]) && isxdigit(line[(iCtr*2)+1])))
-        {
-            printf("** Data stream is not all hex digits.\n");
-            return 1;
-        }
-
-        sscanf(&line[iCtr*2], "%2x", &ctmp);
-        buf[iCtr] = (char)ctmp;
-    }
-
-    buf[iCtr] = 0x00;
-
-    asn1_init_mem(256);
-
-    iRet = asn1_decode(buf, buf_size, &asn1_type);
-    if (iRet && !asn1_type)
-    {
-        printf("** FAILED\n");
-        return 1;
-    }
-
-    printf("** iRet = %d\n", iRet);
-
-    asn1_print_types(asn1_type, 0);
-
-    free(buf);
-
-    return 0;
-}
-
-#endif
 

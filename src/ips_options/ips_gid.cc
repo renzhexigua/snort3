@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,20 +17,16 @@
 //--------------------------------------------------------------------------
 // ips_gid.cc author Russ Combs <rucombs@cisco.com>
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include "main/snort_types.h"
-#include "main/snort_debug.h"
 #include "detection/treenodes.h"
-#include "detection/detection_defines.h"
+#include "framework/decode_data.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
-#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "gid"
 
@@ -40,7 +36,7 @@
 
 static const Parameter s_params[] =
 {
-    { "~", Parameter::PT_INT, "1:", nullptr,
+    { "~", Parameter::PT_INT, "1:max32", nullptr,
       "generator id" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
@@ -54,7 +50,12 @@ class GidModule : public Module
 public:
     GidModule() : Module(s_name, s_help, s_params) { }
     bool set(const char*, Value&, SnortConfig*) override;
-    int gid;
+
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    uint32_t gid = 0;
 };
 
 bool GidModule::set(const char*, Value& v, SnortConfig*)
@@ -62,7 +63,7 @@ bool GidModule::set(const char*, Value& v, SnortConfig*)
     if ( !v.is("~") )
         return false;
 
-    gid = v.get_long();
+    gid = v.get_uint32();
     return true;
 }
 
@@ -83,7 +84,7 @@ static void mod_dtor(Module* m)
 static IpsOption* gid_ctor(Module* p, OptTreeNode* otn)
 {
     GidModule* m = (GidModule*)p;
-    otn->sigInfo.generator = m->gid;
+    otn->sigInfo.gid = m->gid;
     return nullptr;
 }
 
@@ -114,11 +115,11 @@ static const IpsApi gid_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_gid[] =
+#endif
 {
     &gid_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_gid = &gid_api.base;
-#endif
 

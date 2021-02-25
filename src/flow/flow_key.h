@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,56 +20,109 @@
 #ifndef FLOW_KEY_H
 #define FLOW_KEY_H
 
-#include "main/snort_types.h"
-#include "hash/sfhashfcn.h"
-#include "sfip/sfip_t.h"
+// FlowKey is used to store Flows in the caches.  the data members are
+// sequenced to avoid void space.
 
-struct FlowKey
+#include <cstdint>
+
+#include <daq_common.h>
+
+#include "framework/decode_data.h"
+#include "hash/hash_key_operations.h"
+#include "utils/cpp_macros.h"
+
+class HashKeyOperations;
+
+namespace snort
+{
+struct SfIp;
+struct SnortConfig;
+
+class FlowHashKeyOps : public HashKeyOperations
+{
+public:
+    FlowHashKeyOps(int rows)
+        : HashKeyOperations(rows)
+    { }
+
+    unsigned do_hash(const unsigned char* k, int len) override;
+    bool key_compare(const void* k1, const void* k2, size_t) override;
+};
+
+
+PADDING_GUARD_BEGIN
+struct SO_PUBLIC FlowKey
 {
     uint32_t   ip_l[4]; /* Low IP */
     uint32_t   ip_h[4]; /* High IP */
+    uint32_t   mplsLabel;
     uint16_t   port_l;  /* Low Port - 0 if ICMP */
     uint16_t   port_h;  /* High Port - 0 if ICMP */
-    uint16_t   vlan_tag;
-    uint8_t    protocol;
-    uint8_t    version;
-    uint32_t   mplsLabel;
+    int16_t    group_l;
+    int16_t    group_h;
     uint16_t   addressSpaceId;
-    uint16_t   addressSpaceIdPad1;
+    uint16_t   vlan_tag;
+    uint8_t    ip_protocol;
+    PktType    pkt_type;
+    uint8_t    version;
+    struct {
+        uint8_t group_used:1; // Is group being used to build key.
+        uint8_t ubits:7;
+    } flags;
 
-    void init(
-        uint8_t type, uint8_t proto,
-        const sfip_t *srcIP, uint16_t srcPort,
-        const sfip_t *dstIP, uint16_t dstPort,
-        uint16_t vlanId, uint32_t mplsId, uint16_t addrSpaceId);
+    /* The init() functions return true if the key IP/port fields were actively
+        normalized, reversing the source and destination addresses internally.
+        The IP-only init() will always return false as we will not reorder its
+        addresses at this time. */
+    bool init(
+        const SnortConfig*, PktType, IpProtocol,
+        const snort::SfIp *srcIP, uint16_t srcPort,
+        const snort::SfIp *dstIP, uint16_t dstPort,
+        uint16_t vlanId, uint32_t mplsId, uint16_t addrSpaceId,
+        int16_t group_h = DAQ_PKTHDR_UNKNOWN, int16_t group_l = DAQ_PKTHDR_UNKNOWN);
 
-    void init(
-        uint8_t type, uint8_t proto,
-        const sfip_t *srcIP, const sfip_t *dstIP,
+    bool init(
+        const SnortConfig*, PktType, IpProtocol,
+        const snort::SfIp *srcIP, const snort::SfIp *dstIP,
         uint32_t id, uint16_t vlanId,
-        uint32_t mplsId, uint16_t addrSpaceId);
+        uint32_t mplsId, uint16_t addrSpaceId,
+        int16_t group_h = DAQ_PKTHDR_UNKNOWN, int16_t group_l = DAQ_PKTHDR_UNKNOWN);
 
-    void init_mpls(uint32_t);
-    void init_vlan(uint16_t);
-    void init_address_space(uint16_t);
+    bool init(
+        const SnortConfig*, PktType, IpProtocol,
+        const snort::SfIp *srcIP, uint16_t srcPort,
+        const snort::SfIp *dstIP, uint16_t dstPort,
+        uint16_t vlanId, uint32_t mplsId, const DAQ_PktHdr_t&);
 
-    // XXX If this data structure changes size, compare must be updated!
-    static uint32_t hash(SFHASHFCN* p, unsigned char* d, int);
-    static int compare(const void* s1, const void* s2, size_t);
+    bool init(
+        const SnortConfig*, PktType, IpProtocol,
+        const snort::SfIp *srcIP, const snort::SfIp *dstIP,
+        uint32_t id, uint16_t vlanId, uint32_t mplsId, const DAQ_PktHdr_t&);
+
+    void init_mpls(const SnortConfig*, uint32_t);
+    void init_vlan(const SnortConfig*, uint16_t);
+    void init_address_space(const SnortConfig*, uint16_t);
+    void init_groups(int16_t, int16_t, bool);
+
+    // If this data structure changes size, compare must be updated!
+    static bool is_equal(const void* k1, const void* k2, size_t);
 
 private:
-    void init4(
-        uint8_t proto,
-        const sfip_t *srcIP, uint16_t srcPort,
-        const sfip_t *dstIP, uint16_t dstPort,
+    bool init4(
+        const SnortConfig*, IpProtocol,
+        const snort::SfIp *srcIP, uint16_t srcPort,
+        const snort::SfIp *dstIP, uint16_t dstPort,
         uint32_t mplsId, bool order = true);
 
-    void init6(
-        uint8_t proto,
-        const sfip_t *srcIP, uint16_t srcPort,
-        const sfip_t *dstIP, uint16_t dstPort,
+    bool init6(
+        const SnortConfig*, IpProtocol,
+        const snort::SfIp *srcIP, uint16_t srcPort,
+        const snort::SfIp *dstIP, uint16_t dstPort,
         uint32_t mplsId, bool order = true);
 };
+PADDING_GUARD_END
+
+}
 
 #endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2010-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,18 +17,22 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "normalize.h"
 
-#include "norm.h"
-#include "norm_module.h"
+#include "log/messages.h"
+#include "main/policy.h"
 #include "packet_io/active.h"
 #include "packet_io/sfdaq.h"
-#include "parser.h"
-#include "profiler.h"
-#include "snort_types.h"
-#include "snort_config.h"
-#include "framework/inspector.h"
-#include "flow/flow.h"
+#include "profiler/profiler.h"
+#include "utils/util_cstring.h"
+
+#include "norm_module.h"
+
+using namespace snort;
 
 THREAD_LOCAL ProfileStats norm_perf_stats;
 static THREAD_LOCAL uint32_t t_flags = 0;
@@ -36,124 +40,163 @@ static THREAD_LOCAL uint32_t t_flags = 0;
 //-------------------------------------------------------------------------
 // printing stuff
 //-------------------------------------------------------------------------
-
-#define ON "on"
-#define OFF "off"
-
-static inline void LogConf(const char* p, const char* s)
+static inline std::string to_str(bool flag)
 {
-    LogMessage("%12s: %s\n", p, s);
+    return flag ? "enabled" : "disabled";
 }
 
-static inline void LogFlag(
-    const char* p, const NormalizerConfig* nc, NormFlags nf)
+static void print_ip4(const NormalizerConfig* nc)
 {
-    const char* s = Norm_IsEnabled(nc, nf) ? ON : OFF;
-    LogConf(p, s);
-}
+    bool ip4 = Norm_IsEnabled(nc, (NormFlags)NORM_IP4_ANY);
+    ConfigLogger::log_flag("ip4", ip4);
 
-static void Print_IP4(SnortConfig*, const NormalizerConfig* nc)
-{
-    if ( !Norm_IsEnabled(nc, (NormFlags)NORM_IP4_ANY) )
+    if ( !ip4 )
         return;
 
-    LogFlag("ip4.base", nc, NORM_IP4_BASE);
-    //LogFlag("ip4.id", nc, NORM_IP4_ID);
-    LogFlag("ip4.df", nc, NORM_IP4_DF);
-    LogFlag("ip4.rf", nc, NORM_IP4_RF);
-    LogFlag("ip4.tos", nc, NORM_IP4_TOS);
-    LogFlag("ip4.trim", nc, NORM_IP4_TRIM);
+    std::string opts;
+    opts += "{ base = " + to_str(Norm_IsEnabled(nc, NORM_IP4_BASE));
+    opts += ", df = " + to_str(Norm_IsEnabled(nc, NORM_IP4_DF));
+    opts += ", rf = " + to_str(Norm_IsEnabled(nc,  NORM_IP4_RF));
+    opts += ", tos = " + to_str(Norm_IsEnabled(nc, NORM_IP4_TOS));
+    opts += ", trim = " + to_str(Norm_IsEnabled(nc, NORM_IP4_TRIM));
+    opts += ", ttl = " + to_str(Norm_IsEnabled(nc, NORM_IP4_TTL));
 
     if ( Norm_IsEnabled(nc, NORM_IP4_TTL) )
     {
         NetworkPolicy* policy = get_network_policy();
-        LogMessage("%12s: %s (min=%d, new=%d)\n", "ip4.ttl", ON,
-            policy->min_ttl, policy->new_ttl);
+        opts += ", min_ttl = " + std::to_string(policy->min_ttl);
+        opts += ", new_ttl = " + std::to_string(policy->new_ttl);
     }
-    else
-        LogConf("ip4.ttl", OFF);
+
+    opts += " }";
+
+    ConfigLogger::log_list("ip4", opts.c_str());
 }
 
-static void Print_ICMP4(const NormalizerConfig* nc)
+static void print_icmp4(const NormalizerConfig* nc)
 {
-    LogFlag("icmp4", nc, NORM_ICMP4);
+    ConfigLogger::log_flag("icmp4", Norm_IsEnabled(nc, NORM_ICMP4));
 }
 
-static void Print_IP6(SnortConfig*, const NormalizerConfig* nc)
+static void print_ip6(const NormalizerConfig* nc)
 {
-    if ( !Norm_IsEnabled(nc, (NormFlags)NORM_IP6_ANY) )
+    bool ip6 = Norm_IsEnabled(nc, (NormFlags)NORM_IP6_ANY);
+    ConfigLogger::log_flag("ip6", ip6);
+
+    if ( !ip6 )
         return;
 
-    LogFlag("ip6.base", nc, NORM_IP6_BASE);
+    std::string opts;
+    opts += "{ base = " + to_str(Norm_IsEnabled(nc, NORM_IP6_BASE));
 
     if ( Norm_IsEnabled(nc, NORM_IP6_TTL) )
     {
         NetworkPolicy* policy = get_network_policy();
-        LogMessage("%12s: %s (min=%d, new=%d)\n", "ip6.hops",
-            ON, policy->min_ttl, policy->new_ttl);
+        opts += ", min_ttl = " + std::to_string(policy->min_ttl);
+        opts += ", new_ttl = " + std::to_string(policy->new_ttl);
     }
+
+    opts += " }";
+
+    ConfigLogger::log_list("ip6", opts.c_str());
 }
 
-static void Print_ICMP6(const NormalizerConfig* nc)
+static void print_icmp6(const NormalizerConfig* nc)
 {
-    LogFlag("icmp6", nc, NORM_ICMP6);
+    ConfigLogger::log_flag("icmp6", Norm_IsEnabled(nc, NORM_ICMP6));
 }
 
-static void Print_TCP(const NormalizerConfig* nc)
+static std::string get_allowed_names(const NormalizerConfig* config)
 {
-    if ( !Norm_IsEnabled(nc, (NormFlags)NORM_TCP_ANY) )
+    std::string names;
+    if ( Norm_TcpIsOptional(config, 4) or Norm_TcpIsOptional(config, 5) )
+        names += "sack";
+
+    if ( Norm_TcpIsOptional(config, 6) or Norm_TcpIsOptional(config, 7) )
+        names += " echo";
+
+    if ( Norm_TcpIsOptional(config, 9) or Norm_TcpIsOptional(config, 10) )
+        names += " partial_order";
+
+    if ( Norm_TcpIsOptional(config, 11) or Norm_TcpIsOptional(config, 12)
+        or Norm_TcpIsOptional(config, 13) )
+        names += " conn_count";
+
+    if ( Norm_TcpIsOptional(config, 14) or Norm_TcpIsOptional(config, 15) )
+        names += " alt_checksum";
+
+    if ( Norm_TcpIsOptional(config, 19) )
+        names += " md5";
+
+    return names;
+}
+
+static std::string get_allowed_codes(const NormalizerConfig* nc)
+{
+    std::string codes;
+    std::unordered_set<int> named_codes = {4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 19};
+
+    for (int opt = 2; opt < 256; opt++)
+    {
+        if ( Norm_TcpIsOptional(nc, opt) and !named_codes.count(opt) )
+            codes += std::to_string(opt) + ", ";
+    }
+
+    if ( !codes.empty() )
+        codes.erase(codes.end() - 2);
+
+    return codes;
+}
+
+static void print_tcp(const NormalizerConfig* nc)
+{
+    bool tcp = Norm_IsEnabled(nc, (NormFlags)NORM_TCP_ANY);
+    ConfigLogger::log_flag("tcp", tcp);
+
+    if ( !tcp )
         return;
 
-    const char* s;
+    std::string opts;
 
+    opts += "{ ecn = ";
     if ( Norm_IsEnabled(nc, NORM_TCP_ECN_PKT) )
-        s = "packet";
+        opts += "packet";
     else if ( Norm_IsEnabled(nc, NORM_TCP_ECN_STR) )
-        s = "stream";
+        opts +="stream";
     else
-        s = OFF;
+        opts += to_str(false);
 
-    LogConf("tcp.ecn", s);
-    LogFlag("tcp.block", nc, NORM_TCP_BLOCK);
-    LogFlag("tcp.rsv", nc, NORM_TCP_RSV);
-    LogFlag("tcp.pad", nc, NORM_TCP_PAD);
-    LogFlag("tcp.req_urg", nc, NORM_TCP_REQ_URG);
-    LogFlag("tcp.req_pay", nc, NORM_TCP_REQ_PAY);
-    LogFlag("tcp.req_urp", nc, NORM_TCP_REQ_URP);
-    LogFlag("tcp.urp", nc, NORM_TCP_URP);
+    opts += ", block = " + to_str(Norm_IsEnabled(nc, NORM_TCP_BLOCK));
+    opts += ", rsv = " + to_str(Norm_IsEnabled(nc, NORM_TCP_RSV));
+    opts += ", pad = " + to_str(Norm_IsEnabled(nc, NORM_TCP_PAD));
+    opts += ", req_urg = " + to_str(Norm_IsEnabled(nc, NORM_TCP_REQ_URG));
+    opts += ", req_pay = " + to_str(Norm_IsEnabled(nc, NORM_TCP_REQ_PAY));
+    opts += ", req_urp = " + to_str(Norm_IsEnabled(nc, NORM_TCP_REQ_URP));
+    opts += ", urp = " + to_str(Norm_IsEnabled(nc, NORM_TCP_URP));
+    opts += ", ips = " + to_str(Norm_IsEnabled(nc, NORM_TCP_IPS));
 
-    if ( Norm_IsEnabled(nc, NORM_TCP_OPT) )
+    auto names = get_allowed_names(nc);
+    auto codes = get_allowed_codes(nc);
+
+    if ( !names.empty() )
+        opts += ", allow_names = { " + names + " }";
+
+    if ( !codes.empty() )
+        opts += ", allow_codes = { " + codes + " }";
+
+    if ( Norm_IsEnabled(nc, (NormFlags)NORM_TCP_TRIM_ANY) )
     {
-        char buf[1024] = "";
-        char* p = buf;
-        int opt;
-        size_t min;
-
-        p += snprintf(p, buf+sizeof(buf)-p, "%s", "(allow ");
-        min = strlen(buf);
-
-        // TBD translate options to keywords allowed by parser
-        for ( opt = 2; opt < 256; opt++ )
-        {
-            const char* fmt = (strlen(buf) > min) ? ",%d" : "%d";
-            if ( Norm_TcpIsOptional(nc, opt) )
-                p += snprintf(p, buf+sizeof(buf)-p, fmt, opt);
-        }
-        if ( strlen(buf) > min )
-        {
-            snprintf(p, buf+sizeof(buf)-p, "%c", ')');
-            buf[sizeof(buf)-1] = '\0';
-        }
-        LogMessage("%12s: %s %s\n", "tcp.opt", ON, buf);
+        opts += ", trim_syn = " + to_str(Norm_IsEnabled(nc, NORM_TCP_TRIM_SYN));
+        opts += ", trim_rst = " + to_str(Norm_IsEnabled(nc, NORM_TCP_TRIM_RST));
+        opts += ", trim_win = " + to_str(Norm_IsEnabled(nc, NORM_TCP_TRIM_WIN));
+        opts += ", trim_mss = " + to_str(Norm_IsEnabled(nc, NORM_TCP_TRIM_MSS));
     }
     else
-        LogConf("tcp.opt", OFF);
+        opts += ", trim = " + to_str(false);
 
-    LogFlag("tcp.ips", nc, NORM_TCP_IPS);
-    LogFlag("tcp.trim_syn", nc, NORM_TCP_TRIM_SYN);
-    LogFlag("tcp.trim_rst", nc, NORM_TCP_TRIM_RST);
-    LogFlag("tcp.trim_win", nc, NORM_TCP_TRIM_WIN);
-    LogFlag("tcp.trim_mss", nc, NORM_TCP_TRIM_MSS);
+    opts += " }";
+
+    ConfigLogger::log_list("tcp", opts.c_str());
 }
 
 //-------------------------------------------------------------------------
@@ -166,7 +209,7 @@ public:
     Normalizer(const NormalizerConfig&);
 
     bool configure(SnortConfig*) override;
-    void show(SnortConfig*) override;
+    void show(const SnortConfig*) const override;
     void eval(Packet*) override;
 
 private:
@@ -181,26 +224,27 @@ Normalizer::Normalizer(const NormalizerConfig& nc)
 // FIXIT-L this works with one normalizer per policy
 // but would be better if binder could select
 // in which case normal_mask must be moved to flow
+// from cwaxman - why can't normal_mask be applied directly from Normalizer?
 bool Normalizer::configure(SnortConfig*)
 {
-    PolicyMode mode = get_ips_policy()->policy_mode;
-    // FIXIT-L norm needs a nap policy mode
-    if ( mode == POLICY_MODE__PASSIVE )
-    {
-        ParseWarning(WARN_DAQ, "normalizations disabled because not inline.");
-        config.normalizer_flags = 0;
-        return true;
-    }
-
+    // FIXIT-M move entire config to network policy? Leaving split loads the currently selected
+    // network policy with whichever instantiation of an inspection policy this normalize is in
     NetworkPolicy* nap = get_network_policy();
-    nap->normal_mask = config.normalizer_flags;
 
     if ( nap->new_ttl && nap->new_ttl < nap->min_ttl )
-    {
         nap->new_ttl = nap->min_ttl;
+
+    if ( (nap->new_ttl > 1) && (nap->new_ttl >= nap->min_ttl) )
+    {
+        if ( Norm_IsEnabled(&config, NORM_IP4_BASE) )
+            Norm_Enable(&config, NORM_IP4_TTL);
+
+        if ( Norm_IsEnabled(&config, NORM_IP6_BASE) )
+            Norm_Enable(&config, NORM_IP6_TTL);
     }
 
-    config.norm_mode = (mode == POLICY_MODE__INLINE) ? NORM_MODE_ON : NORM_MODE_TEST;
+    nap->normal_mask = config.normalizer_flags;
+
     Norm_SetConfig(&config);
     return true;
 }
@@ -212,45 +256,40 @@ bool Normalize_IsEnabled(NormFlags nf)
     if ( !(t_flags & nf) )
         return false;
 
+    if ( get_inspection_policy()->policy_mode != POLICY_MODE__INLINE )
+        return false;
+
     NetworkPolicy* nap = get_network_policy();
-    return ( (nap->normal_mask & nf) != 0 );
+    return nap->normal_mask & nf;
 }
 
 NormMode Normalize_GetMode(NormFlags nf)
 {
     if (Normalize_IsEnabled(nf))
     {
-        const PolicyMode mode = get_ips_policy()->policy_mode;
+        const PolicyMode mode = get_inspection_policy()->policy_mode;
 
         if ( mode == POLICY_MODE__INLINE )
             return NORM_MODE_ON;
-
-        else if ( mode == POLICY_MODE__INLINE_TEST )
-            return NORM_MODE_TEST;
     }
-
-    return NORM_MODE_OFF;
+    return NORM_MODE_TEST;
 }
 
-void Normalizer::show(SnortConfig* sc)
+void Normalizer::show(const SnortConfig*) const
 {
-    LogMessage("Normalizer config:\n");
-    Print_IP4(sc, &config);
-    Print_IP6(sc, &config);
-    Print_ICMP4(&config);
-    Print_ICMP6(&config);
-    Print_TCP(&config);
+    print_ip4(&config);
+    print_ip6(&config);
+    print_icmp4(&config);
+    print_icmp6(&config);
+    print_tcp(&config);
 }
 
 void Normalizer::eval(Packet* p)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(norm_perf_stats);
+    Profile profile(norm_perf_stats);
 
-    if ( !p->is_rebuilt() && !Active::packet_was_dropped() )
+    if ( !p->is_rebuilt() && !p->active->packet_was_dropped() )
         Norm_Packet(&config, p);
-
-    MODULE_PROFILE_END(norm_perf_stats);
 }
 
 //-------------------------------------------------------------------------
@@ -276,10 +315,10 @@ static void no_dtor(Inspector* p)
 
 static void no_tinit()
 {
-    if ( DAQ_CanReplace() )
+    if ( SFDAQ::can_replace() )
         t_flags = NORM_ALL;
 
-    if ( !DAQ_CanInject() )
+    if ( !SFDAQ::can_inject() )
         t_flags &= ~NORM_IP4_TRIM;
 }
 
@@ -298,7 +337,7 @@ static const InspectApi no_api =
         mod_dtor
     },
     IT_PACKET,
-    (uint16_t)PktType::ANY_IP,
+    PROTO_BIT__ANY_IP,
     nullptr, // buffers
     nullptr, // service
     nullptr, // pinit

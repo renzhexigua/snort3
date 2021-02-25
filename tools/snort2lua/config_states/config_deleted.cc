@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class Deleted : public ConversionState
 {
 public:
     Deleted(Converter& c) : ConversionState(c) { }
-    virtual ~Deleted() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -305,6 +304,19 @@ static const ConvertMap enable_decode_oversized_drops_api =
 const ConvertMap* enable_decode_oversized_drops_map = &enable_decode_oversized_drops_api;
 
 /*************************************************
+ ******************  enable_gtp ******************
+ *************************************************/
+
+static const std::string enable_gtp = "enable_gtp";
+static const ConvertMap enable_gtp_api =
+{
+    enable_gtp,
+    deleted_ctor<& enable_gtp>
+};
+
+const ConvertMap* enable_gtp_map = &enable_gtp_api;
+
+/*************************************************
  **************  enable_ipopt_drops  *************
  *************************************************/
 
@@ -381,6 +393,34 @@ static const ConvertMap enable_ttcp_drops_api =
 };
 
 const ConvertMap* enable_ttcp_drops_map = &enable_ttcp_drops_api;
+
+/*************************************************
+ *************  log_ipv6_extra_data  *************
+ *************************************************/
+
+static const std::string log_ipv6_extra_data = "log_ipv6_extra_data";
+static const ConvertMap log_ipv6_extra_data_api =
+{
+    log_ipv6_extra_data,
+    deleted_ctor<& log_ipv6_extra_data>
+};
+
+const ConvertMap* log_ipv6_extra_data_map = &log_ipv6_extra_data_api;
+
+
+/*************************************************
+ ***********  nolog***********
+ *************************************************/
+
+static const std::string nolog = "nolog";
+static const ConvertMap nolog_api =
+{
+    nolog,
+    deleted_ctor<& nolog>,
+};
+
+const ConvertMap* nolog_map = &nolog_api;
+
 
 /*************************************************
  **************  flexresp2_attempts  *************
@@ -481,18 +521,6 @@ static const ConvertMap layer2resets_api =
 const ConvertMap* layer2resets_map = &layer2resets_api;
 
 /*************************************************
- ****************  policy_version  ***************
- *************************************************/
-
-static const std::string policy_version = "policy_version";
-static const ConvertMap policy_version_api =
-{
-    policy_version,
-    deleted_ctor<& policy_version>,
-};
-const ConvertMap* policy_version_map = &policy_version_api;
-
-/*************************************************
  ****************  so_rule_memcap  ***************
  *************************************************/
 
@@ -503,5 +531,72 @@ static const ConvertMap so_rule_memcap_api =
     deleted_ctor<& so_rule_memcap>,
 };
 const ConvertMap* so_rule_memcap_map = &so_rule_memcap_api;
-} // namespace config
 
+/*************************************************
+ *****************  disable_inline_init_failopen  *******************
+ *************************************************/
+
+static const std::string disable_inline_init_failopen = "disable_inline_init_failopen";
+static const ConvertMap disable_inline_init_failopen_api =
+{
+    disable_inline_init_failopen,
+    deleted_ctor<& disable_inline_init_failopen>,
+};
+
+const ConvertMap* disable_inline_init_failopen_map = &disable_inline_init_failopen_api;
+
+/*************************************************
+ *************  decode_data_link  ****************
+ *************************************************/
+
+static const std::string decode_data_link = "decode_data_link";
+static const ConvertMap decode_data_link_api =
+{
+    decode_data_link,
+    deleted_ctor<& decode_data_link>,
+};
+
+const ConvertMap* decode_data_link_map = &decode_data_link_api;
+
+/*************************************************
+ *************  protected_content ****************
+ *************************************************/
+
+static const std::string protected_content = "protected_content";
+static const ConvertMap protected_content_api =
+{
+    protected_content,
+    deleted_ctor<& protected_content>,
+};
+
+const ConvertMap* protected_content_map = &protected_content_api;
+
+/*************************************************
+ *************  sidechannel ****************
+ *************************************************/
+
+// FIXIT-L: This is temporary and needs to be translated to an appropriate `side_channel = {}`
+
+static const std::string sidechannel = "sidechannel";
+static const ConvertMap sidechannel_api =
+{
+    sidechannel,
+    deleted_ctor<& sidechannel>,
+};
+
+const ConvertMap* sidechannel_map = &sidechannel_api;
+
+/*************************************************
+ *****************  no_promisc *******************
+ *************************************************/
+
+static const std::string no_promisc = "no_promisc";
+static const ConvertMap no_promisc_api =
+{
+    no_promisc,
+    deleted_ctor<& no_promisc>,
+};
+
+const ConvertMap* no_promisc_map = &no_promisc_api;
+
+} // namespace config

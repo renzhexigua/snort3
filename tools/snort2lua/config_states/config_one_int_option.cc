@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -29,6 +29,21 @@ namespace config
 {
 namespace
 {
+/*************************************************
+ ************** LUA  STRUCT_NAMES  ***************
+ *************************************************/
+
+static const std::string attribute_table = "attribute_table";
+static const std::string alerts = "alerts";
+static const std::string daq = "daq";
+static const std::string detection = "detection";
+static const std::string mpls = "mpls";
+static const std::string network = "network";
+static const std::string output = "output";
+static const std::string packets = "packets";
+static const std::string process = "process";
+static const std::string stream_tcp = "stream_tcp";
+
 // Yes, this looks rather ugly. However, when using Templates,
 // I always got warnings.  Since we've got zero tolerance policy
 // for such things (and I wanted to keep my checks in Snort2Lua
@@ -39,17 +54,17 @@ public:
     ConfigIntOption(Converter& c,
         const std::string* snort_opt,
         const std::string* table,
-        const std::string* lua_opt) :
+        const std::string* lua_opt,
+        int max_int_value) :
         ConversionState(c),
         snort_option(snort_opt),
         lua_table(table),
-        lua_option(lua_opt)
+        lua_option(lua_opt),
+        max_value(max_int_value)
     {
     }
 
-    virtual ~ConfigIntOption() { }
-
-    virtual bool convert(std::istringstream& stream)
+    bool convert(std::istringstream& stream) override
     {
         if ((snort_option == nullptr) ||
             (snort_option->empty()) ||
@@ -65,15 +80,21 @@ public:
         bool retval;
 
         // if the two names are not equal ...
-        if ((lua_option != nullptr) && snort_option->compare(*lua_option))
+        if ((lua_option != nullptr) && *snort_option != *lua_option)
         {
-            retval = parse_int_option(*lua_option, stream, false);
-            table_api.add_diff_option_comment("config " + *snort_option +
-                ":", *lua_option);
+            if (max_value)
+                retval = parse_max_int_option(*lua_option, stream, max_value, false);
+            else
+                retval = parse_int_option(*lua_option, stream, false);
+
+            table_api.add_diff_option_comment("config " + *snort_option + ":", *lua_option);
         }
         else
         {
-            retval = parse_int_option(*snort_option, stream, false);
+            if (max_value)
+                retval = parse_max_int_option(*snort_option, stream, max_value, false);
+            else
+                retval = parse_int_option(*snort_option, stream, false);
         }
 
         table_api.close_table();
@@ -85,34 +106,18 @@ private:
     const std::string* snort_option;
     const std::string* lua_table;
     const std::string* lua_option;
+    const int max_value;
 };
 
 template<const std::string* snort_option,
-const std::string* lua_table,
-const std::string* lua_option = nullptr>
+    const std::string* lua_table,
+    const std::string* lua_option = nullptr,
+    int max_int_value = 0>
 static ConversionState* config_int_ctor(Converter& c)
 {
-    return new ConfigIntOption(c,
-        snort_option,
-        lua_table,
-        lua_option);
+    return new ConfigIntOption(c, snort_option, lua_table, lua_option, max_int_value);
 }
 } // namespace
-
-/*************************************************
- ************** LUA  STRUCT_NAMES  ***************
- *************************************************/
-
-static const std::string attribute_table = "attribute_table";
-static const std::string alerts = "alerts";
-static const std::string daq = "daq";
-static const std::string detection = "detection";
-static const std::string mpls = "mpls";
-static const std::string network = "network";
-static const std::string output = "output";
-static const std::string packets = "packets";
-static const std::string process = "process";
-static const std::string stream_tcp = "stream_tcp";
 
 /*************************************************
  *********************  asn1  ********************
@@ -190,9 +195,10 @@ static const std::string max_mpls_stack_depth = "max_mpls_stack_depth";
 static const ConvertMap max_mpls_labelchain_len_api =
 {
     max_mpls_labelchain_len,
-    config_int_ctor<& max_mpls_labelchain_len,
-    & mpls,
-    & max_mpls_stack_depth>,
+    config_int_ctor<&max_mpls_labelchain_len,
+        &mpls,
+        &max_mpls_stack_depth,
+        255>,
 };
 
 const ConvertMap* max_mpls_labelchain_len_map = &max_mpls_labelchain_len_api;
@@ -288,5 +294,18 @@ static const ConvertMap tagged_packet_limit_api =
 };
 
 const ConvertMap* tagged_packet_limit_map = &tagged_packet_limit_api;
+
+/**************************************************
+ ********************* umask  *********************
+ **************************************************/
+
+static const std::string umask = "umask";
+static const ConvertMap umask_api =
+{
+    umask,
+    config_int_ctor<& umask, & process>,
+};
+
+const ConvertMap* umask_map = &umask_api;
 } // namespace config
 

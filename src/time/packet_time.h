@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,17 +20,19 @@
 #ifndef PACKET_TIME_H
 #define PACKET_TIME_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
 #include <sys/time.h>
-#include <cstdint>
+
+#include "main/snort_types.h"
+
+namespace snort
+{
+SO_PUBLIC void packet_gettimeofday(struct timeval* tv);
+SO_PUBLIC time_t packet_time();
+SO_PUBLIC int64_t timersub_ms(const struct timeval* end, const struct timeval* start);
+}
 
 void packet_time_update(const struct timeval* cur_tv);
-time_t packet_time(void);
-uint32_t packet_first_time(void);
-void packet_gettimeofday(struct timeval* tv);
+uint32_t packet_first_time();
 
 #endif
 

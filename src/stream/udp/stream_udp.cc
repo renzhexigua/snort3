@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,13 +20,15 @@
 #include "config.h"
 #endif
 
-#include <assert.h>
-
 #include "stream_udp.h"
-#include "udp_module.h"
-#include "stream/udp/udp_session.h"
+
 #include "log/messages.h"
-#include "protocols/packet.h"
+
+#include "udp_ha.h"
+#include "udp_module.h"
+#include "udp_session.h"
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // helpers
@@ -35,20 +37,6 @@
 StreamUdpConfig::StreamUdpConfig()
 {
     session_timeout = 30;
-    ignore_any = false;
-}
-
-void udp_show(StreamUdpConfig* pc)
-{
-    LogMessage("Stream UDP config:\n");
-    LogMessage("    Timeout: %d seconds\n", pc->session_timeout);
-
-    const char* opt = (pc->ignore_any) ? "YES" : "NO";
-    LogMessage("    Ignore Any -> Any Rules: %s\n", opt);
-
-#ifdef REG_TEST
-    LogMessage("    UDP Session Size: %lu\n",sizeof(UdpSession));
-#endif
 }
 
 //-------------------------------------------------------------------------
@@ -59,10 +47,10 @@ class StreamUdp : public Inspector
 {
 public:
     StreamUdp(StreamUdpConfig*);
-    ~StreamUdp();
+    ~StreamUdp() override;
 
-    void show(SnortConfig*);
-    void eval(Packet*);
+    void show(const SnortConfig*) const override;
+    NORETURN_ASSERT void eval(Packet*) override;
 
 public:
     StreamUdpConfig* config;
@@ -78,13 +66,15 @@ StreamUdp::~StreamUdp()
     delete config;
 }
 
-void StreamUdp::show(SnortConfig*)
+void StreamUdp::show(const SnortConfig*) const
 {
-    if ( config )
-        udp_show(config);
+    if ( !config )
+        return;
+
+    ConfigLogger::log_value("session_timeout", config->session_timeout);
 }
 
-void StreamUdp::eval(Packet*)
+NORETURN_ASSERT void StreamUdp::eval(Packet*)
 {
     // session::process() instead
     assert(false);
@@ -109,6 +99,16 @@ static void mod_dtor(Module* m)
 static Session* udp_ssn(Flow* lws)
 {
     return new UdpSession(lws);
+}
+
+static void udp_tinit()
+{
+    UdpHAManager::tinit();
+}
+
+static void udp_tterm()
+{
+    UdpHAManager::tterm();
 }
 
 static Inspector* udp_ctor(Module* m)
@@ -137,13 +137,13 @@ static const InspectApi udp_api =
         mod_dtor
     },
     IT_STREAM,
-    (unsigned)PktType::UDP,
+    PROTO_BIT__UDP,
     nullptr, // buffers
     nullptr, // service
     nullptr, // init
     nullptr, // term
-    nullptr, // tinit
-    nullptr, // tterm
+    udp_tinit, // tinit
+    udp_tterm, // tterm
     udp_ctor,
     udp_dtor,
     udp_ssn,

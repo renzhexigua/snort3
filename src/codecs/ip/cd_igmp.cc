@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -23,8 +23,8 @@
 
 #include "framework/codec.h"
 #include "codecs/codec_module.h"
-#include "protocols/packet.h"
-#include "protocols/ipv4_options.h"
+
+using namespace snort;
 
 #define CD_IGMP_NAME "igmp"
 #define CD_IGMP_HELP "support for Internet group management protocol"
@@ -37,12 +37,12 @@ static const RuleMap igmp_rules[] =
     { 0, nullptr }
 };
 
-class IgmpModule : public CodecModule
+class IgmpModule : public BaseCodecModule
 {
 public:
-    IgmpModule() : CodecModule(CD_IGMP_NAME, CD_IGMP_HELP) { }
+    IgmpModule() : BaseCodecModule(CD_IGMP_NAME, CD_IGMP_HELP) { }
 
-    const RuleMap* get_rules() const
+    const RuleMap* get_rules() const override
     { return igmp_rules; }
 };
 
@@ -50,10 +50,9 @@ class IgmpCodec : public Codec
 {
 public:
     IgmpCodec() : Codec(CD_IGMP_NAME) { }
-    ~IgmpCodec() { }
 
     bool decode(const RawData&, CodecData&, DecodeData&) override;
-    void get_protocol_ids(std::vector<uint16_t>&) override;
+    void get_protocol_ids(std::vector<ProtocolId>&) override;
 };
 } // namespace
 
@@ -84,9 +83,9 @@ bool IgmpCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
     return true;
 }
 
-void IgmpCodec::get_protocol_ids(std::vector<uint16_t>& v)
+void IgmpCodec::get_protocol_ids(std::vector<ProtocolId>& v)
 {
-    v.push_back(IPPROTO_IGMP);
+    v.emplace_back(ProtocolId::IGMP);
 }
 
 //-------------------------------------------------------------------------
@@ -129,11 +128,11 @@ static const CodecApi igmp_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_igmp[] =
+#endif
 {
     &igmp_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_igmp = &igmp_api.base;
-#endif
 

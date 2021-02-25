@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2004 Martin Roesch <roesch@sourcefire.com>
 //
@@ -21,46 +21,45 @@
 #ifndef IP_DEFRAG_H
 #define IP_DEFRAG_H
 
-// FIXIT-L integrate into stream api
-//int fpAddFragAlert(Packet *p, OptTreeNode *otn);
-//int fpFragAlerted(Packet *p, OptTreeNode *otn);
-int drop_all_fragments(Packet* p);
-int fragGetApplicationProtocolId(Packet* p);
+// ip datagram reassembly
+
+#include <cstdint>
 
 struct FragEngine;
 struct FragTracker;
 struct Fragment;
+namespace snort
+{
+struct Packet;
+struct SnortConfig;
+}
 
 class Defrag
 {
 public:
     Defrag(FragEngine&);
 
-    bool configure(SnortConfig*);
-    void show(SnortConfig*);
+    bool configure(snort::SnortConfig*);
+    void show() const;
 
-    void process(Packet*, FragTracker*);
+    void process(snort::Packet*, FragTracker*);
     void cleanup(FragTracker*);
-
-    void tinit();
-    void tterm();
 
     static void init();
 
 private:
-    int insert(Packet*, FragTracker*, FragEngine*);
-    int new_tracker(Packet* p, FragTracker*);
+    int insert(snort::Packet*, FragTracker*, FragEngine*);
+    int new_tracker(snort::Packet* p, FragTracker*);
 
-    int add_frag_node(
-        // FIXIT-L too many args
-        FragTracker* ft, Packet*, FragEngine*,
+    int add_frag_node(  // FIXIT-L too many args
+        FragTracker* ft, FragEngine*,
         const uint8_t* fragStart, int16_t fragLength,
         char lastfrag, int16_t len,
         uint16_t slide, uint16_t trunc, uint16_t frag_offset,
         Fragment* left, Fragment** retFrag);
 
-    int dup_frag_node(Packet*, FragTracker*, Fragment* left, Fragment** retFrag);
-    int expire(Packet*, FragTracker*, FragEngine*);
+    int dup_frag_node(FragTracker*, Fragment* left, Fragment** retFrag);
+    int expired(snort::Packet*, FragTracker*, FragEngine*);
 
 private:
     FragEngine& engine;

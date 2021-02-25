@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,19 +20,7 @@
 #ifndef PROTOCOLS_IPV4_H
 #define PROTOCOLS_IPV4_H
 
-#include <cstdint>
 #include <arpa/inet.h>
-
-#ifndef WIN32
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <net/if.h>
-#else /* !WIN32 */
-#include <netinet/in_systm.h>
-#ifndef IFNAMSIZ
-#define IFNAMESIZ MAX_ADAPTER_NAME
-#endif /* !IFNAMSIZ */
-#endif /* !WIN32 */
 
 #include "protocols/protocol_ids.h" // include ipv4 protocol numbers
 
@@ -40,8 +28,10 @@
 
 #ifndef IP_MAXPACKET
 #define IP_MAXPACKET    65535        /* maximum packet size */
-#endif /* IP_MAXPACKET */
+#endif
 
+namespace snort
+{
 namespace ip
 {
 constexpr uint32_t IP4_BROADCAST = 0xffffffff;
@@ -51,7 +41,7 @@ constexpr uint8_t IP4_MULTICAST = 0x0E;  // ms nibble
 constexpr uint8_t IP4_RESERVED = 0x0F;  // ms nibble
 constexpr uint8_t IP4_LOOPBACK = 0x7F;  // msb
 
-// This must be a standard layour struct!
+// This must be a standard layer struct!
 struct IP4Hdr
 {
     uint8_t ip_verhl;      /* version & header length */
@@ -60,7 +50,7 @@ struct IP4Hdr
     uint16_t ip_id;        /* identification  */
     uint16_t ip_off;       /* fragment offset */
     uint8_t ip_ttl;        /* time to live field */
-    uint8_t ip_proto;      /* datagram protocol */
+    IpProtocol ip_proto;      /* datagram protocol */
     uint16_t ip_csum;      /* checksum */
     uint32_t ip_src;  /* source IP */
     uint32_t ip_dst;  /* dest IP */
@@ -81,7 +71,7 @@ struct IP4Hdr
     inline uint8_t ttl() const
     { return ip_ttl; }
 
-    inline uint8_t proto() const
+    inline IpProtocol proto() const
     { return ip_proto; }
 
     inline uint16_t off_w_flags() const
@@ -141,40 +131,31 @@ struct IP4Hdr
     inline void set_hlen(uint8_t value)
     { ip_verhl = (ip_verhl & 0xf0) | (value & 0x0f); }
 
-    inline void set_proto(uint8_t prot)
+    inline void set_proto(IpProtocol prot)
     { ip_proto = prot; }
 
     inline void set_ip_len(uint16_t new_len)
     { ip_len = htons(new_len); }
 };
 
-static inline bool isPrivateIP(uint32_t addr)
+inline bool isPrivateIP(uint32_t addr)
 {
-    switch (addr & 0xff)
+    addr = ntohl(addr);
+    switch (addr & 0xFF000000)
     {
-    case 0x0a:
+    case 0x0A000000: // 10.0.0.0/8
         return true;
-        break;
-    case 0xac:
-        if ((addr & 0xf000) == 0x1000)
-            return true;
-        break;
-    case 0xc0:
-        if (((addr & 0xff00) ) == 0xa800)
-            return true;
-        break;
+    case 0xA9000000: // 169.254.0.0/16
+        return (addr & 0x00FF0000) == 0x00FE0000;
+    case 0xAC000000: // 172.16.0.0/12
+        return (addr & 0x00F00000) == 0x00100000;
+    case 0xC0000000: // 192.168.0.0/16
+        return (addr & 0x00FF0000) == 0x00A80000;
     }
     return false;
 }
-} /* namespace ip */
-
+} // namespace ip
+} // namespace snort
 /* tcpdump shows us the way to cross platform compatibility */
-
-/* we need to change them as well as get them */
-// TYPEDEF WHICH NEED TO BE DELETED
-typedef ip::IP4Hdr IP4Hdr;
-
-/* #define IP_HEADER_LEN ip::ip4_hdr_len() */
-
 #endif
 

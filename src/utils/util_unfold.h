@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 1998-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,16 +16,20 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-// Writen by Bhagyashree Bantwal <bbantwal@sourcefire.com>
+// util_unfold.h author Bhagyashree Bantwal <bbantwal@sourcefire.com>
 
 #ifndef UTIL_UNFOLD_H
 #define UTIL_UNFOLD_H
 
-#include "snort_types.h"
+// Utilities to deal with line endings and other whitespace. AKA "Header unfolding"
 
+#include "main/snort_types.h"
+
+namespace snort
+{
 SO_PUBLIC int sf_unfold_header(const uint8_t*, uint32_t, uint8_t*, uint32_t, uint32_t*, int, int*);
 SO_PUBLIC int sf_strip_CRLF(const uint8_t*, uint32_t, uint8_t*, uint32_t, uint32_t*);
 SO_PUBLIC int sf_strip_LWS(const uint8_t*, uint32_t, uint8_t*, uint32_t, uint32_t*);
-
+}
 #endif
 

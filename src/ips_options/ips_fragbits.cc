@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -17,10 +17,10 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
+// ips_fragbits.cc author Al Lewis <allewi>@cisco.com
+// based on work by Martin Roesch <roesch@sourcefire.com>
 
-/* Snort Detection Plugin Source File for IP Fragment Bits plugin */
-
-/* sp_ip_fragbits
+/* ips_fragbits.cc
  *
  * Purpose:
  *
@@ -32,9 +32,11 @@
  * The keyword to reference this plugin is "fragbits".  Possible arguments are
  * D, M and R for DF, MF and RB, respectively.
  *
+ * Possible modes are '+', '!', and '*' for plus, not and any modes.
+ *
  * Effect:
  *
- * Inidicates whether any of the specified bits have been set.
+ * Indicates whether any of the specified bits have been set.
  *
  * Comments:
  *
@@ -42,67 +44,240 @@
  *
  */
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <ctype.h>
-#include <string.h>
 
-#include "snort_types.h"
-#include "detection/treenodes.h"
-#include "protocols/packet.h"
-#include "parser.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
+#include <cassert>
+
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "hash/hash_key_operations.h"
+#include "log/messages.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
 
-#define GREATER_THAN            1
-#define LESS_THAN               2
-
-#define FB_NORMAL   0
-#define FB_ALL      1
-#define FB_ANY      2
-#define FB_NOT      3
-
-#define FB_RB  0x8000
-#define FB_DF  0x4000
-#define FB_MF  0x2000
-
-#define s_name "fragbits"
+using namespace snort;
 
 static THREAD_LOCAL ProfileStats fragBitsPerfStats;
 
-typedef struct _FragBitsData
+// this class holds the logic for setting up the fragment test
+// data and testing for the data match (is_match function).
+class FragBitsData
 {
-    char mode;
-    uint16_t frag_bits;
-} FragBitsData;
+public:
+    FragBitsData()
+    { reset(); }
 
+    void reset()
+    {
+        mode = 0;
+        frag_bits = 0;
+    }
+
+    uint8_t get_mode() const;
+    uint16_t get_frag_bits() const;
+    void set_more_fragment_bit();
+    void set_dont_fragment_bit();
+    void set_reserved_bit();
+
+    //no mode for normal since it is set as the default
+    void set_not_mode();
+    void set_any_mode();
+    void set_plus_mode();
+
+    void parse_fragbits(const char* data);
+
+    bool is_match(Packet *);
+
+private:
+    //numeric mode values
+    enum MODE { NORMAL, PLUS, ANY, NOT};
+
+    static const uint16_t BITMASK = 0xE000;
+    static const uint16_t RESERVED_BIT = 0x8000;
+    static const uint16_t DONT_FRAG_BIT = 0x4000;
+    static const uint16_t MORE_FRAG_BIT = 0x2000;
+
+    //flags used to indicate mode
+    static const char PLUS_FLAG = '+';
+    static const char ANY_FLAG = '*';
+    static const char NOT_FLAG = '!';
+
+    bool check_normal(const uint16_t);
+    bool check_any(const uint16_t);
+    bool check_not(const uint16_t);
+    bool check_plus(const uint16_t);
+
+    uint8_t mode;
+    uint16_t frag_bits;
+};
+
+//setter and getters
+uint8_t FragBitsData::get_mode() const
+{ return mode; }
+
+uint16_t FragBitsData::get_frag_bits() const
+{ return (frag_bits); }
+
+void FragBitsData::set_dont_fragment_bit()
+{ frag_bits |= DONT_FRAG_BIT; }
+
+void FragBitsData::set_more_fragment_bit()
+{ frag_bits |= MORE_FRAG_BIT; }
+
+void FragBitsData::set_reserved_bit()
+{ frag_bits |= RESERVED_BIT; }
+
+void FragBitsData::set_any_mode()
+{ mode = ANY; }
+
+void FragBitsData::set_plus_mode()
+{ mode = PLUS; }
+
+void FragBitsData::set_not_mode()
+{ mode = NOT; }
+
+// this is the function that checks for a match
+bool FragBitsData::is_match(Packet* p)
+{
+    uint16_t packet_fragbits = p->ptrs.ip_api.off_w_flags();
+
+    // strip the offset value and leave only the fragment bits
+    packet_fragbits &= BITMASK;
+
+    bool match = false;
+
+    // get the mode we have .. then check for match
+    switch( get_mode() )
+    {
+        case NORMAL:
+            match = check_normal(packet_fragbits);
+            break;
+        case ANY:
+            match = check_any(packet_fragbits);
+            break;
+        case PLUS:
+            match = check_plus(packet_fragbits);
+            break;
+        case NOT:
+            match = check_not(packet_fragbits);
+            break;
+    }
+
+    return match;
+}
+
+// check if all of flags are present
+bool FragBitsData::check_normal(const uint16_t packet_fragbits)
+{
+    if (get_frag_bits() == packet_fragbits)
+    {
+        return true;
+    }
+    return false;
+}
+
+// check for these flags being set PLUS additional '+'
+bool FragBitsData::check_plus(const uint16_t packet_fragbits)
+{
+    if ( (get_frag_bits() &  packet_fragbits ) != 0)
+    {
+        return true;
+    }
+     return false;
+}
+
+// check for any flags that match the ones set '*'
+// logic is same as the check_plus
+bool FragBitsData::check_any(const uint16_t packet_fragbits)
+{
+    if ( (get_frag_bits() & packet_fragbits ) != 0)
+    {
+        return true;
+    }
+    return false;
+}
+
+//check for packets that do NOT have matching flags set '!'
+bool FragBitsData::check_not(const uint16_t packet_fragbits)
+{
+    if ( (get_frag_bits() & packet_fragbits ) == 0)
+    {
+        return true;
+    }
+    return false;
+}
+
+// parse fragbits and populate the information into this class
+void FragBitsData::parse_fragbits(const char* data)
+{
+    assert(data);
+    std::string bit_string = data;
+
+    unsigned long len = bit_string.length();
+
+    for(unsigned long a = 0; a <  len; a++)
+    {
+        //if we hit a space skip/continue
+        if( isspace( bit_string.at(a) ) )
+            continue;
+
+        switch ( bit_string.at( a ) )
+        {
+        case 'd': // don't fragment
+        case 'D':
+            set_dont_fragment_bit();
+            break;
+
+        case 'm': // more fragment
+        case 'M':
+            set_more_fragment_bit();
+            break;
+
+        case 'r': // reserved bit
+        case 'R':
+            set_reserved_bit();
+            break;
+
+        case NOT_FLAG:// NOT flag, fire if flags are NOT set
+            set_not_mode();
+            break;
+
+        case ANY_FLAG: // '*' ANY flag, fire on ANY of these bits
+            set_any_mode();
+            break;
+
+        case PLUS_FLAG: // PLUS flag, fire on these bits PLUS any others
+            set_plus_mode();
+            break;
+
+        default:
+            ParseError("Bad fragbit = '%c'. Valid options are: RDM+!*",
+                    bit_string.at(a) );
+            return;
+        }
+    }
+}
+
+#define s_name "fragbits"
+
+// IpsOptions class
 class FragBitsOption : public IpsOption
 {
 public:
-    FragBitsOption(const FragBitsData& c) :
+    FragBitsOption(const FragBitsData& fragBitsData) :
         IpsOption(s_name)
-    { config = c; }
+    { this->fragBitsData = fragBitsData; }
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
-    FragBitsData config;
+    FragBitsData fragBitsData;
 };
-
-static uint16_t bitmask = 0x0;
 
 //-------------------------------------------------------------------------
 // api methods
@@ -110,30 +285,27 @@ static uint16_t bitmask = 0x0;
 
 uint32_t FragBitsOption::hash() const
 {
-    uint32_t a,b,c;
-    const FragBitsData* data = &config;
+    uint32_t a = fragBitsData.get_mode();
+    uint32_t b = fragBitsData.get_frag_bits();
+    uint32_t c = IpsOption::hash();
 
-    a = data->mode;
-    b = data->frag_bits;
-    c = 0;
-
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool FragBitsOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    FragBitsOption& rhs = (FragBitsOption&)ips;
-    FragBitsData* left = (FragBitsData*)&config;
-    FragBitsData* right = (FragBitsData*)&rhs.config;
+    const FragBitsOption& rhs = (const FragBitsOption&)ips;
+    const FragBitsData* left = &fragBitsData;
+    const FragBitsData* right = &rhs.fragBitsData;
 
-    if ((left->mode == right->mode) &&
-        (left->frag_bits == right->frag_bits))
+    if ((left->get_mode() == right->get_mode()) &&
+        (left->get_frag_bits() == right->get_frag_bits()))
     {
         return true;
     }
@@ -141,155 +313,20 @@ bool FragBitsOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int FragBitsOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus FragBitsOption::eval(Cursor&, Packet* p)
 {
-    FragBitsData* fb = &config;
-    int rval = DETECTION_OPTION_NO_MATCH;
-    PROFILE_VARS;
+    RuleProfile profile(fragBitsPerfStats);
 
-    if(!p->ptrs.ip_api.is_ip())
-    {
-        return rval;
-    }
+    if ( !p->has_ip() )
+        return NO_MATCH;
 
-    const uint16_t frag_offset = p->ptrs.ip_api.off_w_flags();
-    MODULE_PROFILE_START(fragBitsPerfStats);
+    bool is_match = fragBitsData.is_match(p);
 
-    DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "           <!!> CheckFragBits: ");
-        DebugMessage(DEBUG_PLUGIN, "[rule: 0x%X:%d   pkt: 0x%X] ",
-        fb->frag_bits, fb->mode, frag_offset & bitmask); );
+    if(is_match)
+        return MATCH;
 
-    switch (fb->mode)
-    {
-    case FB_NORMAL:
-        /* check if the rule bits match the bits in the packet */
-        if (fb->frag_bits == (frag_offset & bitmask))
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"Got Normal bits match\n"); );
-            rval = DETECTION_OPTION_MATCH;
-        }
-        else
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"Normal test failed\n"); );
-        }
-        break;
-
-    case FB_NOT:
-        /* check if the rule bits don't match the bits in the packet */
-        if ((fb->frag_bits & (frag_offset & bitmask)) == 0)
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"Got NOT bits match\n"); );
-            rval = DETECTION_OPTION_MATCH;
-        }
-        else
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"NOT test failed\n"); );
-        }
-        break;
-
-    case FB_ALL:
-        /* check if the rule bits are present in the packet */
-        if ((fb->frag_bits & (frag_offset & bitmask)) == fb->frag_bits)
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"Got ALL bits match\n"); );
-            rval = DETECTION_OPTION_MATCH;
-        }
-        else
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"ALL test failed\n"); );
-        }
-        break;
-
-    case FB_ANY:
-        /* check if any of the rule bits match the bits in the packet */
-        if ((fb->frag_bits & (frag_offset & bitmask)) != 0)
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"Got ANY bits match\n"); );
-            rval = DETECTION_OPTION_MATCH;
-        }
-        else
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"ANY test failed\n"); );
-        }
-        break;
-    default:
-        break;
-    }
-
-    /* if the test isn't successful, this function *must* return 0 */
-    MODULE_PROFILE_END(fragBitsPerfStats);
-    return rval;
-}
-
-//-------------------------------------------------------------------------
-// api methods
-//-------------------------------------------------------------------------
-
-void fragbits_parse(const char* data, FragBitsData* ds_ptr)
-{
-    const char* fptr;
-    const char* fend;
-
-    /* manipulate the option arguments here */
-    fptr = data;
-
-    while (isspace((u_char) *fptr))
-    {
-        fptr++;
-    }
-
-    if (strlen(fptr) == 0)
-    {
-        ParseError("no arguments to the fragbits keyword");
-        return;
-    }
-
-    fend = fptr + strlen(fptr);
-
-    ds_ptr->mode = FB_NORMAL;  /* default value */
-
-    while (fptr < fend)
-    {
-        switch ((*fptr&0xFF))
-        {
-        case 'd':
-        case 'D':     /* don't frag bit */
-            ds_ptr->frag_bits |= FB_DF;
-            break;
-
-        case 'm':
-        case 'M':     /* more frags bit */
-            ds_ptr->frag_bits |= FB_MF;
-            break;
-
-        case 'r':
-        case 'R':     /* reserved bit */
-            ds_ptr->frag_bits |= FB_RB;
-            break;
-
-        case '!':     /* NOT flag, fire if flags are not set */
-            ds_ptr->mode = FB_NOT;
-            break;
-
-        case '*':     /* ANY flag, fire on any of these bits */
-            ds_ptr->mode = FB_ANY;
-            break;
-
-        case '+':     /* ALL flag, fire on these bits plus any others */
-            ds_ptr->mode = FB_ALL;
-            break;
-
-        default:
-            ParseError(
-                "Bad Frag Bits = '%c'. Valid options are: RDM+!*", *fptr);
-            return;
-        }
-
-        fptr++;
-    }
-
-    /* put the bits in network order for fast comparisons */
-    ds_ptr->frag_bits = htons(ds_ptr->frag_bits);
+    // if the test isn't successful, this function *must* return 0
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -318,20 +355,33 @@ public:
     ProfileStats* get_profile() const override
     { return &fragBitsPerfStats; }
 
-    FragBitsData data;
+    FragBitsData get_fragBits_data();
+
+    Usage get_usage() const override
+    { return DETECT; }
+
+private:
+    FragBitsData fragBitsData;
 };
+
+//provide access to the data object within the module
+FragBitsData FragBitsModule::get_fragBits_data()
+{
+    return fragBitsData;
+}
 
 bool FragBitsModule::begin(const char*, int, SnortConfig*)
 {
-    memset(&data, 0, sizeof(data));
+    fragBitsData.reset();
     return true;
 }
 
+// the fragbitsData object is set here from the value string
+// which is the string of command line arguments
 bool FragBitsModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("~flags") )
-        fragbits_parse(v.get_string(), &data);
-
+        fragBitsData.parse_fragbits(v.get_string());
     else
         return false;
 
@@ -352,15 +402,10 @@ static void mod_dtor(Module* m)
     delete m;
 }
 
-void fragbits_init(SnortConfig*)
-{
-    bitmask = htons(0xE000);
-}
-
 static IpsOption* fragbits_ctor(Module* p, OptTreeNode*)
 {
-    FragBitsModule* m = (FragBitsModule*)p;
-    return new FragBitsOption(m->data);
+    FragBitsModule* fragBitsModule = (FragBitsModule*)p;
+    return new FragBitsOption( fragBitsModule->get_fragBits_data() );
 }
 
 static void fragbits_dtor(IpsOption* p)
@@ -370,36 +415,40 @@ static void fragbits_dtor(IpsOption* p)
 
 static const IpsApi fragbits_api =
 {
+    //BaseApi struct
     {
-        PT_IPS_OPTION,
-        sizeof(IpsApi),
-        IPSAPI_VERSION,
-        0,
-        API_RESERVED,
-        API_OPTIONS,
-        s_name,
-        s_help,
-        mod_ctor,
-        mod_dtor
+        PT_IPS_OPTION,  //PlugType type
+        sizeof(IpsApi), //uint32_t size
+        IPSAPI_VERSION, //uint32_t api_version
+        0,              //uint32_t version
+        API_RESERVED,   //uint32_t reserved
+        API_OPTIONS,    //const char* options
+        s_name,         //const char* name
+        s_help,         //const char* help
+        mod_ctor,       //ModNewFunc constructor
+        mod_dtor        //ModDelFunc destructor
     },
-    OPT_TYPE_DETECTION,
-    1, 0,
-    fragbits_init,
-    nullptr,
-    nullptr,
-    nullptr,
-    fragbits_ctor,
-    fragbits_dtor,
-    nullptr
+
+    //IpsApi struct
+    OPT_TYPE_DETECTION, //RuleOptType
+    1,                  //max per rule
+    0,                  //IpsOptFunc protos
+    nullptr,            //IpsOptFunc pinit
+    nullptr,            //IpsOptFunc pterm
+    nullptr,            //IpsOptFunc tinit
+    nullptr,            //IpsOptFunc tterm
+    fragbits_ctor,      //IpsNewFunc ctor
+    fragbits_dtor,      //IpsNewFunc dtor
+    nullptr             //IpsOptFunc verify
 };
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_fragbits[] =
+#endif
 {
     &fragbits_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_fragbits = &fragbits_api.base;
-#endif
 

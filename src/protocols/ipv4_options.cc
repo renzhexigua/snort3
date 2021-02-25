@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,11 +17,16 @@
 //--------------------------------------------------------------------------
 // ipv4_options.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
-#include "protocols/ipv4_options.h"
-#include "protocols/ipv4.h"
-#include "protocols/layer.h"
-#include "protocols/packet.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
+#include "ipv4_options.h"
+
+#include "packet.h"
+
+namespace snort
+{
 namespace ip
 {
 IpOptionIteratorIter::IpOptionIteratorIter(const IpOptions* first_opt) : opt(first_opt)
@@ -32,7 +37,7 @@ const IpOptions& IpOptionIteratorIter::operator*() const
 
 IpOptionIterator::IpOptionIterator(const IP4Hdr* const ip4_header, const Packet* const p)
 {
-    const uint8_t* const hdr = (const uint8_t* const)ip4_header;
+    const uint8_t* const hdr = (const uint8_t*)ip4_header;
     start_ptr = hdr + IP4_HEADER_LEN;
     end_ptr = start_ptr;
 
@@ -52,7 +57,7 @@ IpOptionIterator::IpOptionIterator(const IP4Hdr* const ip4_header, const Packet*
 
 IpOptionIterator::IpOptionIterator(const IP4Hdr* const ip4_header, const uint8_t valid_hdr_len)
 {
-    const uint8_t* const hdr = (const uint8_t* const)ip4_header;
+    const uint8_t* const hdr = (const uint8_t*)ip4_header;
     start_ptr = hdr + IP4_HEADER_LEN;
 
     if (valid_hdr_len < IP4_HEADER_LEN)
@@ -71,4 +76,5 @@ IpOptionIteratorIter IpOptionIterator::end() const
     return IpOptionIteratorIter(reinterpret_cast<const IpOptions*>(end_ptr));
 }
 } // namespace ip
+} // namespace snort
 

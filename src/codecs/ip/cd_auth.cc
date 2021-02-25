@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,12 +21,11 @@
 #include "config.h"
 #endif
 
-#include "framework/codec.h"
-#include "protocols/protocol_ids.h"
-#include "protocols/ipv6.h"
-#include "protocols/packet.h"
 #include "codecs/codec_module.h"
+#include "framework/codec.h"
 #include "main/snort_config.h"
+
+using namespace snort;
 
 #define CD_AUTH_NAME "auth"
 #define CD_AUTH_HELP "support for IP authentication header"
@@ -40,12 +39,12 @@ static const RuleMap auth_rules[] =
     { 0, nullptr }
 };
 
-class AuthModule : public CodecModule
+class AuthModule : public BaseCodecModule
 {
 public:
-    AuthModule() : CodecModule(CD_AUTH_NAME, CD_AUTH_HELP) { }
+    AuthModule() : BaseCodecModule(CD_AUTH_NAME, CD_AUTH_HELP) { }
 
-    const RuleMap* get_rules() const
+    const RuleMap* get_rules() const override
     { return auth_rules; }
 };
 
@@ -57,16 +56,15 @@ class AuthCodec : public Codec
 {
 public:
     AuthCodec() : Codec(CD_AUTH_NAME) { }
-    ~AuthCodec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
 };
 
 /*  Valid for both IPv4 and IPv6 */
 struct AuthHdr
 {
-    uint8_t next;
+    IpProtocol next;
     uint8_t len;
     uint16_t rsv;   /* reserved */
     uint32_t spi;   /* Security Parameters Index */
@@ -75,15 +73,15 @@ struct AuthHdr
 };
 
 constexpr uint8_t MIN_AUTH_LEN = 16; // this is in minimum number of bytes ...
-// no relatino to the AuthHdr.len field.
+// no relation to the AuthHdr.len field.
 } // anonymous namespace
 
-void AuthCodec::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(IPPROTO_ID_AUTH); }
+void AuthCodec::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::AUTH); }
 
 bool AuthCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
 {
-    const AuthHdr* const ah = reinterpret_cast<const AuthHdr* const>(raw.data);
+    const AuthHdr* const ah = reinterpret_cast<const AuthHdr*>(raw.data);
 
     if (raw.len < MIN_AUTH_LEN)
     {
@@ -101,18 +99,18 @@ bool AuthCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
         return false;
     }
 
-    codec.next_prot_id = ah->next;
+    codec.next_prot_id = (ProtocolId)ah->next;
 
     // must be called AFTER setting next_prot_id
     if (snort.ip_api.is_ip6())
     {
-        if ( snort_conf->hit_ip6_maxopts(codec.ip6_extension_count) )
+        if ( codec.conf->hit_ip6_maxopts(codec.ip6_extension_count) )
         {
             codec_event(codec, DECODE_IP6_EXCESS_EXT_HDR);
             return false;
         }
 
-        CheckIPv6ExtensionOrder(codec, IPPROTO_ID_AUTH);
+        CheckIPv6ExtensionOrder(codec, IpProtocol::AUTH);
         codec.proto_bits |= PROTO_BIT__IP6_EXT;
         codec.ip6_csum_proto = ah->next;
         codec.ip6_extension_count++;
@@ -160,11 +158,11 @@ static const CodecApi ah_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_ah[] =
+#endif
 {
     &ah_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_ah = &ah_api.base;
-#endif
 

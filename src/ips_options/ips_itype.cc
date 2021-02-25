@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,18 +21,15 @@
 #include "config.h"
 #endif
 
-#include "snort_types.h"
-#include "protocols/packet.h"
-#include "snort_debug.h"
-#include "sfhashfcn.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
 #include "framework/range.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
 #include "protocols/icmp4.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "itype"
 
@@ -48,7 +45,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     RangeCheck config;
@@ -60,54 +57,50 @@ private:
 
 uint32_t IcmpTypeOption::hash() const
 {
-    uint32_t a,b,c;
-
-    a = config.op;
-    b = config.min;
-    c = config.max;
+    uint32_t a = config.op;
+    uint32_t b = config.min;
+    uint32_t c = config.max;
 
     mix(a,b,c);
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    a += IpsOption::hash();
 
+    finalize(a,b,c);
     return c;
 }
 
 bool IcmpTypeOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    IcmpTypeOption& rhs = (IcmpTypeOption&)ips;
+    const IcmpTypeOption& rhs = (const IcmpTypeOption&)ips;
     return ( config == rhs.config );
 }
 
-int IcmpTypeOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus IcmpTypeOption::eval(Cursor&, Packet* p)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
-    PROFILE_VARS;
+    RuleProfile profile(icmpTypePerfStats);
 
-    /* return 0  if we don't have an icmp header */
+    // return 0 if we don't have an icmp header
     if (!p->ptrs.icmph)
-        return rval;
-
-    MODULE_PROFILE_START(icmpTypePerfStats);
+        return NO_MATCH;
 
     if ( config.eval(p->ptrs.icmph->type) )
-        rval = DETECTION_OPTION_MATCH;
+        return MATCH;
 
-    MODULE_PROFILE_END(icmpTypePerfStats);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
 // module
 //-------------------------------------------------------------------------
 
+#define RANGE "0:255"
+
 static const Parameter s_params[] =
 {
-    { "~range", Parameter::PT_STRING, nullptr, nullptr,
-      "check if icmp type is 'type | min<>max | <max | >min'" },
+    { "~range", Parameter::PT_INTERVAL, RANGE, nullptr,
+      "check if ICMP type is in given range" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -126,6 +119,10 @@ public:
     ProfileStats* get_profile() const override
     { return &icmpTypePerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     RangeCheck data;
 };
 
@@ -140,7 +137,7 @@ bool ItypeModule::set(const char*, Value& v, SnortConfig*)
     if ( !v.is("~range") )
         return false;
 
-    return data.parse(v.get_string());
+    return data.validate(v.get_string(), RANGE);
 }
 
 //-------------------------------------------------------------------------
@@ -195,11 +192,11 @@ static const IpsApi itype_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_itype[] =
+#endif
 {
     &itype_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_itype = &itype_api.base;
-#endif
 

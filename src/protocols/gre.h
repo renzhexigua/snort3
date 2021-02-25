@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -22,6 +22,8 @@
 
 #include <arpa/inet.h>
 
+namespace snort
+{
 namespace gre
 {
 /* GRE related stuff */
@@ -34,13 +36,14 @@ struct GREHdr
     inline uint8_t get_version() const
     { return version & 0x07; }
 
-    inline uint16_t proto() const
-    { return ntohs(ether_type); }
+    inline ProtocolId proto() const
+    { return (ProtocolId)ntohs(ether_type); }
 
     inline uint16_t raw_proto() const
     { return ether_type; }
 };
 } // namespace gre
+} // namespace snort
 
 #endif
 

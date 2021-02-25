@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -22,31 +22,43 @@
 
 #include "framework/mpse.h"
 
-class SearchTool
+namespace snort
+{
+class SO_PUBLIC SearchTool
 {
 public:
-    SearchTool();
+    // FIXIT-L SnortConfig should be passed to ctor, a lot of appid plumbing
+    // for now set_conf must be called before instantiation
+    static void set_conf(const SnortConfig* sc)
+    { conf = sc; }
+
+    SearchTool(const char* method = nullptr, bool dfa = false);
     ~SearchTool();
 
     void add(const char* pattern, unsigned len, int s_id, bool no_case = true);
+    void add(const char* pattern, unsigned len, void* s_context, bool no_case = true);
+
     void add(const uint8_t* pattern, unsigned len, int s_id, bool no_case = true);
+    void add(const uint8_t* pattern, unsigned len, void* s_context, bool no_case = true);
 
     void prep();
+    void reload();
 
     // set state to zero on first call
-    int find(const char* s, unsigned s_len, mpse_action_f, int& state,
-    bool confine = false, void* user_data = nullptr);
+    int find(const char* s, unsigned s_len, MpseMatch, int& state,
+        bool confine = false, void* user_data = nullptr);
 
-    int find(const char* s, unsigned s_len, mpse_action_f,
-    bool confine = false, void* user_data = nullptr);
+    int find(const char* s, unsigned s_len, MpseMatch,
+        bool confine = false, void* user_data = nullptr);
 
-    int find_all(const char* s, unsigned s_len, mpse_action_f,
-    bool confine = false, void* user_data = nullptr);
+    int find_all(const char* s, unsigned s_len, MpseMatch,
+        bool confine = false, void* user_data = nullptr);
 
 private:
-    class Mpse* mpse;
+    static const SnortConfig* conf;
+    class MpseGroup* mpsegrp;
     unsigned max_len;
 };
-
+} // namespace snort
 #endif
 

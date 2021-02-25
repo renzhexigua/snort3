@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,23 +17,23 @@
 //--------------------------------------------------------------------------
 // layer.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
-#include <netinet/in.h>
-#include <limits>
-#include "protocols/layer.h"
-#include "protocols/protocol_ids.h"
-#include "protocols/packet.h"
-#include "protocols/ipv4.h"
-#include "protocols/ipv6.h"
-#include "protocols/ip.h"
-#include "main/thread.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
+#include "layer.h"
+
+#include "packet.h"
+
+namespace snort
+{
 namespace layer
 {
 static THREAD_LOCAL const Packet* curr_pkt;
 
 static inline const uint8_t* find_outer_layer(const Layer* lyr,
     uint8_t num_layers,
-    uint16_t prot_id)
+    ProtocolId prot_id)
 {
     for (int i = 0; i < num_layers; i++)
     {
@@ -46,7 +46,7 @@ static inline const uint8_t* find_outer_layer(const Layer* lyr,
 
 static inline const uint8_t* find_inner_layer(const Layer* lyr,
     uint8_t num_layers,
-    uint16_t prot_id)
+    ProtocolId prot_id)
 {
     int tmp = num_layers-1;
     lyr = &lyr[tmp];
@@ -62,8 +62,8 @@ static inline const uint8_t* find_inner_layer(const Layer* lyr,
 
 static inline const uint8_t* find_inner_layer(const Layer* lyr,
     uint8_t num_layers,
-    uint16_t prot_id1,
-    uint16_t prot_id2)
+    ProtocolId prot_id1,
+    ProtocolId prot_id2)
 {
     int tmp = num_layers-1;
     lyr = &lyr[tmp];
@@ -78,14 +78,32 @@ static inline const uint8_t* find_inner_layer(const Layer* lyr,
     return nullptr;
 }
 
+static inline const Layer* find_layer(const Layer* lyr,
+    uint8_t num_layers,
+    ProtocolId prot_id1,
+    ProtocolId prot_id2)
+{
+    int tmp = num_layers-1;
+    lyr = &lyr[tmp];
+
+    for (int i = num_layers - 1; i >= 0; i--)
+    {
+        if (lyr->prot_id == prot_id1 ||
+            lyr->prot_id == prot_id2)
+            return lyr;
+        lyr--;
+    }
+    return nullptr;
+}
+
 void set_packet_pointer(const Packet* const p)
 { curr_pkt = p; }
 
-const uint8_t* get_inner_layer(const Packet* p, uint16_t proto)
-{ return find_inner_layer(p->layers, p->num_layers, proto); }
+const uint8_t* get_inner_layer(const Packet* p, ProtocolId prot_id)
+{ return find_inner_layer(p->layers, p->num_layers, prot_id); }
 
-const uint8_t* get_outer_layer(const Packet* p, uint16_t proto)
-{ return find_outer_layer(p->layers, p->num_layers, proto); }
+const uint8_t* get_outer_layer(const Packet* p, ProtocolId prot_id)
+{ return find_outer_layer(p->layers, p->num_layers, prot_id); }
 
 const arp::EtherARP* get_arp_layer(const Packet* const p)
 {
@@ -93,7 +111,8 @@ const arp::EtherARP* get_arp_layer(const Packet* const p)
     const Layer* lyr = p->layers;
 
     return reinterpret_cast<const arp::EtherARP*>(
-        find_inner_layer(lyr, num_layers, ETHERTYPE_ARP, ETHERTYPE_REVARP));
+        find_inner_layer(lyr, num_layers, ProtocolId::ETHERTYPE_ARP,
+            ProtocolId::ETHERTYPE_REVARP));
 }
 
 const gre::GREHdr* get_gre_layer(const Packet* const p)
@@ -102,7 +121,7 @@ const gre::GREHdr* get_gre_layer(const Packet* const p)
     const Layer* lyr = p->layers;
 
     return reinterpret_cast<const gre::GREHdr*>(
-        find_inner_layer(lyr, num_layers, IPPROTO_ID_GRE));
+        find_inner_layer(lyr, num_layers, ProtocolId::GRE));
 }
 
 const eapol::EtherEapol* get_eapol_layer(const Packet* const p)
@@ -111,16 +130,34 @@ const eapol::EtherEapol* get_eapol_layer(const Packet* const p)
     const Layer* lyr = p->layers;
 
     return reinterpret_cast<const eapol::EtherEapol*>(
-        find_inner_layer(lyr, num_layers, ETHERTYPE_EAPOL));
+        find_inner_layer(lyr, num_layers, ProtocolId::ETHERTYPE_EAPOL));
 }
 
-const vlan::VlanTagHdr* get_vlan_layer(const Packet* const p)
+const Layer* get_mpls_layer(const Packet* const p)
 {
     uint8_t num_layers = p->num_layers;
     const Layer* lyr = p->layers;
 
-    return reinterpret_cast<const vlan::VlanTagHdr*>(
-        find_inner_layer(lyr, num_layers, ETHERTYPE_8021Q));
+    return find_layer(lyr, num_layers, ProtocolId::ETHERTYPE_MPLS_UNICAST,
+            ProtocolId::ETHERTYPE_MPLS_MULTICAST);
+}
+
+const vlan::VlanTagHdr* get_vlan_layer(const Packet* const p)
+{
+    assert( p->proto_bits & PROTO_BIT__VLAN );
+    assert( p->vlan_idx < p->num_layers );
+    const Layer* lyr = p->layers + p->vlan_idx;
+    return reinterpret_cast<const vlan::VlanTagHdr*>(lyr->start);
+}
+
+const cisco_meta_data::CiscoMetaDataHdr* get_cisco_meta_data_layer(const Packet* const p)
+{
+    assert( p->proto_bits & PROTO_BIT__CISCO_META_DATA );
+
+    const Layer* lyr = find_layer(p->layers, p->num_layers, ProtocolId::ETHERTYPE_CISCO_META,
+        ProtocolId::ETHERTYPE_CISCO_META);
+
+    return reinterpret_cast<const cisco_meta_data::CiscoMetaDataHdr*>(lyr->start);
 }
 
 const eth::EtherHdr* get_eth_layer(const Packet* const p)
@@ -130,10 +167,19 @@ const eth::EtherHdr* get_eth_layer(const Packet* const p)
 
     // First, search for the inner eth layer (transbridging)
     const eth::EtherHdr* eh = reinterpret_cast<const eth::EtherHdr*>(
-        find_inner_layer(lyr, num_layers, ETHERTYPE_TRANS_ETHER_BRIDGING));
+        find_inner_layer(lyr, num_layers, ProtocolId::ETHERTYPE_TRANS_ETHER_BRIDGING));
 
     // if no inner eth layer, assume root layer is eth (callers job to confirm)
     return eh ? eh : reinterpret_cast<const eth::EtherHdr*>(get_root_layer(p));
+}
+
+const wlan::WifiHdr* get_wifi_layer(const Packet* const p)
+{
+    uint8_t num_layers = p->num_layers;
+    const Layer* lyr = p->layers;
+
+    return reinterpret_cast<const wlan::WifiHdr*>(
+        find_inner_layer(lyr, num_layers, ProtocolId::ETHERNET_802_11));
 }
 
 const ip::IP6Frag* get_inner_ip6_frag()
@@ -151,11 +197,11 @@ const ip::IP6Frag* get_inner_ip6_frag(const Packet* const pkt)
 
         for (int i = max_layer; i >= 0; i--)
         {
-            if (lyr->prot_id == IPPROTO_ID_FRAGMENT)
+            if (lyr->prot_id == ProtocolId::FRAGMENT)
                 return reinterpret_cast<const ip::IP6Frag*>(lyr->start);
 
             // Only check until current ip6h header
-            if (lyr->start == (const uint8_t* const)ip6h)
+            if (lyr->start == (const uint8_t*)ip6h)
                 return nullptr;
 
             lyr--;
@@ -177,7 +223,7 @@ int get_inner_ip6_frag_index(const Packet* const pkt)
 
         for (int i = max_layer; i >= 0; i--)
         {
-            if (lyr->prot_id == IPPROTO_ID_FRAGMENT)
+            if (lyr->prot_id == ProtocolId::FRAGMENT)
                 return i;
 
             lyr--;
@@ -189,37 +235,15 @@ int get_inner_ip6_frag_index(const Packet* const pkt)
 const udp::UDPHdr* get_outer_udp_lyr(const Packet* const p)
 {
     return reinterpret_cast<const udp::UDPHdr*>(
-        find_outer_layer(p->layers, p->num_layers, IPPROTO_UDP));
+        find_outer_layer(p->layers, p->num_layers, ProtocolId::UDP));
 }
 
 const uint8_t* get_root_layer(const Packet* const p)
 {
-    // since token ring is the grinder, its the begining of the packet.
+    // since token ring is the grinder, its the beginning of the packet.
     if (p->num_layers > 0)
         return p->layers[0].start;
     return nullptr;
-}
-
-uint8_t get_outer_ip_next_pro(const Packet* const p)
-{
-    const Layer* layers = p->layers;
-    const int max_layers = p->num_layers;
-
-    for (int i = 0; i < max_layers; i++)
-    {
-        switch (layers[i].prot_id)
-        {
-        case ETHERTYPE_IPV4:
-        case IPPROTO_ID_IPIP:
-            return reinterpret_cast<const ip::IP4Hdr*>(layers[i].start)->proto();
-        case ETHERTYPE_IPV6:
-        case IPPROTO_ID_IPV6:
-            return reinterpret_cast<const ip::IP6Hdr*>(layers[i].start)->next();
-        default:
-            break;
-        }
-    }
-    return -1;
 }
 
 int get_inner_ip_lyr_index(const Packet* const p)
@@ -230,10 +254,10 @@ int get_inner_ip_lyr_index(const Packet* const p)
     {
         switch (layers[i].prot_id)
         {
-        case ETHERTYPE_IPV4:
-        case ETHERTYPE_IPV6:
-        case IPPROTO_ID_IPIP:
-        case IPPROTO_ID_IPV6:
+        case ProtocolId::ETHERTYPE_IPV4:
+        case ProtocolId::ETHERTYPE_IPV6:
+        case ProtocolId::IPIP:
+        case ProtocolId::IPV6:
             return i;
         default:
             break;
@@ -246,21 +270,19 @@ bool set_inner_ip_api(const Packet* const p,
     ip::IpApi& api,
     int8_t& curr_layer)
 {
-    uint8_t tmp;
+    IpProtocol tmp;
     return set_inner_ip_api(p, api, tmp, curr_layer);
 }
 
 bool set_inner_ip_api(const Packet* const p,
     ip::IpApi& api,
-    uint8_t& next_ip_proto,
+    IpProtocol& next_ip_proto,
     int8_t& curr_layer)
 {
     if (curr_layer < 0 || curr_layer >= p->num_layers)
         return false;
 
-    const uint16_t proto = p->layers[curr_layer].prot_id;
-    const uint8_t ip_proto_max = std::numeric_limits<uint8_t>::max();
-    if ( (proto <= ip_proto_max) && is_ip6_extension((uint8_t)proto) )
+    if (is_ip6_extension(p->layers[curr_layer].prot_id))
     {
         const ip::IP6Extension* const ip6_ext =
             reinterpret_cast<const ip::IP6Extension*>(p->layers[curr_layer].start);
@@ -274,8 +296,8 @@ bool set_inner_ip_api(const Packet* const p,
 
         switch (lyr.prot_id)
         {
-        case ETHERTYPE_IPV4:
-        case IPPROTO_ID_IPIP:
+        case ProtocolId::ETHERTYPE_IPV4:
+        case ProtocolId::IPIP:
         {
             const ip::IP4Hdr* ip4h =
                 reinterpret_cast<const ip::IP4Hdr*>(lyr.start);
@@ -284,8 +306,8 @@ bool set_inner_ip_api(const Packet* const p,
             return true;
         }
 
-        case ETHERTYPE_IPV6:
-        case IPPROTO_ID_IPV6:
+        case ProtocolId::ETHERTYPE_IPV6:
+        case ProtocolId::IPV6:
         {
             const ip::IP6Hdr* ip6h =
                 reinterpret_cast<const ip::IP6Hdr*>(lyr.start);
@@ -294,18 +316,19 @@ bool set_inner_ip_api(const Packet* const p,
             return true;
         }
 
-        case IPPROTO_ID_HOPOPTS:
-        case IPPROTO_ID_DSTOPTS:
-        case IPPROTO_ID_ROUTING:
-        case IPPROTO_ID_FRAGMENT:
-        case IPPROTO_ID_AUTH:
-        case IPPROTO_ID_ESP:
-        case IPPROTO_ID_MOBILITY:
-        case IPPROTO_ID_NONEXT:
+        case ProtocolId::HOPOPTS:
+        case ProtocolId::DSTOPTS:
+        case ProtocolId::ROUTING:
+        case ProtocolId::FRAGMENT:
+        case ProtocolId::AUTH:
+        case ProtocolId::ESP:
+        case ProtocolId::MOBILITY_IPV6:
+        case ProtocolId::NONEXT:
             break;
 
         default:
-            next_ip_proto = lyr.prot_id;
+            if(is_ip_protocol(lyr.prot_id))
+                next_ip_proto = convert_protocolid_to_ipprotocol(lyr.prot_id);
         }
     }
     while (--curr_layer >= 0);
@@ -315,7 +338,7 @@ bool set_inner_ip_api(const Packet* const p,
 
 bool set_outer_ip_api(const Packet* const p,
     ip::IpApi& api,
-    uint8_t& ip_proto_next,
+    IpProtocol& ip_proto_next,
     int8_t& curr_layer)
 {
     if (set_outer_ip_api(p, api, curr_layer))
@@ -341,7 +364,7 @@ bool set_outer_ip_api(const Packet* const p,
             }
         }
 
-        ip_proto_next = p->layers[curr_layer].prot_id;
+        ip_proto_next = convert_protocolid_to_ipprotocol(p->layers[curr_layer].prot_id);
         return true;
     }
 
@@ -362,35 +385,36 @@ bool set_outer_ip_api(const Packet* const p,
 
         switch (lyr.prot_id)
         {
-        case ETHERTYPE_IPV4:
-        case IPPROTO_ID_IPIP:
+        case ProtocolId::ETHERTYPE_IPV4:
+        case ProtocolId::IPIP:
         {
             const ip::IP4Hdr* ip4h =
                 reinterpret_cast<const ip::IP4Hdr*>(lyr.start);
             api.set(ip4h);
             curr_layer++;
+            if(curr_layer >= num_layers)
+                return false;
             return true;
         }
-        case ETHERTYPE_IPV6:
-        case IPPROTO_ID_IPV6:
+        case ProtocolId::ETHERTYPE_IPV6:
+        case ProtocolId::IPV6:
         {
             const ip::IP6Hdr* ip6h =
                 reinterpret_cast<const ip::IP6Hdr*>(lyr.start);
             api.set(ip6h);
             curr_layer++;
+            if(curr_layer >= num_layers)
+                return false;
             return true;
         }
-            //default:
-            // don't care about this layer if its not IP.
+        default:
+            ; // don't care about this layer if its not IP.
         }
     }
     while (++curr_layer < num_layers);
 
     return false;
 }
-
-bool set_api_ip_embed_icmp(Packet* const p)
-{ return set_api_ip_embed_icmp(p, p->ptrs.ip_api); }
 
 bool set_api_ip_embed_icmp(const Packet* p, ip::IpApi& api)
 {
@@ -400,14 +424,14 @@ bool set_api_ip_embed_icmp(const Packet* p, ip::IpApi& api)
     {
         const Layer& lyr = p->layers[i];
 
-        if (lyr.prot_id == PROTO_IP_EMBEDDED_IN_ICMP4)
+        if (lyr.prot_id == ProtocolId::IP_EMBEDDED_IN_ICMP4)
         {
             const ip::IP4Hdr* ip4h =
                 reinterpret_cast<const ip::IP4Hdr*>(lyr.start);
             api.set(ip4h);
             return true;
         }
-        else if (lyr.prot_id == PROTO_IP_EMBEDDED_IN_ICMP6)
+        else if (lyr.prot_id == ProtocolId::IP_EMBEDDED_IN_ICMP6)
         {
             const ip::IP6Hdr* ip6h =
                 reinterpret_cast<const ip::IP6Hdr*>(lyr.start);
@@ -429,4 +453,4 @@ const udp::UDPHdr* get_udp_embed_icmp(const ip::IpApi& api)
 const icmp::ICMPHdr* get_icmp_embed_icmp(const ip::IpApi& api)
 { return reinterpret_cast<const icmp::ICMPHdr*>(api.ip_data()); }
 } // namespace layer
-
+} // namespace snort

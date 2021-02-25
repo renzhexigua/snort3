@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,29 +17,51 @@
 //--------------------------------------------------------------------------
 // ips_option.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "ips_option.h"
 
-#include <sys/types.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <errno.h>
+#include <cstring>
 
-#include "snort_types.h"
-#include "snort_debug.h"
-#include "hash/sfhashfcn.h"
+#include "hash/hash_key_operations.h"
+
+using namespace snort;
+
+static const char* s_buffer = nullptr;
+
+void IpsOption::set_buffer(const char* s)
+{ s_buffer = s; }
 
 //-------------------------------------------------------------------------
 
+IpsOption::IpsOption(const char* s, option_type_t t)
+{
+    name = s;
+    type = t;
+
+    switch ( t )
+    {
+    case RULE_OPTION_TYPE_BUFFER_SET: buffer = s_buffer = s; break;
+    case RULE_OPTION_TYPE_CONTENT:
+    case RULE_OPTION_TYPE_BUFFER_USE: buffer = s_buffer; break;
+    default: buffer = "n/a";
+    }
+}
+
 uint32_t IpsOption::hash() const
 {
-    uint32_t a=0, b=0, c=0;
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    uint32_t a = 0, b = 0, c = 0;
+    mix_str(a, b, c, get_name());
+    mix_str(a, b, c, get_buffer());
+    finalize(a, b, c);
     return c;
 }
 
 bool IpsOption::operator==(const IpsOption& ips) const
-{ return !strcmp(get_name(), ips.get_name()); }
+{
+    return !strcmp(get_name(), ips.get_name()) and
+        !strcmp(get_buffer(), ips.get_buffer());
+}
 

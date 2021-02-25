@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,15 +21,13 @@
 #include "config.h"
 #endif
 
-#include "snort_types.h"
-#include "snort_bounds.h"
-#include "protocols/packet.h"
-#include "snort_debug.h"
-#include "profiler.h"
 #include "framework/cursor.h"
 #include "framework/ips_option.h"
 #include "framework/module.h"
-#include "detection/detection_defines.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "pkt_data"
 
@@ -38,23 +36,20 @@ static THREAD_LOCAL ProfileStats pktDataPerfStats;
 class PktDataOption : public IpsOption
 {
 public:
-    PktDataOption() : IpsOption(s_name) { }
+    PktDataOption() : IpsOption(s_name, RULE_OPTION_TYPE_BUFFER_SET) { }
 
     CursorActionType get_cursor_type() const override
     { return CAT_SET_RAW; }
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 };
 
-int PktDataOption::eval(Cursor& c, Packet* p)
+IpsOption::EvalStatus PktDataOption::eval(Cursor& c, Packet* p)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(pktDataPerfStats);
+    RuleProfile profile(pktDataPerfStats);
 
     c.reset(p);
-
-    MODULE_PROFILE_END(pktDataPerfStats);
-    return DETECTION_OPTION_MATCH;
+    return MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -71,6 +66,9 @@ public:
 
     ProfileStats* get_profile() const override
     { return &pktDataPerfStats; }
+
+    Usage get_usage() const override
+    { return DETECT; }
 };
 
 //-------------------------------------------------------------------------

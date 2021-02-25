@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,11 +21,10 @@
 #include "config.h"
 #endif
 
-#include "framework/codec.h"
-#include "protocols/protocol_ids.h"
-#include "protocols/ipv6.h"
-#include "protocols/packet.h"
 #include "codecs/codec_module.h"
+#include "framework/codec.h"
+
+using namespace snort;
 
 // yes, macros are necessary. The API and class constructor require different strings.
 //
@@ -43,15 +42,14 @@ class Icmp6IpCodec : public Codec
 {
 public:
     Icmp6IpCodec() : Codec(ICMP6_IP_NAME) { }
-    ~Icmp6IpCodec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>&) override;
+    void get_protocol_ids(std::vector<ProtocolId>&) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
 };
 } // namespace
 
-void Icmp6IpCodec::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(PROTO_IP_EMBEDDED_IN_ICMP6); }
+void Icmp6IpCodec::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::IP_EMBEDDED_IN_ICMP6); }
 
 bool Icmp6IpCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
 {
@@ -60,7 +58,6 @@ bool Icmp6IpCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
     /* lay the IP struct over the raw data */
     const ip::IP6Hdr* ip6h = reinterpret_cast<const ip::IP6Hdr*>(raw.data);
 
-    /* do a little validation */
     if ( raw.len < ip::IP6_HEADER_LEN )
     {
         codec_event(codec, DECODE_ICMP_ORIG_IP_TRUNCATED);
@@ -83,10 +80,10 @@ bool Icmp6IpCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
         return false;
     }
 
-//    orig_frag_offset = ntohs(GET_ORIG_IPH_OFF(p));
-//    orig_frag_offset &= 0x1FFF;
+    // orig_frag_offset = ntohs(GET_ORIG_IPH_OFF(p));
+    // orig_frag_offset &= 0x1FFF;
 
-    // XXX NOT YET IMPLEMENTED - fragments inside ICMP payload
+    // FIXIT-L NOT YET IMPLEMENTED - fragments inside ICMP payload
 
     // since we know the protocol ID in this layer (and NOT the
     // next layer), set the correct protocol here.  Normally,
@@ -95,18 +92,19 @@ bool Icmp6IpCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
     // this case because I don't want this going to the TCP, UDP, or
     // ICMP codec. Therefore, doing a minor decode here.
 
-    // FIXIT-J L   Will fail to decode Ipv6 options
+    // FIXIT-M will fail to decode Ipv6 options
     switch (ip6h->next())
     {
-    case IPPROTO_TCP:     /* decode the interesting part of the header */
+    case IpProtocol::TCP:     /* decode the interesting part of the header */
         codec.proto_bits |= PROTO_BIT__TCP_EMBED_ICMP;
         break;
 
-    case IPPROTO_UDP:
+    case IpProtocol::UDP:
         codec.proto_bits |= PROTO_BIT__UDP_EMBED_ICMP;
         break;
 
-    case IPPROTO_ICMP:
+    //  FIXIT-M do we need to handle ICMPV6 here?
+    case IpProtocol::ICMPV4:
         codec.proto_bits |= PROTO_BIT__ICMP_EMBED_ICMP;
         break;
     default:
@@ -154,11 +152,11 @@ static const CodecApi icmp6_ip_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_icmp6_ip[] =
+#endif
 {
     &icmp6_ip_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_icmp6_ip = &icmp6_ip_api.base;
-#endif
 

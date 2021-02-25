@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -21,9 +21,7 @@
 #ifndef UTILS_DNET_HEADER_H
 #define UTILS_DNET_HEADER_H
 
-#ifdef HAVE_CONFIG_H
-# include "config.h"
-#endif
+// Provide the correct dnet interface
 
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -31,12 +29,11 @@
 #pragma clang diagnostic ignored "-Wflexible-array-extensions"
 #endif
 
-#if defined(__GNUC__)
+#if defined(__GNUC__) && !defined(__INTEL_COMPILER)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 #endif
 
-// Encoder FOO
 #ifdef HAVE_DUMBNET_H
 #include <dumbnet.h>
 #else
@@ -47,7 +44,7 @@
 #pragma clang diagnostic pop
 #endif
 
-#if defined(__GNUC__)
+#if defined(__GNUC__) && !defined(__INTEL_COMPILER)
 #pragma GCC diagnostic pop
 #endif
 

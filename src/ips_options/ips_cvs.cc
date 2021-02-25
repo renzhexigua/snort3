@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2007-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -35,29 +35,17 @@
 **
 */
 
-#include <stdio.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <ctype.h>
-#include <sys/types.h>
-#include <errno.h>
 
-#include "snort_types.h"
-#include "detection/treenodes.h"
-#include "protocols/packet.h"
-#include "parser.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "snort_bounds.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 static THREAD_LOCAL ProfileStats cvsPerfStats;
 
@@ -115,7 +103,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     CvsRuleOption config;
@@ -127,27 +115,24 @@ private:
 
 uint32_t CvsOption::hash() const
 {
-    uint32_t a,b,c;
-    const CvsRuleOption* data = &config;
+    uint32_t a = config.type;
+    uint32_t b = IpsOption::hash();
+    uint32_t c = 0;
 
-    a = data->type;
-    b = 0;
-    c = 0;
-
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool CvsOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    CvsOption& rhs = (CvsOption&)ips;
-    CvsRuleOption* left = (CvsRuleOption*)&config;
-    CvsRuleOption* right = (CvsRuleOption*)&rhs.config;
+    const CvsOption& rhs = (const CvsOption&)ips;
+    const CvsRuleOption* left = &config;
+    const CvsRuleOption* right = &rhs.config;
 
     if (left->type == right->type)
     {
@@ -157,26 +142,17 @@ bool CvsOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int CvsOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus CvsOption::eval(Cursor&, Packet* p)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
-    CvsRuleOption* cvs_rule_option = &config;
-
     if ( !p->has_tcp_data() )
-    {
-        return rval;
-    }
+        return NO_MATCH;
 
-    DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "CVS begin detection\n"); );
-
-    int ret = CvsDecode(p->data, p->dsize, cvs_rule_option);
+    int ret = CvsDecode(p->data, p->dsize, &config);
 
     if (ret == CVS_ALERT)
-    {
-        rval = DETECTION_OPTION_MATCH;
-    }
+        return MATCH;
 
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -187,7 +163,7 @@ static int CvsDecode(const uint8_t* data, uint16_t data_len,
     CvsRuleOption* cvs_rule_option)
 {
     const uint8_t* line, * end;
-    const uint8_t* eol = NULL, * eolm = NULL;
+    const uint8_t* eol = nullptr, * eolm = nullptr;
     CvsCommand command;
     int ret;
 
@@ -204,15 +180,8 @@ static int CvsDecode(const uint8_t* data, uint16_t data_len,
         CvsGetCommand(line, eolm, &command);
 
         /* shouldn't happen as long as line < end, but ... */
-        if (command.cmd_str == NULL)
+        if (command.cmd_str == nullptr)
             return CVS_NO_ALERT;
-
-        DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "CVS command\n"
-            "  comand: %.*s\n"
-            "argument: %.*s\n",
-            command.cmd_str_len, (char*)command.cmd_str,
-            command.cmd_arg == NULL ? 4 : command.cmd_arg_len,
-            command.cmd_arg == NULL ? "none" : (char*)command.cmd_arg); );
 
         switch (cvs_rule_option->type)
         {
@@ -288,15 +257,15 @@ static void CvsGetCommand(const uint8_t* line, const uint8_t* end, CvsCommand* c
 {
     const uint8_t* cmd_end;
 
-    if (cmd == NULL)
+    if (cmd == nullptr)
         return;
 
     /* no line, no command or args */
-    if (line == NULL)
+    if (line == nullptr)
     {
-        cmd->cmd_str = NULL;
+        cmd->cmd_str = nullptr;
         cmd->cmd_str_len = 0;
-        cmd->cmd_arg = NULL;
+        cmd->cmd_arg = nullptr;
         cmd->cmd_arg_len = 0;
 
         return;
@@ -305,7 +274,7 @@ static void CvsGetCommand(const uint8_t* line, const uint8_t* end, CvsCommand* c
     cmd->cmd_str = line;
 
     cmd_end = (const uint8_t*)memchr(line, CVS_COMMAND_SEPARATOR, end - line);
-    if (cmd_end != NULL)
+    if (cmd_end != nullptr)
     {
         cmd->cmd_str_len = cmd_end - line;
         cmd->cmd_arg = cmd_end + 1;
@@ -314,7 +283,7 @@ static void CvsGetCommand(const uint8_t* line, const uint8_t* end, CvsCommand* c
     else
     {
         cmd->cmd_str_len = end - line;
-        cmd->cmd_arg = NULL;
+        cmd->cmd_arg = nullptr;
         cmd->cmd_arg_len = 0;
     }
 }
@@ -340,7 +309,7 @@ static int CvsValidateEntry(const uint8_t* entry_arg, const uint8_t* end_arg)
 {
     int slashes = 0;
 
-    if ((entry_arg == NULL) || (end_arg == NULL))
+    if ((entry_arg == nullptr) || (end_arg == nullptr))
     {
         return CVS_ENTRY_VALID;
     }
@@ -360,8 +329,8 @@ static int CvsValidateEntry(const uint8_t* entry_arg, const uint8_t* end_arg)
         }
         if (*entry_arg != '/')
         {
-            entry_arg = (uint8_t*)memchr(entry_arg, '/', end_arg - entry_arg);
-            if (entry_arg == NULL)
+            entry_arg = (const uint8_t*)memchr(entry_arg, '/', end_arg - entry_arg);
+            if (entry_arg == nullptr)
                 break;
         }
 
@@ -387,8 +356,8 @@ static int CvsValidateEntry(const uint8_t* entry_arg, const uint8_t* end_arg)
 static void CvsGetEOL(const uint8_t* ptr, const uint8_t* end,
     const uint8_t** eol, const uint8_t** eolm)
 {
-    *eolm = (uint8_t*)memchr(ptr, CVS_COMMAND_DELIMITER, end - ptr);
-    if (*eolm == NULL)
+    *eolm = (const uint8_t*)memchr(ptr, CVS_COMMAND_DELIMITER, end - ptr);
+    if (*eolm == nullptr)
     {
         *eolm = end;
         *eol = end;
@@ -425,7 +394,11 @@ public:
     ProfileStats* get_profile() const override
     { return &cvsPerfStats; }
 
-    CvsRuleOption data;
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    CvsRuleOption data = {};
 };
 
 bool CvsModule::begin(const char*, int, SnortConfig*)
@@ -495,11 +468,11 @@ static const IpsApi cvs_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_cvs[] =
+#endif
 {
     &cvs_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_cvs = &cvs_api.base;
-#endif
 

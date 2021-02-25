@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2012-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,28 +16,62 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-/*
-** Author(s):  Hui Cao <huica@cisco.com>
-**
-** NOTES
-** 5.25.12 - Initial Source Code. Hui Cao
-*/
+
+// file_service.h author author Hui Cao <huica@cisco.com>
 
 #ifndef FILE_SERVICE_H
 #define FILE_SERVICE_H
 
-#include "libs/file_lib.h"
+// This provides a wrapper to start/stop file service
 
-/* Initialize file API, this must be called when snort restarts */
-void init_fileAPI(void);
+#include "file_api/file_policy.h"
+#include "main/snort_config.h"
+#include "main/snort_types.h"
+#include "mime/file_mime_config.h"
 
-void FileAPIPostInit(void);
+class FileEnforcer;
+class FileCache;
 
-/* Close file API, this must be called when snort exits */
-void close_fileAPI(void);
+namespace snort
+{
+class SO_PUBLIC FileService
+{
+public:
+    // This must be called when snort restarts
+    static void init();
 
-/* Get current file context */
-FileContext* get_current_file_context(Flow* flow);
+    // Called after permission is dropped
+    static void post_init(const SnortConfig*);
 
+    // Called during reload
+    static void verify_reload(const SnortConfig*);
+
+    // This must be called when snort exits
+    static void close();
+
+    static void thread_init();
+    static void thread_term();
+
+    static void enable_file_type();
+    static void enable_file_signature();
+    static void enable_file_capture();
+    static bool is_file_type_id_enabled() { return file_type_id_enabled; }
+    static bool is_file_signature_enabled() { return file_signature_enabled; }
+    static bool is_file_capture_enabled() { return file_capture_enabled; }
+    static bool is_file_service_enabled();
+    static int64_t get_max_file_depth();
+    static void reset_depths();
+
+    static FileCache* get_file_cache() { return file_cache; }
+    static DecodeConfig decode_conf;
+
+private:
+    static bool file_type_id_enabled;
+    static bool file_signature_enabled;
+    static bool file_capture_enabled;
+    static bool file_processing_initiated;
+    static FileCache* file_cache;
+};
+} // namespace snort
 #endif
 

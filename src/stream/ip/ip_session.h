@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,8 +20,7 @@
 #ifndef IP_SESSION_H
 #define IP_SESSION_H
 
-#include <sys/time.h>
-#include "flow/session.h"
+#include "stream/ip/ip_module.h"
 
 struct Fragment;
 struct FragEngine;
@@ -32,7 +31,7 @@ struct FragEngine;
 /* tracker for a fragmented packet set */
 struct FragTracker
 {
-    uint8_t protocol;      /* IP protocol */
+    IpProtocol ip_proto;      /* IP protocol */
 
     uint8_t ttl;           /* ttl used to detect evasions */
     uint8_t alerted;
@@ -46,7 +45,7 @@ struct FragTracker
                                 * last frag offset
                                 */
 
-    uint32_t frag_pkts;   /* nummber of frag pkts stored under this tracker */
+    uint32_t frag_pkts;   /* number of frag pkts stored under this tracker */
 
     struct timeval frag_time; /* time we started tracking this frag */
 
@@ -65,7 +64,7 @@ struct FragTracker
     FragEngine* engine;
 
     int ordinal;
-    int ipprotocol;
+
     int application_protocol;
     uint32_t frag_policy;
 
@@ -76,18 +75,21 @@ struct FragTracker
 class IpSession : public Session
 {
 public:
-    IpSession(Flow*);
+    IpSession(snort::Flow*);
+    ~IpSession() override;
 
-    bool setup(Packet*) override;
-    int process(Packet*) override;
+    bool setup(snort::Packet*) override;
+    int process(snort::Packet*) override;
     void clear() override;
 
-    bool add_alert(Packet*, uint32_t gid, uint32_t sid) override;
-    bool check_alerted(Packet*, uint32_t gid, uint32_t sid) override;
+    bool add_alert(snort::Packet*, uint32_t gid, uint32_t sid) override;
+    bool check_alerted(snort::Packet*, uint32_t gid, uint32_t sid) override;
 
 public:
     FragTracker tracker;
 };
+
+extern THREAD_LOCAL IpStats ip_stats;
 
 #endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -23,13 +23,10 @@
 #include "data/data_types/dt_var.h"
 #include "data/data_types/dt_comment.h"
 
-static inline Table* find_table(std::vector<Table*> vec, std::string name)
+static inline Table* find_table(std::vector<Table*> vec, const std::string& name)
 {
-    if (name.empty())
-        return nullptr;
-
     for ( auto* t : vec)
-        if (!name.compare(t->get_name()))
+        if (name == t->get_name())
             return t;
 
     return nullptr;
@@ -43,9 +40,18 @@ Table::Table(int d)
         Comments::CommentType::SINGLE_LINE);
 }
 
-Table::Table(std::string table_name, int d)
+Table::Table(const std::string& table_name, int d)
 {
     this->name = table_name;
+    this->depth = d;
+    this->comments = new Comments(d + 1,
+        Comments::CommentType::SINGLE_LINE);
+}
+
+Table::Table(const std::string& table_name, const std::string& key, int d)
+{
+    this->name = table_name;
+    this->key = key;
     this->depth = d;
     this->comments = new Comments(d + 1,
         Comments::CommentType::SINGLE_LINE);
@@ -58,6 +64,9 @@ Table::~Table()
 
     for ( Option* o : options)
         delete o;
+
+    for ( Variable* l: lists )
+        delete l;
 
     for ( Option* a : append_options)
         delete a;
@@ -84,7 +93,7 @@ Table* Table::open_table()
     return t;
 }
 
-Table* Table::open_table(std::string table_name)
+Table* Table::open_table(const std::string& table_name)
 {
     Table* t = find_table(tables, table_name);
 
@@ -96,7 +105,14 @@ Table* Table::open_table(std::string table_name)
     return t;
 }
 
-bool Table::add_option(std::string opt_name, int value)
+bool Table::add_option(const std::string& value)
+{
+    Option* o = new Option(value, depth + 1);
+    options.push_back(o);
+    return true;
+}
+
+bool Table::add_option(const std::string& opt_name, int value)
 {
     if (has_option(opt_name, value))
         return true;
@@ -106,7 +122,7 @@ bool Table::add_option(std::string opt_name, int value)
     return true;
 }
 
-bool Table::add_option(std::string opt_name, bool value)
+bool Table::add_option(const std::string& opt_name, bool value)
 {
     if (has_option(opt_name, value))
         return true;
@@ -116,7 +132,7 @@ bool Table::add_option(std::string opt_name, bool value)
     return true;
 }
 
-bool Table::add_option(std::string opt_name, std::string value)
+bool Table::add_option(const std::string& opt_name, const std::string& value)
 {
     if (has_option(opt_name, value))
         return true;
@@ -126,7 +142,7 @@ bool Table::add_option(std::string opt_name, std::string value)
     return true;
 }
 
-void Table::append_option(std::string opt_name, int value)
+void Table::append_option(const std::string& opt_name, int value)
 {
     if (!has_option(opt_name, value))
     {
@@ -135,7 +151,7 @@ void Table::append_option(std::string opt_name, int value)
     }
 }
 
-void Table::append_option(std::string opt_name, bool value)
+void Table::append_option(const std::string& opt_name, bool value)
 {
     if (!has_option(opt_name, value))
     {
@@ -144,7 +160,7 @@ void Table::append_option(std::string opt_name, bool value)
     }
 }
 
-void Table::append_option(std::string opt_name, std::string value)
+void Table::append_option(const std::string& opt_name, const std::string& value)
 {
     if (!has_option(opt_name, value))
     {
@@ -153,7 +169,7 @@ void Table::append_option(std::string opt_name, std::string value)
     }
 }
 
-bool Table::add_list(std::string list_name, std::string next_elem)
+bool Table::add_list(const std::string& list_name, const std::string& next_elem)
 {
     for (auto l : lists)
         if (l->get_name() == list_name)
@@ -164,20 +180,39 @@ bool Table::add_list(std::string list_name, std::string next_elem)
     return var->add_value(next_elem);
 }
 
-bool Table::has_option(const std::string opt_name)
+bool Table::has_option(const std::string& opt_name)
 {
     for (Option* o : options)
-        if (!opt_name.compare(o->get_name()))
+        if (opt_name == o->get_name())
             return true;
 
     for (Option* a : append_options)
-        if (!opt_name.compare(a->get_name()))
+        if (opt_name == a->get_name())
             return true;
 
     return false;
 }
 
-bool Table::has_option(Option opt)
+bool Table::get_option(const std::string& opt_name, std::string& value)
+{
+    for (Option* o : options)
+        if (opt_name == o->get_name())
+        {
+            value = o->get_value();
+            return true;
+        }
+
+    for (Option* a : append_options)
+        if (opt_name == a->get_name())
+        {
+            value = a->get_value();
+            return true;
+        }
+
+    return false;
+}
+
+bool Table::has_option(const Option& opt)
 {
     for (Option* o : options)
         if ( (*o) == opt)
@@ -190,71 +225,126 @@ bool Table::has_option(Option opt)
     return false;
 }
 
-bool Table::has_option(std::string opt_name, int val)
+bool Table::has_option(const std::string& opt_name, int val)
 {
     Option opt(opt_name, val, depth + 1);
     return has_option(opt);
 }
 
-bool Table::has_option(std::string opt_name, bool val)
+bool Table::has_option(const std::string& opt_name, bool val)
 {
     Option opt(opt_name, val, depth + 1);
     return has_option(opt);
 }
 
-bool Table::has_option(std::string opt_name, std::string val)
+bool Table::has_option(const std::string& opt_name, const std::string& val)
 {
     Option opt(opt_name, val, depth + 1);
     return has_option(opt);
 }
 
-void Table::add_comment(std::string c)
+void Table::add_comment(const std::string& c)
 {
     comments->add_sorted_text(c);
 }
 
 std::ostream& operator<<(std::ostream& out, const Table& t)
 {
-    std::string whitespace = "";
+    std::string whitespace;
 
     for (int i = 0; i < t.depth; i++)
         whitespace += "    ";
 
     if (!t.name.empty())
-        out << whitespace << t.name << " =" << std::endl;
-    out << whitespace << '{' << std::endl;
+    {
+        if ( t.print_whitespace )
+            out << whitespace;
 
-    if (!t.comments->empty() && !DataApi::is_quiet_mode())
-        out << (*t.comments) << std::endl;
+        out << t.name;
+
+        if ( !t.key.empty() )
+            out << "[\"" << t.key << "\"]";
+
+        out << (t.one_line ? " = " : " =\n");
+    }
+
+    out << (t.print_whitespace ? whitespace : "")
+        << (t.one_line ? "{ " : "{\n");
 
     // if we only want differences, don't print data
     if (!DataApi::is_difference_mode())
     {
         for (Option* o : t.options)
-            out << (*o) << ",\n";
+        {
+            o->set_print_whitespace(!t.one_line);
+            out << (*o) << (t.one_line ? ", " : ",\n");
+        }
 
         for (Variable* v : t.lists)
-            out << (*v) << ",\n";
+        {
+            v->set_print_whitespace(!t.one_line);
+            out << (*v) << (t.one_line ? ", " : ",\n");
+        }
 
         for (Table* sub_t : t.tables)
-            out << (*sub_t) << ",\n";
+        {
+            //If this table is one_lined, it may still print whitespace beforehand
+            //Don't print whitespace within the table if it's one_lined
+            sub_t->set_print_whitespace(!t.one_line);
+
+            if ( t.one_line )
+                sub_t->set_one_line(true);
+
+            out << (*sub_t) << (t.one_line ? ", " : ",\n");
+        }
     }
     else
     {
         for (Table* sub_t : t.tables)
+        {
             if (sub_t->has_differences())
-                out << (*sub_t) << ",\n";
+            {
+                //If this table is one_lined, it may still print whitespace beforehand
+                //Don't print whitespace within the table if it's one_lined
+                sub_t->set_print_whitespace(!t.one_line);
+
+                if ( t.one_line )
+                    sub_t->set_one_line(true);
+
+                out << (*sub_t) << (t.one_line ? ", " : ",\n");
+            }
+        }
     }
 
-    out << whitespace << "}";
+
+    if (!t.comments->empty() && !DataApi::is_quiet_mode())
+    {
+        // Comments need a new line regardless of one_line setting
+        // When one_line is off, this section is already starting on it's own line
+        if ( t.one_line )
+            out << "\n";
+
+        out << (*t.comments) << "\n";
+    }
+
+    if ( !t.one_line && t.print_whitespace )
+        out << whitespace;
+    out << "}";
 
     // Now, print all options which need to be appended/overwrite earlier options
     if (!t.append_options.empty())
     {
-        out << "\n";
+        if ( !t.one_line )
+            out << "\n";
 
         for (Option* a : t.append_options)
-            out << (*a) << "\n";
+        {
+            a->set_print_whitespace(!t.one_line);
+
+            out << (*a);
+            if ( !t.one_line )
+                out << "\n";
+        }
     }
 
     return out;

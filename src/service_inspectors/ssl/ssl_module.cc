@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -18,20 +18,21 @@
 
 // ssl_module.cc author Bhagyashree Bantwal <bbantwal@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "ssl_module.h"
 
-#include <assert.h>
-#include <sstream>
+#include <cassert>
 
-#include "parser.h"
-#include "ssl_inspector.h"
-
+using namespace snort;
 using namespace std;
 
-#define SSL_INVALID_CLIENT_HELLO_STR "Invalid Client HELLO after Server HELLO Detected"
-#define SSL_INVALID_SERVER_HELLO_STR "Invalid Server HELLO without Client HELLO Detected"
-#define SSL_HEARTBLEED_REQUEST_STR "Heartbeat Read Overrun Attempt Detected"
-#define SSL_HEARTBLEED_RESPONSE_STR "Large Heartbeat Response Detected"
+#define SSL_INVALID_CLIENT_HELLO_STR "invalid client HELLO after server HELLO detected"
+#define SSL_INVALID_SERVER_HELLO_STR "invalid server HELLO without client HELLO detected"
+#define SSL_HEARTBLEED_REQUEST_STR "heartbeat read overrun attempt detected"
+#define SSL_HEARTBLEED_RESPONSE_STR "large heartbeat response detected"
 
 static const Parameter s_params[] =
 {
@@ -73,7 +74,7 @@ const RuleMap* SslModule::get_rules() const
 { return ssl_rules; }
 
 const PegInfo* SslModule::get_pegs() const
-{ return simple_pegs; }
+{ return ssl_peg_names; }
 
 PegCount* SslModule::get_counts() const
 { return (PegCount*)&sslstats; }
@@ -84,12 +85,10 @@ ProfileStats* SslModule::get_profile() const
 bool SslModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("trust_servers") )
-    {
-        if (v.get_bool())
-            conf->flags |= SSLPP_TRUSTSERVER_FLAG;
-    }
+        conf->trustservers = v.get_bool();
+
     else if ( v.is("max_heartbeat_length") )
-        conf->max_heartbeat_len = v.get_long();
+        conf->max_heartbeat_len = v.get_uint16();
 
     else
         return false;
@@ -106,16 +105,8 @@ SSL_PROTO_CONF* SslModule::get_data()
 
 bool SslModule::begin(const char*, int, SnortConfig*)
 {
+    assert(!conf);
     conf = new SSL_PROTO_CONF;
-    conf->max_heartbeat_len = 0;
-    conf->flags = 0;
-    return true;
-}
-
-bool SslModule::end(const char*, int, SnortConfig*)
-{
-    SSL_InitGlobals();
-
     return true;
 }
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2011-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -19,15 +19,15 @@
 /*
 ** 9/7/2011 - Initial implementation ... Hui Cao <hcao@sourcefire.com>
 **
-** This is based on the original sfrt.h, but using the flat segment memory.
-** When allocating memory, it uses memory in the segment, and returns
-** the offset.
-** When accessing memory, it must use the base address and offset to
-** correctly refer to it.
 */
 
 #ifndef SFRT_FLAT_H
 #define SFRT_FLAT_H
+
+// This is based on the original sfrt.h, but using the flat segment memory.
+// When allocating memory, it uses memory in the segment, and returns the offset.
+// When accessing memory, it must use the base address and offset to
+// correctly refer to it.
 
 #include "utils/segment_mem.h"
 
@@ -74,10 +74,10 @@ table_flat_t* sfrt_flat_new(char table_flat_type, char ip_type,
     long data_size, uint32_t mem_cap);
 void sfrt_flat_free(TABLE_PTR table);
 
-GENERIC sfrt_flat_lookup(void* adr, table_flat_t* table);
-GENERIC sfrt_flat_dir8x_lookup(void* adr, table_flat_t* table);
+GENERIC sfrt_flat_lookup(const snort::SfIp* ip, table_flat_t* table);
+GENERIC sfrt_flat_dir8x_lookup(const snort::SfIp* ip, table_flat_t* table);
 
-int sfrt_flat_insert(void* adr, unsigned char len, INFO ptr, int behavior,
+int sfrt_flat_insert(snort::SfCidr* cidr, unsigned char len, INFO ptr, int behavior,
     table_flat_t* table, updateEntryInfoFunc updateEntry);
 uint32_t sfrt_flat_usage(table_flat_t* table);
 uint32_t sfrt_flat_num_entries(table_flat_t* table);

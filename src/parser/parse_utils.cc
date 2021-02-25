@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,16 +17,19 @@
 //--------------------------------------------------------------------------
 // parse_uitls.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "parse_utils.h"
 
-#include <assert.h>
-#include <ctype.h>
-#include <stdio.h>
-#include <string.h>
+#include <cassert>
+#include <cstring>
 
-#include "parser.h"
-#include "utils/util.h"
+#include "log/messages.h"
+#include "utils/util_cstring.h"
 
+using namespace snort;
 using namespace std;
 
 static inline int xton(int c)
@@ -65,29 +68,23 @@ bool parse_byte_code(const char* in, bool& negate, std::string& out)
             }
         // fall through
         case 1:
-            if ( c == '"' )
+            if ( c == '"' and in[len-1] == '"' )
+            {
+                --len;
                 state = 2;
+            }
             else if ( !isspace(c) )
                 ok = false;
             break;
         case 2:
-            if ( c == '\\' )
-                state = 3;
-
-            else if ( c == '|' )
+            if ( c == '|' )
             {
                 hex = 0;
                 nx = 0;
                 state = 4;
             }
-            else if ( c == '"' )
-                state = 9;
             else
                 out += c;
-            break;
-        case 3:
-            out += c;
-            state = 2;
             break;
         case 4:
             if ( c == '|' )
@@ -116,16 +113,12 @@ bool parse_byte_code(const char* in, bool& negate, std::string& out)
             else if ( !isspace(c) )
                 ok = false;
             break;
-        case 9:
-            if ( !isspace(c) )
-                ok = false;
-            break;
         default:
             assert(false);
         }
     }
     if ( !ok )
-        ParseError("invalid byte code at %d", idx);
+        ParseError("invalid byte code at %u", idx);
 
     return ok;
 }
@@ -133,7 +126,7 @@ bool parse_byte_code(const char* in, bool& negate, std::string& out)
 int parse_int(const char* data, const char* tag, int low, int high)
 {
     int32_t value = 0;
-    char* endptr = NULL;
+    char* endptr = nullptr;
 
     value = SnortStrtol(data, &endptr, 10);
 

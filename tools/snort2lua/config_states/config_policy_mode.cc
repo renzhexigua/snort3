@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class PolicyMode : public ConversionState
 {
 public:
     PolicyMode(Converter& c) : ConversionState(c) { }
-    virtual ~PolicyMode() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -44,20 +43,20 @@ bool PolicyMode::convert(std::istringstream& data_stream)
 
     if ( data_stream >> mode)
     {
-        table_api.open_table("ips");
+        cv.get_table_api().open_table("ips");
 
-        if ( !mode.compare("tap"))
+        if ( mode == "tap")
         {
-            table_api.add_option("mode", "tap");
+            cv.get_table_api().add_option("mode", "tap");
         }
-        else if ( !mode.compare("inline") )
+        else if ( mode == "inline" )
         {
-            table_api.add_option("mode", "inline");
+            cv.get_table_api().add_option("mode", "inline");
         }
-        else if ( !mode.compare("inline_test") )
+        else if ( mode == "inline_test" )
         {
-            table_api.add_diff_option_comment("inline_test", "inline-test");
-            table_api.add_option("mode", "inline-test");
+            cv.get_table_api().add_diff_option_comment("inline_test", "inline-test");
+            cv.get_table_api().add_option("mode", "inline-test");
         }
         else
         {
@@ -65,7 +64,7 @@ bool PolicyMode::convert(std::istringstream& data_stream)
             data_api.failed_conversion(data_stream, mode);
         }
 
-        table_api.close_table();
+        cv.get_table_api().close_table();
     }
 
     return retval;

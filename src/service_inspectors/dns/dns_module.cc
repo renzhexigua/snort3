@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -18,18 +18,21 @@
 
 // dns_module.cc author Bhagyashree Bantwal <bbantwal@cisco.com>
 
-#include "dns_module.h"
-#include <assert.h>
-#include <sstream>
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
+#include "dns_module.h"
+
+using namespace snort;
 using namespace std;
 
 #define DNS_EVENT_OBSOLETE_TYPES_STR \
-    "Obsolete DNS RR Types"
+    "obsolete DNS RR types"
 #define DNS_EVENT_EXPERIMENTAL_TYPES_STR \
-    "Experimental DNS RR Types"
+    "experimental DNS RR types"
 #define DNS_EVENT_RDATA_OVERFLOW_STR \
-    "DNS Client rdata txt Overflow"
+    "DNS client rdata txt overflow"
 
 static const Parameter s_params[] =
 {
@@ -56,7 +59,7 @@ const RuleMap* DnsModule::get_rules() const
 { return dns_rules; }
 
 const PegInfo* DnsModule::get_pegs() const
-{ return simple_pegs; }
+{ return dns_peg_names; }
 
 PegCount* DnsModule::get_counts() const
 { return (PegCount*)&dnsstats; }

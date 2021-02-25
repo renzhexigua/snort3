@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,22 +22,17 @@
 #include "config.h"
 #endif
 
-#include <ctype.h>
-#include <string.h>
-
-#include <algorithm>
-#include <iostream>
-
-#include "main/snort_types.h"
-#include "main/snort_config.h"
+#include "detection/ips_context.h"
+#include "detection/signature.h"
+#include "events/event.h"
 #include "framework/logger.h"
 #include "framework/module.h"
-#include "protocols/packet.h"
-#include "protocols/packet_manager.h"
-#include "detection/signature.h"
-#include "log/text_log.h"
 #include "log/log_text.h"
-#include "utils/stats.h"
+#include "log/text_log.h"
+#include "main/snort_config.h"
+#include "protocols/packet_manager.h"
+
+using namespace snort;
 
 static THREAD_LOCAL TextLog* test_file = nullptr;
 
@@ -72,9 +67,12 @@ public:
     bool set(const char*, Value&, SnortConfig*) override;
     bool begin(const char*, int, SnortConfig*) override;
 
+    Usage get_usage() const override
+    { return GLOBAL; }
+
 public:
-    bool print_to_file;
-    uint8_t flags;
+    bool print_to_file = false;
+    uint8_t flags = 0;
 };
 } // namespace
 
@@ -116,7 +114,7 @@ public:
 
     void open() override;
     void close() override;
-    virtual void log(Packet*, const char*, Event*) override;
+    void log(Packet*, const char*, Event*) override;
 
 public:
     std::string file;
@@ -140,19 +138,17 @@ void CodecLogger::close()
 
 void CodecLogger::log(Packet* p, const char* msg, Event* e)
 {
-    TextLog_Print(test_file, "pkt:" STDu64 "\t", pc.total_from_daq);
+    TextLog_Print(test_file, "pkt:" STDu64 "\t", p->context->packet_number);
 
-    if (e != NULL)
+    if (e != nullptr)
     {
-        TextLog_Print(test_file, "    gid:%lu    sid:%lu    rev:%lu\t",
-            (unsigned long)e->sig_info->generator,
-            (unsigned long)e->sig_info->id,
-            (unsigned long)e->sig_info->rev);
+        TextLog_Print(test_file, "    gid:%u    sid:%u    rev:%u\t",
+            e->sig_info->gid, e->sig_info->sid, e->sig_info->rev);
     }
 
     if (flags & ALERT_FLAG_MSG)
     {
-        if (msg != NULL)
+        if (msg != nullptr)
             TextLog_Print(test_file, "%s\t", msg);
     }
 
@@ -160,7 +156,7 @@ void CodecLogger::log(Packet* p, const char* msg, Event* e)
     PacketManager::log_protocols(test_file, p);
     TextLog_NewLine(test_file);
 
-    if ( p->dsize and SnortConfig::output_app_data() )
+    if ( p->dsize and p->context->conf->output_app_data() )
         LogNetData(test_file, p->data, p->dsize, p);
 
     TextLog_NewLine(test_file);
@@ -176,7 +172,7 @@ static Module* mod_ctor()
 static void mod_dtor(Module* m)
 { delete m; }
 
-static Logger* codec_log_ctor(SnortConfig*, Module* mod)
+static Logger* codec_log_ctor(Module* mod)
 { return new CodecLogger((LogCodecModule*)mod); }
 
 static void codec_log_dtor(Logger* p)
@@ -201,5 +197,9 @@ static const LogApi log_codecs_api =
     codec_log_dtor
 };
 
-const BaseApi* log_codecs = &log_codecs_api.base;
+const BaseApi* log_codecs[] =
+{
+    &log_codecs_api.base,
+    nullptr
+};
 

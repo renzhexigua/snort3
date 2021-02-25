@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -19,12 +19,7 @@
 #ifndef PROCESS_H
 #define PROCESS_H
 
-#include <signal.h>
-
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-#include <stdint.h>
+// process oriented services like signal handling, heap info, etc.
 
 enum PigSignal
 {
@@ -43,14 +38,16 @@ PigSignal get_pending_signal();
 const char* get_signal_name(PigSignal);
 
 void init_signals();
+void term_signals();
+void install_oops_handler();
+void remove_oops_handler();
 void help_signals();
 
 void daemonize();
 void set_quick_exit(bool);
-void init_main_thread_sig();
+void set_main_thread();
 
 void trim_heap();
-void log_malloc_info();
 
 #endif
 

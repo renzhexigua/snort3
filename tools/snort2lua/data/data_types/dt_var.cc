@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,23 +21,21 @@
 #include "data/dt_data.h"
 #include "helpers/s2l_util.h"
 
-Variable::Variable(std::string name, int depth)
+Variable::Variable(const std::string& name, int depth)
 {
     this->name = name;
     this->depth = depth;
 }
 
-Variable::Variable(std::string name)
+Variable::~Variable()
 {
-    this->name = name;
-    this->depth = 0;
+    for (VarData* v : vars)
+        delete v;
 }
-
-Variable::~Variable() { }
 
 std::string Variable::get_value(DataApi* ld)
 {
-    std::string variable = "";
+    std::string variable;
     bool first_line = true;
 
     for (auto v : vars)
@@ -54,6 +52,14 @@ std::string Variable::get_value(DataApi* ld)
     }
 
     return variable;
+}
+
+void Variable::set_value(const std::string& val, bool quoted)
+{
+    VarData* vd = new VarData();
+    vd->type = quoted ? VarType::STRING : VarType::VARIABLE;
+    vd->data = val;
+    vars.push_back(vd);
 }
 
 // does this need a new variable?
@@ -83,7 +89,7 @@ bool Variable::add_value(std::string elem)
         }
     }
 
-    if (s.front() == '$')
+    if (!s.empty() and s.front() == '$')
     {
         // add a space between strings
         if (!vars.empty())
@@ -110,7 +116,7 @@ bool Variable::add_value(std::string elem)
         VarData* vd = new VarData();
         vd->type = VarType::STRING;
 
-        // if the previous variable was a symbol, we need a space seperator.
+        // if the previous variable was a symbol, we need a space separator.
         if (!vars.empty())
             s.insert(0, " ");
 
@@ -126,7 +132,7 @@ bool Variable::add_value(std::string elem)
 
 static inline void print_newline(std::ostream& out,
     std::size_t& count,
-    std::string whitespace)
+    const std::string& whitespace)
 {
     out << "\n" << whitespace;
     count = whitespace.size();
@@ -134,20 +140,26 @@ static inline void print_newline(std::ostream& out,
 
 std::ostream& operator<<(std::ostream& out, const Variable& var)
 {
-    std::string whitespace;
+    std::string whitespace =
+        ( var.print_whitespace && var.depth ) ? std::string(var.depth * 4, ' ') : "";
+
     bool first_var = true;
     std::size_t count = 0;
 
-    for (int i = 0; i < var.depth; i++)
-        whitespace += "    ";
+    if ( !var.comment.empty() )
+        out << whitespace << "-- " << var.comment << "\n";
 
     out << whitespace << var.name << " = ";
-    count += whitespace.size() + var.name.size() + 3;
-    whitespace += "    ";
+
+    count += whitespace.size();
+    count += var.name.size() + 3;
+
+    if ( var.print_whitespace )
+        whitespace += "    ";
 
     for (Variable::VarData* v : var.vars)
     {
-        // keeping lines below max_line_length charachters
+        // keeping lines below max_line_length characters
         if ((count + 4) > var.max_line_length)
             print_newline(out, count, whitespace);
 
@@ -161,15 +173,15 @@ std::ostream& operator<<(std::ostream& out, const Variable& var)
             first_var = false;
 
         // print string
-        if (v->type == Variable::VarType::VARIABLE)
+        if ( v->type == Variable::VarType::VARIABLE )
         {
-            if (v->data.size() + count > var.max_line_length)
+            if ( var.print_whitespace && v->data.size() + count > var.max_line_length )
                 print_newline(out, count, whitespace);
 
             out << v->data;
             count += v->data.size();
         }
-        else if ((count + v->data.size()) < var.max_line_length)
+        else if ( !var.print_whitespace || (count + v->data.size()) < var.max_line_length )
         {
             out << "'" << v->data << "'";
             count += v->data.size() + 2;

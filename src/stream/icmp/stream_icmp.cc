@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,14 +21,15 @@
 #include "config.h"
 #endif
 
-#include <assert.h>
-
 #include "stream_icmp.h"
+
+#include "log/messages.h"
+
+#include "icmp_ha.h"
 #include "icmp_module.h"
 #include "icmp_session.h"
-#include "log/messages.h"
-#include "framework/inspector.h"
-#include "protocols/packet.h"
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // helpers
@@ -39,12 +40,6 @@ StreamIcmpConfig::StreamIcmpConfig()
     session_timeout = 30;
 }
 
-static void icmp_show(StreamIcmpConfig* pc)
-{
-    LogMessage("Stream ICMP config:\n");
-    LogMessage("    Timeout: %d seconds\n", pc->session_timeout);
-}
-
 //-------------------------------------------------------------------------
 // inspector stuff
 //-------------------------------------------------------------------------
@@ -53,12 +48,12 @@ class StreamIcmp : public Inspector
 {
 public:
     StreamIcmp(StreamIcmpConfig*);
-    ~StreamIcmp();
+    ~StreamIcmp() override;
 
-    void show(SnortConfig*) override;
-    void eval(Packet*) override;
+    void show(const SnortConfig*) const override;
+    NORETURN_ASSERT void eval(Packet*) override;
 
-private:
+public:
     StreamIcmpConfig* config;
 };
 
@@ -72,15 +67,24 @@ StreamIcmp::~StreamIcmp()
     delete config;
 }
 
-void StreamIcmp::show(SnortConfig*)
+void StreamIcmp::show(const SnortConfig*) const
 {
-    icmp_show(config);
+    if ( !config )
+        return;
+
+    ConfigLogger::log_value("session_timeout", config->session_timeout);
 }
 
-void StreamIcmp::eval(Packet*)
+NORETURN_ASSERT void StreamIcmp::eval(Packet*)
 {
     // session::process() instead
     assert(false);
+}
+
+StreamIcmpConfig* get_icmp_cfg(Inspector* ins)
+{
+    assert(ins);
+    return ((StreamIcmp*)ins)->config;
 }
 
 //-------------------------------------------------------------------------
@@ -100,6 +104,16 @@ static Inspector* icmp_ctor(Module* m)
 {
     StreamIcmpModule* mod = (StreamIcmpModule*)m;
     return new StreamIcmp(mod->get_data());
+}
+
+static void icmp_tinit()
+{
+    IcmpHAManager::tinit();
+}
+
+static void icmp_tterm()
+{
+    IcmpHAManager::tterm();
 }
 
 static void icmp_dtor(Inspector* p)
@@ -122,13 +136,13 @@ static const InspectApi icmp_api =
         mod_dtor
     },
     IT_STREAM,
-    (unsigned)PktType::ICMP,
+    PROTO_BIT__ICMP,
     nullptr, // buffers
     nullptr, // service
     nullptr, // init
     nullptr, // term
-    nullptr, // tinit
-    nullptr, // tterm
+    icmp_tinit, // tinit
+    icmp_tterm, // tterm
     icmp_ctor,
     icmp_dtor,
     icmp_ssn,

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -15,19 +15,33 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-//
 
 #ifndef IMAP_CONFIG_H
 #define IMAP_CONFIG_H
 
-#include "file_api/file_api.h"
+// Configuration for Imap service inspector
+
+#include "mime/file_mime_process.h"
 
 struct IMAP_PROTO_CONF
 {
-    uint32_t memcap;
-    DecodeConfig decode_conf;
-    MAIL_LogConfig log_config;
+    snort::DecodeConfig decode_conf;
+    snort::MailLogConfig log_config;
 };
 
-#endif
+struct ImapStats
+{
+    PegCount packets;
+    PegCount sessions;
+    PegCount concurrent_sessions;
+    PegCount max_concurrent_sessions;
+    PegCount start_tls;
+    PegCount ssl_search_abandoned;
+    PegCount ssl_srch_abandoned_early;
+    snort::MimeStats mime_stats;
+};
 
+extern const PegInfo imap_peg_names[];
+extern THREAD_LOCAL ImapStats imapstats;
+
+#endif

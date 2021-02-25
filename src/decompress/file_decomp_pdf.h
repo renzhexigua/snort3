@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,50 +17,58 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+// file_decomp_pdf.h author Ed Borgoyn eborgoyn@sourcefire.com
+
 #ifndef FILE_DECOMP_PDF_H
 #define FILE_DECOMP_PDF_H
 
 #include <zlib.h>
 
+#include "file_decomp.h"
+
 #define ELEM_BUF_LEN        (12)
 #define FILTER_SPEC_BUF_LEN (40)
 #define PARSE_STACK_LEN     (12)
 
-typedef enum pdf_states
+/* FIXIT-RC Other than the API prototypes, the other parts of this header should
+   be private to file_decomp_pdf. */
+
+enum fd_PDF_States
 {
     PDF_STATE_NEW,
-    PDF_STATE_LOCATE_STREAM,     /* Found sig bytes, looking for dictionary & stream*/
+    PDF_STATE_LOCATE_STREAM,     /* Found sig bytes, looking for dictionary & stream */
     PDF_STATE_INIT_STREAM,       /* Init stream */
     PDF_STATE_PROCESS_STREAM     /* Processing stream */
-} fd_PDF_States;
+};
 
-typedef struct fd_PDF_Parse_Stack_s
+struct fd_PDF_Parse_Stack_t
 {
     uint8_t State;
     uint8_t Sub_State;
-} fd_PDF_Parse_Stack_t, * fd_PDF_Parse_Stack_p_t;
+};
 
-typedef struct fd_PDF_Parse_s
+struct fd_PDF_Parse_t
 {
-    uint8_t Dict_Nesting_Cnt;
-    uint8_t Elem_Buf[ELEM_BUF_LEN];
-    uint8_t Elem_Index;
-    uint8_t Filter_Spec_Buf[FILTER_SPEC_BUF_LEN+1];
-    uint8_t Filter_Spec_Index;
-    fd_PDF_Parse_Stack_t Parse_Stack[PARSE_STACK_LEN];
-    uint8_t Parse_Stack_Index;
+    const uint8_t* xref_tok;
     uint32_t Obj_Number;
     uint32_t Gen_Number;
+    uint8_t Parse_Stack_Index;
     uint8_t Sub_State;
     uint8_t State;
-} fd_PDF_Parse_t, * fd_PDF_Parse_p_t;
+    uint8_t Dict_Nesting_Cnt;
+    uint8_t Elem_Index;
+    uint8_t Filter_Spec_Index;
+    uint8_t Elem_Buf[ELEM_BUF_LEN];
+    uint8_t Filter_Spec_Buf[FILTER_SPEC_BUF_LEN+1];
+    fd_PDF_Parse_Stack_t Parse_Stack[PARSE_STACK_LEN];
+};
 
-typedef struct fd_PDF_Deflate_s
+struct fd_PDF_Deflate_t
 {
     z_stream StreamDeflate;
-} fd_PDF_Deflate_t;
+};
 
-typedef struct fd_PDF_s
+struct fd_PDF_t
 {
     union
     {
@@ -69,15 +77,18 @@ typedef struct fd_PDF_s
     fd_PDF_Parse_t Parse;
     uint8_t Decomp_Type;
     uint8_t State;
-} fd_PDF_t, * fd_PDF_p_t;
+};
 
 /* API Functions */
 
-fd_status_t File_Decomp_Init_PDF(fd_session_p_t SessionPtr);
+/* Init the PDF decompressor */
+fd_status_t File_Decomp_Init_PDF(fd_session_t*);
 
-fd_status_t File_Decomp_End_PDF(fd_session_p_t SessionPtr);
+/* Run the incremental PDF file parser/decompressor */
+fd_status_t File_Decomp_PDF(fd_session_t*);
 
-fd_status_t File_Decomp_PDF(fd_session_p_t SessionPtr);
+/* End the decompressor */
+fd_status_t File_Decomp_End_PDF(fd_session_t*);
 
 #endif
 

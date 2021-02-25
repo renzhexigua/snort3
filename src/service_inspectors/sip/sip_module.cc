@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -18,40 +18,43 @@
 
 // sip_module.cc author Bhagyashree Bantwal <bbantwal@cisco.com>
 
-#include "sip_module.h"
-#include "util.h"
-#include <assert.h>
-#include <sstream>
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
+#include "sip_module.h"
+
+#include <cassert>
+
+using namespace snort;
 using namespace std;
 
-#define SIP_EVENT_MAX_SESSIONS_STR       "Maximum sessions reached"
-#define SIP_EVENT_EMPTY_REQUEST_URI_STR  "Empty request URI"
+#define SIP_EVENT_EMPTY_REQUEST_URI_STR  "empty request URI"
 #define SIP_EVENT_BAD_URI_STR            "URI is too long"
-#define SIP_EVENT_EMPTY_CALL_ID_STR      "Empty call-Id"
+#define SIP_EVENT_EMPTY_CALL_ID_STR      "empty call-Id"
 #define SIP_EVENT_BAD_CALL_ID_STR        "Call-Id is too long"
 #define SIP_EVENT_BAD_CSEQ_NUM_STR       "CSeq number is too large or negative"
-#define SIP_EVENT_BAD_CSEQ_NAME_STR      "Request name in CSeq is too long"
-#define SIP_EVENT_EMPTY_FROM_STR         "Empty From header"
+#define SIP_EVENT_BAD_CSEQ_NAME_STR      "request name in CSeq is too long"
+#define SIP_EVENT_EMPTY_FROM_STR         "empty From header"
 #define SIP_EVENT_BAD_FROM_STR           "From header is too long"
-#define SIP_EVENT_EMPTY_TO_STR           "Empty To header"
+#define SIP_EVENT_EMPTY_TO_STR           "empty To header"
 #define SIP_EVENT_BAD_TO_STR             "To header is too long"
-#define SIP_EVENT_EMPTY_VIA_STR          "Empty Via header"
+#define SIP_EVENT_EMPTY_VIA_STR          "empty Via header"
 #define SIP_EVENT_BAD_VIA_STR            "Via header is too long"
-#define SIP_EVENT_EMPTY_CONTACT_STR      "Empty Contact"
-#define SIP_EVENT_BAD_CONTACT_STR        "Contact is too long"
-#define SIP_EVENT_BAD_CONTENT_LEN_STR    "Content length is too large or negative"
-#define SIP_EVENT_MULTI_MSGS_STR         "Multiple SIP messages in a packet"
-#define SIP_EVENT_MISMATCH_CONTENT_LEN_STR        "Content length mismatch"
-#define SIP_EVENT_INVALID_CSEQ_NAME_STR           "Request name is invalid"
+#define SIP_EVENT_EMPTY_CONTACT_STR      "empty Contact"
+#define SIP_EVENT_BAD_CONTACT_STR        "contact is too long"
+#define SIP_EVENT_BAD_CONTENT_LEN_STR    "content length is too large or negative"
+#define SIP_EVENT_MULTI_MSGS_STR         "multiple SIP messages in a packet"
+#define SIP_EVENT_MISMATCH_CONTENT_LEN_STR        "content length mismatch"
+#define SIP_EVENT_INVALID_CSEQ_NAME_STR           "request name is invalid"
 #define SIP_EVENT_AUTH_INVITE_REPLAY_ATTACK_STR   "Invite replay attack"
-#define SIP_EVENT_AUTH_INVITE_DIFF_SESSION_STR    "Illegal session information modification"
-#define SIP_EVENT_BAD_STATUS_CODE_STR     "Response status code is not a 3 digit number"
-#define SIP_EVENT_EMPTY_CONTENT_TYPE_STR  "Empty Content-type header"
+#define SIP_EVENT_AUTH_INVITE_DIFF_SESSION_STR    "illegal session information modification"
+#define SIP_EVENT_BAD_STATUS_CODE_STR     "response status code is not a 3 digit number"
+#define SIP_EVENT_EMPTY_CONTENT_TYPE_STR  "empty Content-type header"
 #define SIP_EVENT_INVALID_VERSION_STR     "SIP version is invalid"
-#define SIP_EVENT_MISMATCH_METHOD_STR     "Mismatch in METHOD of request and the CSEQ header"
-#define SIP_EVENT_UNKOWN_METHOD_STR       "Method is unknown"
-#define SIP_EVENT_MAX_DIALOGS_IN_A_SESSION_STR "Maximum dialogs within a session reached"
+#define SIP_EVENT_MISMATCH_METHOD_STR     "mismatch in METHOD of request and the CSEQ header"
+#define SIP_EVENT_UNKOWN_METHOD_STR       "method is unknown"
+#define SIP_EVENT_MAX_DIALOGS_IN_A_SESSION_STR "maximum dialogs within a session reached"
 
 #define default_methods "invite cancel ack  bye register options"
 
@@ -69,7 +72,7 @@ static const Parameter s_params[] =
     { "max_content_len", Parameter::PT_INT, "0:65535", "1024",
       "maximum content length of the message body" },
 
-    { "max_dialogs", Parameter::PT_INT, "1:4194303", "4",
+    { "max_dialogs", Parameter::PT_INT, "1:max32", "4",
       "maximum number of dialogs within one stream session" },
 
     { "max_from_len", Parameter::PT_INT, "0:65535", "256",
@@ -77,9 +80,6 @@ static const Parameter s_params[] =
 
     { "max_requestName_len", Parameter::PT_INT, "0:65535", "20",
       "maximum request name field size" },
-
-    { "max_sessions", Parameter::PT_INT, "1024:4194303", "10000",
-      "maximum number of sessions that can be allocated" },
 
     { "max_to_len", Parameter::PT_INT, "0:65535", "256",
       "maximum to field size" },
@@ -91,14 +91,13 @@ static const Parameter s_params[] =
       "maximum via field size" },
 
     { "methods", Parameter::PT_STRING, nullptr, default_methods,
-      "list of methods to check in sip messages" },
+      "list of methods to check in SIP messages" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
 
 static const RuleMap sip_rules[] =
 {
-    { SIP_EVENT_MAX_SESSIONS, SIP_EVENT_MAX_SESSIONS_STR },
     { SIP_EVENT_EMPTY_REQUEST_URI, SIP_EVENT_EMPTY_REQUEST_URI_STR },
     { SIP_EVENT_BAD_URI, SIP_EVENT_BAD_URI_STR },
     { SIP_EVENT_EMPTY_CALL_ID, SIP_EVENT_EMPTY_CALL_ID_STR },
@@ -129,18 +128,44 @@ static const RuleMap sip_rules[] =
     { 0, nullptr }
 };
 
-THREAD_LOCAL SIP_Stats sip_stats;
+THREAD_LOCAL SipStats sip_stats;
 
 static const PegInfo sip_pegs[] =
 {
-    { "sessions", "total sessions" },
-    { "events", "events generated" },
-    { "dialogs", "total dialogs" },
-    { "ignored channels", "total channels ignored" },
-    { "ignored sessions", "total sessions ignored" },
-    { "requests", "total requests" },
-    { "responses", "total responses" },
-    { nullptr, nullptr }
+    { CountType::SUM, "packets", "total packets" },
+    { CountType::SUM, "sessions", "total sessions" },
+    { CountType::NOW, "concurrent_sessions", "total concurrent SIP sessions" },
+    { CountType::MAX, "max_concurrent_sessions", "maximum concurrent SIP sessions" },
+    { CountType::SUM, "events", "events generated" },
+    { CountType::SUM, "dialogs", "total dialogs" },
+    { CountType::SUM, "ignored_channels", "total channels ignored" },
+    { CountType::SUM, "ignored_sessions", "total sessions ignored" },
+    { CountType::SUM, "total_requests", "total requests" },
+    { CountType::SUM, "invite", "invite" },
+    { CountType::SUM, "cancel", "cancel" },
+    { CountType::SUM, "ack", "ack" },
+    { CountType::SUM, "bye", "bye" },
+    { CountType::SUM, "register", "register" },
+    { CountType::SUM, "options", "options" },
+    { CountType::SUM, "refer", "refer" },
+    { CountType::SUM, "subscribe", "subscribe" },
+    { CountType::SUM, "update", "update" },
+    { CountType::SUM, "join", "join" },
+    { CountType::SUM, "info", "info" },
+    { CountType::SUM, "message", "message" },
+    { CountType::SUM, "notify", "notify" },
+    { CountType::SUM, "prack", "prack" },
+    { CountType::SUM, "total_responses", "total responses" },
+    { CountType::SUM, "code_1xx", "1xx" },
+    { CountType::SUM, "code_2xx", "2xx" },
+    { CountType::SUM, "code_3xx", "3xx" },
+    { CountType::SUM, "code_4xx", "4xx" },
+    { CountType::SUM, "code_5xx", "5xx" },
+    { CountType::SUM, "code_6xx", "6xx" },
+    { CountType::SUM, "code_7xx", "7xx" },
+    { CountType::SUM, "code_8xx", "8xx" },
+    { CountType::SUM, "code_9xx", "9xx" },
+    { CountType::END, nullptr, nullptr }
 };
 
 //-------------------------------------------------------------------------
@@ -173,37 +198,34 @@ ProfileStats* SipModule::get_profile() const
 bool SipModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("ignore_call_channel") )
-        conf->ignoreChannel  = 1;
+        conf->ignoreChannel = v.get_bool();
 
     else if ( v.is("max_call_id_len") )
-        conf->maxCallIdLen = v.get_long();
+        conf->maxCallIdLen = v.get_uint16();
 
     else if ( v.is("max_contact_len") )
-        conf->maxContactLen = v.get_long();
+        conf->maxContactLen = v.get_uint16();
 
     else if ( v.is("max_content_len") )
-        conf->maxContentLen = v.get_long();
+        conf->maxContentLen = v.get_uint16();
 
     else if ( v.is("max_dialogs") )
-        conf->maxNumDialogsInSession = v.get_long();
+        conf->maxNumDialogsInSession = v.get_uint32();
 
     else if ( v.is("max_from_len") )
-        conf->maxFromLen = v.get_long();
+        conf->maxFromLen = v.get_uint16();
 
     else if ( v.is("max_requestName_len") )
-        conf->maxRequestNameLen = v.get_long();
-
-    else if ( v.is("max_sessions") )
-        conf->maxNumSessions = v.get_long();
+        conf->maxRequestNameLen = v.get_uint16();
 
     else if ( v.is("max_to_len") )
-        conf->maxToLen = v.get_long();
+        conf->maxToLen = v.get_uint16();
 
     else if ( v.is("max_uri_len") )
-        conf->maxUriLen = v.get_long();
+        conf->maxUriLen = v.get_uint16();
 
     else if ( v.is("max_via_len") )
-        conf->maxViaLen = v.get_long();
+        conf->maxViaLen = v.get_uint16();
 
     else if ( v.is("methods") )
         sip_methods = v.get_string();
@@ -223,23 +245,13 @@ SIP_PROTO_CONF* SipModule::get_data()
 
 bool SipModule::begin(const char*, int, SnortConfig*)
 {
+    assert(!conf);
     conf = new SIP_PROTO_CONF;
-    conf->ignoreChannel  = 0;
-    conf->maxNumSessions = 10000;
-    conf->maxNumDialogsInSession = 4;
-    conf->maxUriLen = 256;
-    conf->maxCallIdLen = 256;
-    conf->maxRequestNameLen = 20;
-    conf->maxFromLen = 256;
-    conf->maxToLen = 256;
-
-    conf->maxViaLen = 1024;
-    conf->maxContactLen = 256;
-    conf->maxContentLen = 1024;
 
     conf->methodsConfig = SIP_METHOD_NULL;
-    conf->methods = NULL;
+    conf->methods = nullptr;
     sip_methods = default_methods;
+
     return true;
 }
 

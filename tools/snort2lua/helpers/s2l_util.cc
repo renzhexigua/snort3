@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,20 +17,17 @@
 //--------------------------------------------------------------------------
 // s2l_util.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
-#include <sstream>
-#include <algorithm>
-#include <functional>
-#include <cctype>
-#include <locale>
-#include <sys/stat.h>
-#include <iostream>
-#include <string>
-#include <cstring>
-#include <sstream>
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
-#include "helpers/s2l_util.h"
+#include "s2l_util.h"
+
+#include <sys/stat.h>
+
+#include <algorithm>
+
 #include "conversion_state.h"
-#include "data/dt_data.h"
 #include "data/data_types/dt_table.h"
 
 namespace util
@@ -51,22 +48,44 @@ std::vector<std::string>& split(const std::string& s,
 
 const ConvertMap* find_map(
     const std::vector<const ConvertMap*>& map,
-    const std::string& keyword)
+    const std::string& keyword,
+    bool strict_case)
 {
     for (const ConvertMap* p : map)
-        if (p->keyword.compare(0, p->keyword.size(), keyword) == 0)
-            return p;
+    {
+        if (strict_case)
+        {
+            if (p->keyword.compare(0, p->keyword.size(), keyword) == 0)
+                return p;
+        }
+        else
+        {
+            if (case_compare(p->keyword, keyword))
+                return p;
+        }
+    }
 
     return nullptr;
 }
 
 const std::unique_ptr<const ConvertMap>& find_map(
     const std::vector<std::unique_ptr<const ConvertMap> >& map,
-    const std::string& keyword)
+    const std::string& keyword,
+    bool strict_case)
 {
     for (auto& p : map)
-        if (p->keyword.compare(0, p->keyword.size(), keyword) == 0)
-            return p;
+    {
+        if (strict_case)
+        {
+            if (p->keyword.compare(0, p->keyword.size(), keyword) == 0)
+                return p;
+        }
+        else
+        {
+            if (case_compare(p->keyword, keyword))
+                return p;
+        }
+    }
 
     static std::unique_ptr<const ConvertMap> np(nullptr);
     return np;
@@ -78,7 +97,7 @@ Table* find_table(const std::vector<Table*>& vec, const std::string& name)
         return nullptr;
 
     for ( auto* t : vec)
-        if (!name.compare(t->get_name()))
+        if (name == t->get_name())
             return t;
 
     return nullptr;
@@ -103,6 +122,21 @@ std::string& trim(std::string& s)
     return ltrim(rtrim(s));
 }
 
+std::string& trim_quotes(std::string& s)
+{
+    if(s.length() < 2)
+        return s;
+
+    if((s.front() == '"' and s.back() == '"') or
+       (s.front() == '\'' and s.back() == '\''))
+    {
+        s.erase(0,1);
+        s.pop_back();
+    }
+
+    return s;
+}
+
 std::string& sanitize_lua_string(std::string& s)
 {
     std::size_t found = s.find("]]");
@@ -121,18 +155,18 @@ std::string& sanitize_lua_string(std::string& s)
     return s;
 }
 
-std::size_t get_substr_length(std::string str, std::size_t max_length)
+std::size_t get_substr_length(const std::string& str, std::size_t max_length)
 {
     std::size_t str_len;
 
     if (str.size() < max_length)
         return str.size();
 
-    str_len = str.rfind(" ", max_length);
+    str_len = str.rfind(' ', max_length);
 
     if (str_len == std::string::npos)
     {
-        str_len = str.find(" ");
+        str_len = str.find(' ');
 
         if (str_len == std::string::npos)
             return str.size();
@@ -142,16 +176,16 @@ std::size_t get_substr_length(std::string str, std::size_t max_length)
 
 bool get_string(std::istringstream& stream,
     std::string& option,
-    const std::string delimeters)
+    const std::string& delimiters)
 {
-    if (delimeters.empty() || !stream.good())
+    if (delimiters.empty() || !stream.good())
     {
         option = std::string();
         return false;
     }
-    else if (delimeters.size() == 1)
+    else if (delimiters.size() == 1)
     {
-        std::getline(stream, option, delimeters[0]);
+        std::getline(stream, option, delimiters[0]);
         trim(option);
         return !option.empty();
     }
@@ -164,18 +198,18 @@ bool get_string(std::istringstream& stream,
         while (stream.good() && option.empty())
         {
             pos = stream.tellg();
-            std::getline(stream, option, delimeters[0]);
+            std::getline(stream, option, delimiters[0]);
         }
 
-        // find the first non-delimeter charachter
-        const std::size_t first_char = option.find_first_not_of(delimeters);
+        // find the first non-delimiter character
+        const std::size_t first_char = option.find_first_not_of(delimiters);
 
-        // if there are no charachters between a delimeter, empty string. return false
+        // if there are no characters between a delimiter, empty string. return false
         if (first_char == std::string::npos)
             return false;
 
-        // find the first delimeter after the first non-delimeter
-        std::size_t first_delim = option.find_first_of(delimeters, first_char);
+        // find the first delimiter after the first non-delimiter
+        std::size_t first_delim = option.find_first_of(delimiters, first_char);
 
         if (first_delim == std::string::npos)
             first_delim = option.size();    // set value to take proper substr
@@ -214,70 +248,20 @@ std::string get_rule_option_args(std::istringstream& stream)
     do
     {
         std::getline(stream, tmp, ';');
+
+        if (tmp.empty())
+            break;
+
         args += tmp + ";";
     }
     while (tmp.back() == '\\');
 
     // semicolon will be added when printing
-    args.pop_back();
+    if (!args.empty())
+        args.pop_back();
+
     trim(args);
     return args;
-}
-
-std::string rule_option_find_val(std::istringstream& data_stream,
-    std::string opt_name)
-{
-    std::string rule_keyword;
-    std::string val = std::string();
-    const std::streamoff curr_pos = data_stream.tellg();
-
-    if (curr_pos == -1)
-        data_stream.clear();
-
-    data_stream.seekg(0);
-    std::getline(data_stream, rule_keyword, '(');
-    std::streamoff tmp_pos = data_stream.tellg();
-
-    // This loop is a near duplicate of set_next_rule_state.
-    while (std::getline(data_stream, rule_keyword, ':'))
-    {
-        std::size_t semi_colon_pos = rule_keyword.find(';');
-        if (semi_colon_pos != std::string::npos)
-        {
-            // found an option without a colon, so set stream
-            // to semi-colon
-            std::istringstream::off_type off = 1 +
-                (std::streamoff)(tmp_pos) + (std::streamoff)(semi_colon_pos);
-            data_stream.seekg(off);
-            rule_keyword = rule_keyword.substr(0, semi_colon_pos);
-        }
-
-        // now, lets get the next option.
-        util::trim(rule_keyword);
-
-        if (!rule_keyword.compare(opt_name))
-        {
-            // Get the value if there is one!
-            if (semi_colon_pos == std::string::npos)
-                val = util::get_rule_option_args(data_stream);
-
-            break;
-        }
-
-        if (semi_colon_pos == std::string::npos)
-            std::getline(data_stream, rule_keyword, ';');
-
-        tmp_pos = data_stream.tellg();
-    }
-
-    // reset the original state
-    if (curr_pos == -1)
-        data_stream.setstate(std::ios::eofbit);
-    else
-        data_stream.clear();
-
-    data_stream.seekg(curr_pos);
-    return val;
 }
 
 bool file_exists(const std::string& name)
@@ -286,14 +270,23 @@ bool file_exists(const std::string& name)
     return (stat (name.c_str(), &buffer) == 0);
 }
 
+bool is_regular_file(std::string& path)
+{
+    struct stat s;
+
+    if (stat(path.c_str(), &s) == 0)
+        return (s.st_mode & S_IFREG);
+
+    return false;
+}
+
 bool case_compare(std::string arg1, std::string arg2)
 {
     std::transform(arg1.begin(), arg1.end(), arg1.begin(), ::tolower);
     std::transform(arg2.begin(), arg2.end(), arg2.begin(), ::tolower);
 
-    if (!arg1.compare(arg2))
+    if (arg1 == arg2)
         return true;
     return false;
 }
 } // namespace util
-

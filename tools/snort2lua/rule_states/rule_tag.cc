@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,8 +21,8 @@
 
 #include "conversion_state.h"
 #include "helpers/converter.h"
-#include "rule_states/rule_api.h"
 #include "helpers/s2l_util.h"
+#include "rule_api.h"
 
 namespace rules
 {
@@ -32,8 +32,7 @@ class Tag : public ConversionState
 {
 public:
     Tag(Converter& c) : ConversionState(c) { }
-    virtual ~Tag() { }
-    virtual bool convert(std::istringstream& data);
+    bool convert(std::istringstream& data) override;
 };
 } // namespace
 
@@ -42,11 +41,6 @@ bool Tag::convert(std::istringstream& data_stream)
     std::string args;
     std::string value;
     std::string type;
-    int seconds = 0;
-    int bytes = 0;
-    int packets = 0;
-    bool is_host = false;
-    bool valid = true;
 
     args = util::get_rule_option_args(data_stream);
     std::istringstream arg_stream(args);
@@ -59,10 +53,16 @@ bool Tag::convert(std::istringstream& data_stream)
     }
     else
     {
-        if (!value.compare("host"))
+        int seconds = 0;
+        int bytes = 0;
+        int packets = 0;
+        bool is_host = false;
+        bool valid = true;
+
+        if (value == "host")
             is_host = true;
 
-        else if (!value.compare("session"))
+        else if (value == "session")
             is_host = false;
 
         else
@@ -84,7 +84,7 @@ bool Tag::convert(std::istringstream& data_stream)
                     {
                         opt_val = std::stoi(value);
                     }
-                    catch (std::exception e)
+                    catch (std::exception &e)
                     {
                         rule_api.bad_rule(data_stream, "can't convert " + value + ":" + e.what());
                         valid = false;
@@ -97,13 +97,13 @@ bool Tag::convert(std::istringstream& data_stream)
             }
             else
             {
-                if (!value.compare("seconds"))
+                if (value == "seconds")
                     seconds = opt_val;
 
-                else if (!value.compare("bytes"))
+                else if (value == "bytes")
                     bytes = opt_val;
 
-                else if (!value.compare("packets"))
+                else if (value == "packets")
                     packets = opt_val;
 
                 else
@@ -114,10 +114,10 @@ bool Tag::convert(std::istringstream& data_stream)
 
         if (is_host)
         {
-            if (!value.compare("src"))
+            if (value == "src")
                 type = "host_src";
 
-            else if (!value.compare("dst"))
+            else if (value == "dst")
                 type = "host_dst";
 
             else
@@ -130,7 +130,7 @@ bool Tag::convert(std::istringstream& data_stream)
         {
             type = "session";
 
-            if (!value.compare("exclusive"))
+            if (value == "exclusive")
                 rule_api.add_comment("tag: [,exclusive] is currently unsupported");
         }
 

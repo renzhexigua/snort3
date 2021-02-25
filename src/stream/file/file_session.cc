@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,37 +17,40 @@
 //--------------------------------------------------------------------------
 // file_session.cc author Russ Combs <rucombs@cisco.com>
 
-#include "file_session.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include "stream_file.h"
-#include "file_module.h"
-#include "file_api/file_api.h"
-#include "perf_monitor/perf.h"
-#include "time/profiler.h"
+#include "file_session.h"
+
+#include "detection/detection_engine.h"
+#include "file_api/file_flows.h"
+#include "memory/memory_cap.h"
 #include "packet_io/sfdaq.h"
-#include "detection/detection_util.h"
+#include "profiler/profiler_defs.h"
+#include "protocols/packet.h"
+#include "target_based/snort_protocols.h"
+
+#include "stream_file.h"
+
+using namespace snort;
 
 #define DECODE_PDU (DECODE_SOF | DECODE_EOF)
 
-THREAD_LOCAL ProfileStats file_ssn_stats;
+static THREAD_LOCAL ProfileStats file_ssn_stats;
 
 //-------------------------------------------------------------------------
 // FileSession methods
 //-------------------------------------------------------------------------
 
-FileSession::FileSession(Flow* flow) : Session(flow) { }
+FileSession::FileSession(Flow* f) : Session(f)
+{ memory::MemoryCap::update_allocations(sizeof(*this)); }
 
-FileSession::~FileSession() { }
+FileSession::~FileSession()
+{ memory::MemoryCap::update_deallocations(sizeof(*this)); }
 
 bool FileSession::setup(Packet*)
 {
-    // FIXIT file context is null here
-    //const char* s = DAQ_GetInterfaceSpec();
-    //file_api->set_file_name(p->flow, (uint8_t*)s, strlen(s));
     return true;
 }
 
@@ -69,14 +72,22 @@ static FilePosition position(Packet* p)
 
 int FileSession::process(Packet* p)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(file_ssn_stats);
+    Profile profile(file_ssn_stats);
 
+    p->flow->ssn_state.snort_protocol_id = SNORT_PROTO_FILE;
     StreamFileConfig* c = get_file_cfg(p->flow->ssn_server);
-    file_api->file_process(p->flow, (uint8_t*)p->data, p->dsize, position(p), c->upload, false);
-    set_file_data((uint8_t*)p->data, p->dsize);
 
-    MODULE_PROFILE_END(file_ssn_stats);
+    FileFlows* file_flows = FileFlows::get_file_flows(p->flow);
+
+    if (file_flows &&
+        file_flows->file_process(p, p->data, p->dsize, position(p), c->upload))
+    {
+        const char* file_name = SFDAQ::get_input_spec();
+        if (file_name)
+            file_flows->set_file_name((const uint8_t*)file_name, strlen(file_name));
+    }
+    set_file_data(p->data, p->dsize);
+
     return 0;
 }
 

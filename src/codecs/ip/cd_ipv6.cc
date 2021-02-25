@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,22 +22,19 @@
 #include "config.h"
 #endif
 
-#include <arpa/inet.h>
-#include <limits>
+#include <daq.h>
+#include <daq_dlt.h>
 
-#include "protocols/ipv6.h"
 #include "codecs/codec_module.h"
 #include "framework/codec.h"
-#include "stream/stream_api.h"
-#include "main/snort_config.h"
-#include "packet_io/active.h"
-#include "protocols/protocol_ids.h"
-#include "protocols/packet_manager.h"
 #include "log/text_log.h"
-#include "sfip/sf_ip.h"
+#include "main/snort_config.h"
+
+using namespace snort;
 
 #define CD_IPV6_NAME "ipv6"
-#define CD_IPV6_HELP "support for Internet protocol v6"
+#define CD_IPV6_HELP_STR "support for Internet protocol v6"
+#define CD_IPV6_HELP ADD_DLT(CD_IPV6_HELP_STR, DLT_IPV6)
 
 namespace
 {
@@ -45,10 +42,10 @@ static const RuleMap ipv6_rules[] =
 {
     { DECODE_IPV6_MIN_TTL, "IPv6 packet below TTL limit" },
     { DECODE_IPV6_IS_NOT, "IPv6 header claims to not be IPv6" },
-    { DECODE_IPV6_TRUNCATED_EXT, "IPV6 truncated extension header" },
-    { DECODE_IPV6_TRUNCATED, "IPV6 truncated header" },
-    { DECODE_IPV6_DGRAM_LT_IPHDR, "IP dgm len < IP Hdr len" },
-    { DECODE_IPV6_DGRAM_GT_CAPLEN, "IP dgm len > captured len" },
+    { DECODE_IPV6_TRUNCATED_EXT, "IPv6 truncated extension header" },
+    { DECODE_IPV6_TRUNCATED, "IPv6 truncated header" },
+    { DECODE_IPV6_DGRAM_LT_IPHDR, "IPv6 datagram length < header field" },
+    { DECODE_IPV6_DGRAM_GT_CAPLEN, "IPv6 datagram length > captured length" },
     { DECODE_IPV6_DST_ZERO, "IPv6 packet with destination address ::0" },
     { DECODE_IPV6_SRC_MULTICAST, "IPv6 packet with multicast source address" },
     { DECODE_IPV6_DST_RESERVED_MULTICAST,
@@ -68,18 +65,20 @@ static const RuleMap ipv6_rules[] =
     { DECODE_IPV6_BAD_OPT_LEN,
       "IPv6 header includes an option which is too big for the containing header" },
     { DECODE_IPV6_UNORDERED_EXTENSIONS, "IPv6 packet includes out-of-order extension headers" },
-    { DECODE_IP6_ZERO_HOP_LIMIT, "IPV6 packet has zero hop limit" },
-    { DECODE_IPV6_ISATAP_SPOOF, "BAD-TRAFFIC ISATAP-addressed IPv6 traffic spoofing attempt" },
+    { DECODE_IP6_ZERO_HOP_LIMIT, "IPv6 packet has zero hop limit" },
+    { DECODE_IPV6_ISATAP_SPOOF, "ISATAP-addressed IPv6 traffic spoofing attempt" },
     { DECODE_IPV6_BAD_FRAG_PKT, "bogus fragmentation packet, possible BSD attack" },
-    { DECODE_IPV6_ROUTE_ZERO, "IPV6 routing type 0 extension header" },
-    { DECODE_IP6_EXCESS_EXT_HDR, "too many IP6 extension headers" },
+    { DECODE_IPV6_ROUTE_ZERO, "IPv6 routing type 0 extension header" },
+    { DECODE_IP6_EXCESS_EXT_HDR, "too many IPv6 extension headers" },
+    { DECODE_MIPV6_BAD_PAYLOAD_PROTO,
+      "IPv6 mobility header includes an invalid value for the 'payload protocol' field" },
     { 0, nullptr }
 };
 
-class Ipv6Module : public CodecModule
+class Ipv6Module : public BaseCodecModule
 {
 public:
-    Ipv6Module() : CodecModule(CD_IPV6_NAME, CD_IPV6_HELP) { }
+    Ipv6Module() : BaseCodecModule(CD_IPV6_NAME, CD_IPV6_HELP) { }
 
     const RuleMap* get_rules() const override
     { return ipv6_rules; }
@@ -89,12 +88,12 @@ class Ipv6Codec : public Codec
 {
 public:
     Ipv6Codec() : Codec(CD_IPV6_NAME) { }
-    ~Ipv6Codec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_data_link_type(std::vector<int>&) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
     bool encode(const uint8_t* const raw_in, const uint16_t raw_len,
-        EncState&, Buffer&) override;
+        EncState&, Buffer&, Flow*) override;
     void update(const ip::IpApi&, const EncodeFlags, uint8_t* raw_pkt,
         uint16_t lyr_len, uint32_t& updated_len) override;
     void format(bool reverse, uint8_t* raw_pkt, DecodeData& snort) override;
@@ -114,10 +113,15 @@ private:
  *************************   CLASS FUNCTIONS ************************
  ********************************************************************/
 
-void Ipv6Codec::get_protocol_ids(std::vector<uint16_t>& v)
+void Ipv6Codec::get_data_link_type(std::vector<int>& v)
 {
-    v.push_back(ETHERTYPE_IPV6);
-    v.push_back(IPPROTO_ID_IPV6);
+    v.emplace_back(DLT_IPV6);
+}
+
+void Ipv6Codec::get_protocol_ids(std::vector<ProtocolId>& v)
+{
+    v.emplace_back(ProtocolId::ETHERTYPE_IPV6);
+    v.emplace_back(ProtocolId::IPV6);
 }
 
 bool Ipv6Codec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
@@ -145,7 +149,7 @@ bool Ipv6Codec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
         return false;
     }
 
-    if ( snort_conf->hit_ip_maxlayers(codec.ip_layer_cnt) )
+    if ( codec.conf->hit_ip_maxlayers(codec.ip_layer_cnt) )
     {
         codec_event(codec, DECODE_IP_MULTIPLE_ENCAPSULATION);
         return false;
@@ -180,23 +184,44 @@ bool Ipv6Codec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
 
     if ( snort.ip_api.is_ip4() )
     {
-        /*  If Teredo or GRE seen, this is not an 4in6 tunnel */
+        /* If the previous layer was not IP-in-IP, this is not a 6-in-4 tunnel */
         if ( codec.codec_flags & CODEC_NON_IP_TUNNEL )
             codec.codec_flags &= ~CODEC_NON_IP_TUNNEL;
-        else if ( SnortConfig::tunnel_bypass_enabled(TUNNEL_6IN4) )
-            Active::set_tunnel_bypass();
+        else if ( codec.conf->tunnel_bypass_enabled(TUNNEL_6IN4) )
+            codec.tunnel_bypass = true;
+    }
+    else if (snort.ip_api.is_ip6())
+    {
+        /* If the previous layer was not IP-in-IP, this is not a 6-in-6 tunnel */
+        if ( codec.codec_flags & CODEC_NON_IP_TUNNEL )
+            codec.codec_flags &= ~CODEC_NON_IP_TUNNEL;
+        else if (codec.conf->tunnel_bypass_enabled(TUNNEL_6IN6))
+            codec.tunnel_bypass = true;
     }
 
     IPV6CheckIsatap(ip6h, snort, codec); // check for isatap before overwriting the ip_api.
 
     snort.ip_api.set(ip6h);
+    // update to real IP when needed
+    const DAQ_NAPTInfo_t* napti = (const DAQ_NAPTInfo_t*) daq_msg_get_meta(raw.daq_msg, DAQ_PKT_META_NAPT_INFO);
+    if (napti && codec.ip_layer_cnt == 1)
+    {
+        SfIp real_src;
+        SfIp real_dst;
+        real_src.set(&napti->src_addr, daq_napt_info_src_addr_family(napti));
+        real_dst.set(&napti->dst_addr, daq_napt_info_dst_addr_family(napti));
+        snort.ip_api.update(real_src, real_dst);
+    }
 
     IPV6MiscTests(snort, codec);
     CheckIPV6Multicast(ip6h, codec);
 
+    if (ip6h->is_valid_next_header() == false)
+        codec_event(codec, DECODE_IPV6_BAD_NEXT_HEADER);
+
     const_cast<uint32_t&>(raw.len) = ip6h->len() + ip::IP6_HEADER_LEN;
     snort.set_pkt_type(PktType::IP);
-    codec.next_prot_id = ip6h->next();
+    codec.next_prot_id = (ProtocolId)ip6h->next();
     codec.lyr_len = ip::IP6_HEADER_LEN;
     codec.curr_ip6_extension = 0;
     codec.ip6_extension_count = 0;
@@ -212,7 +237,7 @@ void Ipv6Codec::IPV6CheckIsatap(const ip::IP6Hdr* const ip6h,
     const CodecData& codec)
 {
     /* Only check for IPv6 over IPv4 */
-    if (snort.ip_api.is_ip4() && snort.ip_api.get_ip4h()->proto() == IPPROTO_ID_IPV6)
+    if (snort.ip_api.is_ip4() && snort.ip_api.get_ip4h()->proto() == IpProtocol::IPV6)
     {
         uint32_t isatap_interface_id = ntohl(ip6h->ip6_src.u6_addr32[2]) & 0xFCFFFFFF;
 
@@ -220,53 +245,40 @@ void Ipv6Codec::IPV6CheckIsatap(const ip::IP6Hdr* const ip6h,
            fe80:0000:0000:0000:0000:5efe, followed by the IPv4 address. */
         if (isatap_interface_id == 0x00005EFE)
         {
-            if (snort.ip_api.get_src()->ip32[0] != ip6h->ip6_src.u6_addr32[3])
+            if (snort.ip_api.get_src()->get_ip4_value() != ip6h->ip6_src.u6_addr32[3])
                 codec_event(codec, DECODE_IPV6_ISATAP_SPOOF);
         }
     }
 }
 
-/* Function: IPV6MiscTests(Packet *p)
- *
- * Purpose: A bunch of IPv6 decoder alerts
- *
- * Arguments: p => the Packet to check
- *
- * Returns: void function
- */
 void Ipv6Codec::IPV6MiscTests(const DecodeData& snort, const CodecData& codec)
 {
-    const sfip_t* ip_src = snort.ip_api.get_src();
-    const sfip_t* ip_dst = snort.ip_api.get_dst();
+    const SfIp* ip_src = snort.ip_api.get_src();
+    const SfIp* ip_dst = snort.ip_api.get_dst();
     /*
      * Some IP Header tests
      * Land Attack(same src/dst ip)
      * Loopback (src or dst in 127/8 block)
      * Modified: 2/22/05-man for High Endian Architecture.
-     *
-     * some points in the code assume an IP of 0.0.0.0 matches anything, but
-     * that is not so here.  The sfip_compare makes that assumption for
-     * compatibility, but sfip_contains does not.  Hence, sfip_contains
-     * is used here in the interrim. */
-    if ( sfip_contains(ip_src, ip_dst) == SFIP_CONTAINS)
+     */
+    if (ip_src->fast_eq6(*ip_dst))
     {
         codec_event(codec, DECODE_BAD_TRAFFIC_SAME_SRCDST);
     }
 
-    if (sfip_is_loopback(ip_src) || sfip_is_loopback(ip_dst))
+    if (ip_src->is_loopback() || ip_dst->is_loopback())
     {
         codec_event(codec, DECODE_BAD_TRAFFIC_LOOPBACK);
     }
 
     /* Other decoder alerts for IPv6 addresses
        Added: 5/24/10 (Snort 2.9.0) */
-    if (!sfip_is_set(ip_dst))
+    if (!ip_dst->is_set())
     {
         codec_event(codec, DECODE_IPV6_DST_ZERO);
     }
 }
 
-/* Check for multiple IPv6 Multicast-related alerts */
 void Ipv6Codec::CheckIPV6Multicast(const ip::IP6Hdr* const ip6h, const CodecData& codec)
 {
     ip::MulticastScope multicast_scope;
@@ -459,10 +471,9 @@ void Ipv6Codec::CheckIPV6Multicast(const ip::IP6Hdr* const ip6h, const CodecData
         {
             return; // IETF consensus
         }
-        else if ((ntohl(ip6h->ip6_dst.u6_addr32[3]) >= 0x80000000) &&
-            (ntohl(ip6h->ip6_dst.u6_addr32[3]) <= 0xFFFFFFFF))
+        else if (ntohl(ip6h->ip6_dst.u6_addr32[3]) >= 0x80000000)
         {
-            return; // Dynamiclly allocated by hosts when needed
+            return; // Dynamically allocated by hosts when needed
         }
         else
         {
@@ -530,8 +541,8 @@ void Ipv6Codec::log(TextLog* const text_log, const uint8_t* raw_pkt,
 {
     const ip::IP6Hdr* const ip6h = reinterpret_cast<const ip::IP6Hdr*>(raw_pkt);
 
-    // FIXIT-L  -->  This does NOT obfuscate correctly
-    if (SnortConfig::obfuscate())
+    // FIXIT-RC this does NOT obfuscate correctly
+    if (SnortConfig::get_conf()->obfuscate())
     {
         TextLog_Print(text_log, "x:x:x:x::x:x:x:x -> x:x:x:x::x:x:x:x");
     }
@@ -562,7 +573,7 @@ void Ipv6Codec::log(TextLog* const text_log, const uint8_t* raw_pkt,
  ******************************************************************/
 
 bool Ipv6Codec::encode(const uint8_t* const raw_in, const uint16_t /*raw_len*/,
-    EncState& enc, Buffer& buf)
+    EncState& enc, Buffer& buf, Flow*)
 {
     if (!buf.allocate(sizeof(ip::IP6Hdr)))
         return false;
@@ -595,8 +606,8 @@ bool Ipv6Codec::encode(const uint8_t* const raw_in, const uint16_t /*raw_len*/,
     ipvh_out->ip6_vtf = htonl(ntohl(hi->ip6_vtf) & 0xFFF00000);
     ipvh_out->ip6_payload_len = htons(buf.size() - sizeof(ip::IP6Hdr));
 
-    enc.next_proto = IPPROTO_ID_IPV6;
-    enc.next_ethertype = ETHERTYPE_IPV6;
+    enc.next_proto = IpProtocol::IPV6;
+    enc.next_ethertype = ProtocolId::ETHERTYPE_IPV6;
     return true;
 }
 
@@ -611,7 +622,6 @@ void Ipv6Codec::update(const ip::IpApi&, const EncodeFlags flags,
     // in such case we do not modify the packet length.
     if ( (flags & UPD_MODIFIED) && !(flags & UPD_RESIZED) )
     {
-        // FIXIT-M -- this worked in Snort.  In Snort++, will this be accurate?
         updated_len = ntohs(h->ip6_payload_len) + ip::IP6_HEADER_LEN;
     }
     else
@@ -681,11 +691,11 @@ static const CodecApi ipv6_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_ipv6[] =
+#endif
 {
     &ipv6_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_ipv6 = &ipv6_api.base;
-#endif
 

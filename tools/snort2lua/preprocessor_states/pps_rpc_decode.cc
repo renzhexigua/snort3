@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -33,8 +33,8 @@ class RpcDecode : public ConversionState
 {
 public:
     RpcDecode(Converter& c);
-    virtual ~RpcDecode();
-    virtual bool convert(std::istringstream& data_stream);
+    ~RpcDecode() override;
+    bool convert(std::istringstream& data_stream) override;
 
 private:
     bool converted_args;
@@ -50,8 +50,9 @@ RpcDecode::~RpcDecode()
 {
     if (!converted_args)
     {
-        Binder bind(table_api);
+        auto& bind = cv.make_binder();
         bind.set_when_proto("tcp");
+        bind.set_when_role("server");
         bind.add_when_port("111");
         bind.add_when_port("32271");
         bind.set_use_type("rpc_decode");
@@ -68,7 +69,7 @@ bool RpcDecode::convert(std::istringstream& data_stream)
     std::string keyword;
 
     // adding the binder entry
-    Binder bind(table_api);
+    auto& bind = cv.make_binder();
     bind.set_when_proto("tcp");
     bind.set_use_type("rpc_decode");
 
@@ -76,20 +77,21 @@ bool RpcDecode::convert(std::istringstream& data_stream)
 
     while (data_stream >> keyword)
     {
-        if (!keyword.compare("no_alert_multiple_requests"))
+        if (keyword == "no_alert_multiple_requests")
             table_api.add_deleted_comment("no_alert_multiple_requests");
 
-        else if (!keyword.compare("alert_fragments"))
+        else if (keyword == "alert_fragments")
             table_api.add_deleted_comment("alert_fragments");
 
-        else if (!keyword.compare("no_alert_large_fragments"))
+        else if (keyword == "no_alert_large_fragments")
             table_api.add_deleted_comment("no_alert_large_fragments");
 
-        else if (!keyword.compare("no_alert_incomplete"))
+        else if (keyword == "no_alert_incomplete")
             table_api.add_deleted_comment("no_alert_incomplete");
 
         else if (isdigit(keyword[0]))
         {
+            bind.set_when_role("server");
             bind.add_when_port(keyword);
             ports_set = true;
         }
@@ -102,6 +104,7 @@ bool RpcDecode::convert(std::istringstream& data_stream)
 
     if (!ports_set)
     {
+        bind.set_when_role("server");
         bind.add_when_port("111");
         bind.add_when_port("32271");
     }

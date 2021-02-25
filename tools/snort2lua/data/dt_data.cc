@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -18,26 +18,30 @@
 // dt_data.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
 #include "dt_data.h"
-#include "helpers/s2l_util.h"
+
+#include <algorithm>
+#include <cstring>
 #include <iostream>
 #include <sstream>
-#include <cstring>
 
 #include "data/data_types/dt_table.h"
 #include "data/data_types/dt_var.h"
 #include "data/data_types/dt_comment.h"
 #include "data/data_types/dt_rule.h"
 #include "data/data_types/dt_include.h"
+#include "helpers/s2l_util.h"
 
 DataApi::PrintMode DataApi::mode = DataApi::PrintMode::DEFAULT;
 std::size_t DataApi::dev_warnings = 0;
 std::size_t DataApi::errors_count = 0;
 
-DataApi::DataApi() : curr_data_bad(false)
+DataApi::DataApi()
 {
     comments = new Comments(start_comments, 0,
         Comments::CommentType::MULTI_LINE);
     errors = new Comments(start_errors, 0,
+        Comments::CommentType::MULTI_LINE);
+    unsupported = new Comments(start_unsupported, 0,
         Comments::CommentType::MULTI_LINE);
 }
 
@@ -51,13 +55,14 @@ DataApi::~DataApi()
 
     delete comments;
     delete errors;
+    delete unsupported;
 }
 
 std::string DataApi::translate_variable(const std::string& var_name)
 {
-    for (auto v : vars)
-        if (!var_name.compare(v->get_name()))
-            return v->get_value(this);
+    auto v = find_var(var_name);
+    if ( v != vars.end() )
+        return (*v)->get_value(this);
 
     return std::string();
 }
@@ -69,7 +74,7 @@ std::string DataApi::translate_variable(const std::string& var_name)
  * I copied the Snort version of ExpandVars and made some
  * minor adjustments.
  *
- * Given a Snort style string to expand, this funcion will return
+ * Given a Snort style string to expand, this function will return
  * the expanded string
  */
 std::string DataApi::expand_vars(const std::string& string)
@@ -81,7 +86,6 @@ std::string DataApi::expand_vars(const std::string& string)
     char varmodifier;
     const char* varcontents;
     std::size_t varname_completed, i, j, iv, jv, l_string, name_only;
-    char c;
     int quote_toggle = 0;
 
     if (string.empty() || string.rfind('$') == std::string::npos)
@@ -92,7 +96,7 @@ std::string DataApi::expand_vars(const std::string& string)
 
     while (i < l_string && j < std::string::npos)
     {
-        c = string[i++];
+        char c = string[i++];
 
         if (c == '"')
         {
@@ -141,7 +145,7 @@ std::string DataApi::expand_vars(const std::string& string)
 
                 i = iv;
 
-                varcontents = NULL;
+                varcontents = nullptr;
 
                 std::memset((char*)varname, 0, sizeof(varname));
                 std::memset((char*)varaux, 0, sizeof(varaux));
@@ -155,11 +159,11 @@ std::string DataApi::expand_vars(const std::string& string)
                     if (strlen(p) >= 2)
                     {
                         varmodifier = *(p + 1);
-                        std::strncpy(varaux, p + 2, sizeof(varaux));
+                        std::strncpy(varaux, p + 2, sizeof(varaux) - 1);
                     }
                 }
                 else
-                    std::strncpy(varname, rawvarname, sizeof(varname));
+                    std::strncpy(varname, rawvarname, sizeof(varname) - 1);
 
                 std::memset((char*)varbuffer, 0, sizeof(varbuffer));
 
@@ -181,22 +185,17 @@ std::string DataApi::expand_vars(const std::string& string)
 
                 /* If variable not defined now, we're toast */
                 if (!varcontents || !strlen(varcontents))
-                {
                     return std::string();
-                }
 
-                if (varcontents)
-                {
-                    std::size_t l_varcontents = strlen(varcontents);
+                std::size_t l_varcontents = strlen(varcontents);
 
-                    iv = 0;
+                iv = 0;
 
-                    if (estring.size() < j + l_varcontents)
-                        estring.resize(estring.size() * 2);
+                if (estring.size() < j + l_varcontents)
+                    estring.resize(estring.size() * 2);
 
-                    while (iv < l_varcontents && j < estring.size() - 1)
-                        estring[j++] = varcontents[iv++];
-                }
+                while (iv < l_varcontents && j < estring.size() - 1)
+                    estring[j++] = varcontents[iv++];
             }
             else
             {
@@ -230,39 +229,101 @@ bool DataApi::failed_conversions() const
 std::size_t DataApi::num_errors() const
 { return errors_count; }
 
-void DataApi::failed_conversion(const std::istringstream& stream)
+std::string DataApi::get_file_line()
+{
+    std::string error_string = "Failed to convert ";
+    error_string += *current_file + ":";
+    error_string += std::to_string(current_line);
+    return error_string;
+}
+
+var_it DataApi::find_var(const std::string& name) const
+{
+    return std::find_if(vars.begin(), vars.end(),
+        [&](const Variable* v){ return v->get_name() == name; });
+}
+
+void DataApi::error(const std::string& error)
+{
+    errors->add_text(error);
+    errors_count++;
+}
+
+void DataApi::failed_conversion(const std::istringstream& stream, const std::string& unknown_option)
 {
     // we only need to go through this once.
     if (!curr_data_bad)
     {
         errors->add_text(std::string());
-        errors->add_text("Failed to convert the following line:");
+        errors->add_text(get_file_line());
         errors->add_text(stream.str());
         curr_data_bad = true;
         errors_count++;
     }
+    if ( !unknown_option.empty() )
+        errors->add_text("^^^^ unknown_syntax=" + unknown_option);
 }
 
-void DataApi::failed_conversion(const std::istringstream& stream,
-    const std::string unknown_option)
+void DataApi::set_variable(const std::string& name, const std::string& value, bool quoted)
 {
-    // we only need to go through this once.
-    if (!curr_data_bad)
+    Variable* var = new Variable(name);
+    vars.push_back(var);
+    var->set_value(value, quoted);
+}
+
+bool DataApi::add_net_variable(const std::string& name, const std::string& value)
+{
+    auto v = find_var(name);
+    if ( v != vars.end() )
+        return (*v)->add_value(value);
+
+    net_vars.push_back(name);
+
+    Variable* var = new Variable(name);
+    vars.push_back(var);
+    return var->add_value(value);
+}
+
+bool DataApi::add_path_variable(const std::string& name, const std::string& value)
+{
+    auto v = find_var(name);
+    if ( v != vars.end() )
+        return (*v)->add_value(value);
+
+    Variable* var = new Variable(name);
+
+    // Since a user may specify an IP address, port or path variable with 'var' and it's valid for
+    // Snort2 we attempt to detect type based on the suffix
+    if ( name.find("PORT_") != std::string::npos || name.find("_PORT") != std::string::npos )
     {
-        errors->add_text(std::string());
-        errors->add_text("Failed to convert the following line:");
-        errors->add_text(stream.str());
-        curr_data_bad = true;
-        errors_count++;
+        var->set_comment("treated as portvar");
+        port_vars.push_back(name);
     }
-    errors->add_text("^^^^ unknown_syntax=" + unknown_option);
+    else if ( name.find("NET_") != std::string::npos || name.find("_NET") != std::string::npos
+        || name.find("SERVER_") != std::string::npos || name.find("_SERVER") != std::string::npos )
+    {
+        var->set_comment("treated as ipvar");
+        net_vars.push_back(name);
+    }
+    else if ( name.find("PATH_") != std::string::npos || name.find("_PATH") != std::string::npos )
+    {
+        var->set_comment("treated as path var");
+        path_vars.push_back(name);
+    }
+    else
+        var->set_comment("treated as global var");
+
+    vars.push_back(var);
+    return var->add_value(value);
 }
 
-bool DataApi::add_variable(std::string name, std::string value)
+bool DataApi::add_port_variable(const std::string& name, const std::string& value)
 {
-    for (auto v : vars)
-        if (!name.compare(v->get_name()))
-            return v->add_value(value);
+    auto v = find_var(name);
+    if ( v != vars.end() )
+        return (*v)->add_value(value);
+
+    port_vars.push_back(name);
 
     Variable* var = new Variable(name);
     vars.push_back(var);
@@ -274,7 +335,7 @@ void DataApi::reset_state()
     curr_data_bad = false;
 }
 
-bool DataApi::add_include_file(std::string file_name)
+bool DataApi::add_include_file(const std::string& file_name)
 {
     Include* incl = new Include(file_name);
 
@@ -285,7 +346,7 @@ bool DataApi::add_include_file(std::string file_name)
     return true;
 }
 
-void DataApi::developer_error(std::string error_string)
+void DataApi::developer_error(const std::string& error_string)
 {
     dev_warnings++;
 
@@ -293,10 +354,13 @@ void DataApi::developer_error(std::string error_string)
         std::cout << "RUNTIME ERROR: " << error_string << std::endl;
 }
 
-void DataApi::add_comment(std::string c)
+void DataApi::add_comment(const std::string& c)
 { comments->add_text(c); }
 
-void DataApi::print_errors(std::ostream& out)
+void DataApi::add_unsupported_comment(const std::string& c)
+{ unsupported->add_text(c); }
+
+void DataApi::print_errors(std::ostream& out) const
 {
     if (is_default_mode() &&
         !errors->empty())
@@ -305,7 +369,7 @@ void DataApi::print_errors(std::ostream& out)
     }
 }
 
-void DataApi::print_data(std::ostream& out)
+void DataApi::print_data(std::ostream& out) const
 {
     for (Variable* v : vars)
         out << (*v) << "\n\n";
@@ -314,21 +378,49 @@ void DataApi::print_data(std::ostream& out)
         out << (*i) << "\n\n";
 }
 
-void DataApi::print_comments(std::ostream& out)
+void DataApi::print_comments(std::ostream& out) const
 {
     if (is_default_mode() && !comments->empty())
         out << (*comments) << "\n";
 }
 
+void DataApi::print_unsupported(std::ostream& out) const
+{
+    if (is_default_mode() && !unsupported->empty())
+        out << (*unsupported) << "\n";
+}
+
+static void print_vars(std::ostream& out, const std::string& name,
+    const std::vector<std::string>& vars)
+{
+    if ( vars.empty() )
+        return;
+
+    out << "    " << name << " =\n    {\n";
+    for ( const auto& v : vars )
+        out << "        " << v << " = " << v << ",\n";
+    out << "    },\n";
+}
+
+void DataApi::print_local_variables(std::ostream& out) const
+{
+    if ( !has_local_vars() )
+        return;
+
+    out << "local_variables =\n{\n";
+    print_vars(out, "nets", net_vars);
+    print_vars(out, "paths", path_vars);
+    print_vars(out, "ports", port_vars);
+    out << "}\n\n";
+}
+
 void DataApi::swap_conf_data(std::vector<Variable*>& new_vars,
     std::vector<Include*>& new_includes,
-    Comments*& new_comments)
+    Comments*& new_comments, Comments*& new_unsupported)
 {
     vars.swap(new_vars);
     includes.swap(new_includes);
-
-    Comments* tmp = new_comments;
-    new_comments = comments;
-    comments = tmp;
+    std::swap(comments, new_comments);
+    std::swap(unsupported, new_unsupported);
 }
 

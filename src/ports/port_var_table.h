@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,14 +22,13 @@
 #ifndef PORT_VAR_TABLE_H
 #define PORT_VAR_TABLE_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
-#include "hash/sfghash.h"
 #include "ports/port_object.h"
 #include "ports/port_table.h"
-#include "utils/sflsq.h"
+
+namespace snort
+{
+class GHash;
+}
 
 //-------------------------------------------------------------------------
 // PortVarTable
@@ -37,12 +36,12 @@
 // PortVars are internally stored in PortObjects
 //-------------------------------------------------------------------------
 
-typedef SFGHASH PortVarTable;
+typedef snort::GHash PortVarTable;
 
-PortVarTable* PortVarTableCreate(void);
+PortVarTable* PortVarTableCreate();
 int PortVarTableFree(PortVarTable* pvt);
 int PortVarTableAdd(PortVarTable* pvt, PortObject* po);
-PortObject* PortVarTableFind(PortVarTable* pvt, const char* name);
+PortObject* PortVarTableFind(PortVarTable* pvt, const char* name, bool add_if_not_found = false);
 
 #endif
 

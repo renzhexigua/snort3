@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,16 +21,22 @@
 #ifndef ICMP_MODULE_H
 #define ICMP_MODULE_H
 
-#include "snort_types.h"
+#include "flow/session.h"
 #include "framework/module.h"
-#include "main/thread.h"
-#include "stream/stream.h"
 
 extern const PegInfo icmp_pegs[];
 extern THREAD_LOCAL struct IcmpStats icmpStats;
-extern THREAD_LOCAL ProfileStats icmp_perf_stats;
+extern THREAD_LOCAL snort::ProfileStats icmp_perf_stats;
 
+namespace snort
+{
 struct SnortConfig;
+}
+
+struct IcmpStats
+{
+    SESSION_STATS;
+};
 
 //-------------------------------------------------------------------------
 // stream_icmp module
@@ -41,17 +47,23 @@ struct SnortConfig;
 
 struct StreamIcmpConfig;
 
-class StreamIcmpModule : public Module
+class StreamIcmpModule : public snort::Module
 {
 public:
     StreamIcmpModule();
-    bool set(const char*, Value&, SnortConfig*) override;
-    bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
+    bool begin(const char*, int, snort::SnortConfig*) override;
+    bool end(const char*, int, snort::SnortConfig*) override;
 
-    ProfileStats* get_profile() const override;
+    snort::ProfileStats* get_profile() const override;
     const PegInfo* get_pegs() const override;
     PegCount* get_counts() const override;
+
+    Usage get_usage() const override
+    { return INSPECT; }
+
+    bool is_bindable() const override
+    { return true; }
 
     StreamIcmpConfig* get_data();
 

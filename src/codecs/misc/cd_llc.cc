@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,28 +21,41 @@
 #include "config.h"
 #endif
 
+#include "codecs/codec_module.h"
 #include "framework/codec.h"
-#include "codecs/codec_module.h"
-#include "protocols/packet.h"
-#include "framework/module.h"
-#include "codecs/codec_module.h"
 #include "log/text_log.h"
-#include "protocols/packet_manager.h"
+
+using namespace snort;
 
 #define LLC_NAME "llc"
 #define LLC_HELP "support for logical link control"
 
 namespace
 {
+static const RuleMap llc_rules[] =
+{
+    { DECODE_BAD_LLC_HEADER, "bad LLC header" },
+    { DECODE_BAD_LLC_OTHER, "bad extra LLC info"},
+    { 0, nullptr }
+};
+
+class LlcModule : public BaseCodecModule
+{
+public:
+    LlcModule() : BaseCodecModule(LLC_NAME, LLC_HELP) {}
+
+    const RuleMap* get_rules() const override
+    { return llc_rules; }
+};
+
 class LlcCodec : public Codec
 {
 public:
     LlcCodec() : Codec(LLC_NAME) { }
-    ~LlcCodec() { }
 
     bool decode(const RawData&, CodecData&, DecodeData&) override;
     void log(TextLog* const, const uint8_t* pkt, const uint16_t len) override;
-    void get_protocol_ids(std::vector<uint16_t>&) override;
+    void get_protocol_ids(std::vector<ProtocolId>&) override;
 };
 
 struct EthLlc
@@ -57,16 +70,16 @@ struct EthLlcOther
     uint8_t org_code[3];
     uint8_t proto_id[2];
 
-    uint16_t proto() const
+    ProtocolId proto() const
     {
-#       if defined(__GNUC__)
+#ifdef __GNUC__
         // fixing the type_punned pointer problem
         const uint8_t* tmp1 = &proto_id[0];
         const uint16_t* const tmp2 = reinterpret_cast<const uint16_t*>(tmp1);
-        return ntohs(*tmp2);
-#       else
-        return ntohs(*((uint16_t*)(&proto_id[0])));
-#       endif
+        return (ProtocolId)ntohs(*tmp2);
+#else
+        return (ProtocolId)ntohs(*((uint16_t*)(&proto_id[0])));
+#endif
     }
 };
 
@@ -81,15 +94,15 @@ struct EthLlcOther
 #define ETH_ORG_CODE_CDP  0x00000c    /* Cisco Discovery Proto */
 } // namespace
 
-void LlcCodec::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(PROTO_ETHERNET_LLC); }
+void LlcCodec::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::ETHERNET_LLC); }
 
 bool LlcCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
 {
     if (raw.len < sizeof(EthLlc))
     {
-        // FIXIT-L - J - Need a better alert
-        codec_event(codec, DECODE_BAD_VLAN_ETHLLC);
+        // FIXIT-L need a better alert for llc len
+        codec_event(codec, DECODE_BAD_LLC_HEADER);
         return false;
     }
 
@@ -100,7 +113,7 @@ bool LlcCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
     {
         if (raw.len <  sizeof(EthLlc) + sizeof(EthLlcOther))
         {
-            codec_event(codec, DECODE_BAD_VLAN_ETHLLC);
+            codec_event(codec, DECODE_BAD_LLC_OTHER);
             return false;
         }
 
@@ -113,6 +126,7 @@ bool LlcCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
         {
             codec.lyr_len = sizeof(EthLlc) + sizeof(EthLlcOther);
             codec.next_prot_id = ehllcother->proto();
+            codec.codec_flags |= CODEC_ETHER_NEXT;
         }
     }
 
@@ -132,7 +146,7 @@ void LlcCodec::log(TextLog* const text_log, const uint8_t* raw_pkt,
         ehllc->ssap == ETH_SSAP_IP)
     {
         const EthLlcOther* other = reinterpret_cast<const EthLlcOther*>(raw_pkt + sizeof(EthLlc));
-        const uint16_t proto = other->proto();
+        const ProtocolId proto = other->proto();
 
         TextLog_Print(text_log, " ORG:0x%02X%02X%02X PROTO:0x%04X",
             other->org_code[0], other->org_code[1], other->org_code[2],
@@ -143,6 +157,13 @@ void LlcCodec::log(TextLog* const text_log, const uint8_t* raw_pkt,
 //-------------------------------------------------------------------------
 // api
 //-------------------------------------------------------------------------
+
+
+static Module* mod_ctor()
+{ return new LlcModule; }
+
+static void mod_dtor(Module* m)
+{ delete m; }
 
 static Codec* ctor(Module*)
 { return new LlcCodec(); }
@@ -161,8 +182,8 @@ static const CodecApi llc_api =
         API_OPTIONS,
         LLC_NAME,
         LLC_HELP,
-        nullptr,
-        nullptr
+        mod_ctor,
+        mod_dtor
     },
     nullptr,
     nullptr,
@@ -174,11 +195,11 @@ static const CodecApi llc_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_llc[] =
+#endif
 {
     &llc_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_llc = &llc_api.base;
-#endif
 

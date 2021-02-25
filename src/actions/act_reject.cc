@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -48,42 +48,39 @@
 #include "config.h"
 #endif
 
-#include "snort_types.h"
-#include "snort_debug.h"
-#include "protocols/packet.h"
-#include "profiler.h"
-#include "packet_io/active.h"
-#include "util.h"
 #include "framework/ips_action.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "main/snort_config.h"
+#include "packet_io/active.h"
+#include "profiler/profiler.h"
 
-#define REJ_RST_SRC  0x01
-#define REJ_RST_DST  0x02
-#define REJ_UNR_NET  0x04
-#define REJ_UNR_HOST 0x08
-#define REJ_UNR_PORT 0x10
-
-#define REJ_RST_BOTH (REJ_RST_SRC|REJ_RST_DST)
-#define REJ_UNR_ALL  (REJ_UNR_NET|REJ_UNR_HOST|REJ_UNR_PORT)
+using namespace snort;
 
 #define s_name "reject"
 
 #define s_help \
     "terminate session with TCP reset or ICMP unreachable"
 
-static THREAD_LOCAL ProfileStats rejPerfStats;
+enum
+{
+    REJ_NONE     = 0x00,
+    REJ_RST_SRC  = 0x01,
+    REJ_RST_DST  = 0x02,
+    REJ_UNR_NET  = 0x04,
+    REJ_UNR_HOST = 0x08,
+    REJ_UNR_PORT = 0x10,
+    REJ_UNR_FWD  = 0x20,
+    REJ_RST_BOTH = (REJ_RST_SRC | REJ_RST_DST),
+    REJ_UNR_ALL  = (REJ_UNR_NET | REJ_UNR_HOST | REJ_UNR_PORT | REJ_UNR_FWD)
+};
 
-class RejectAction : public IpsAction
+THREAD_LOCAL ProfileStats rejPerfStats;
+
+class RejectAction : public snort::IpsAction
 {
 public:
-    RejectAction(uint32_t f) : IpsAction(s_name, ACT_RESET)
-    { mask = f; }
-
-    void exec(Packet*) override;
-
-private:
-    void send(Packet*);
+    RejectAction(uint32_t f);
+    void exec(snort::Packet*) override;
 
 private:
     uint32_t mask;
@@ -93,40 +90,62 @@ private:
 // class methods
 //-------------------------------------------------------------------------
 
+RejectAction::RejectAction(uint32_t f) : IpsAction(s_name, ActionType::ACT_RESET), mask(f)
+{ }
+
+
 void RejectAction::exec(Packet* p)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(rejPerfStats);
+    if ( !p->ptrs.ip_api.is_ip() )
+        return;
 
-    send(p);
+    Active* act = p->active;
 
-    MODULE_PROFILE_END(rejPerfStats);
-}
+    Profile profile(rejPerfStats);
 
-void RejectAction::send(Packet* p)
-{
+    switch ( p->type() )
+    {
+    case PktType::TCP:
+        if ( !act->is_reset_candidate(p) )
+            return;
+        break;
+
+    case PktType::UDP:
+    case PktType::ICMP:
+    case PktType::IP:
+        if ( !act->is_unreachable_candidate(p) )
+            return;
+        break;
+
+    default:
+        return;
+    }
+
     uint32_t flags = 0;
 
-    if ( Active::is_reset_candidate(p) )
+    if ( act->is_reset_candidate(p) )
         flags |= (mask & REJ_RST_BOTH);
 
-    if ( Active::is_unreachable_candidate(p) )
+    if ( act->is_unreachable_candidate(p) )
         flags |= (mask & REJ_UNR_ALL);
 
     if ( flags & REJ_RST_SRC )
-        Active::send_reset(p, 0);
+        act->send_reset(p, 0);
 
     if ( flags & REJ_RST_DST )
-        Active::send_reset(p, ENC_FLAG_FWD);
+        act->send_reset(p, ENC_FLAG_FWD);
+
+    if ( flags & REJ_UNR_FWD )
+        act->send_unreach(p, UnreachResponse::FWD);
 
     if ( flags & REJ_UNR_NET )
-        Active::send_unreach(p, UnreachResponse::NET);
+        act->send_unreach(p, UnreachResponse::NET);
 
     if ( flags & REJ_UNR_HOST )
-        Active::send_unreach(p, UnreachResponse::HOST);
+        act->send_unreach(p, UnreachResponse::HOST);
 
     if ( flags & REJ_UNR_PORT )
-        Active::send_unreach(p, UnreachResponse::PORT);
+        act->send_unreach(p, UnreachResponse::PORT);
 }
 
 //-------------------------------------------------------------------------
@@ -135,11 +154,11 @@ void RejectAction::send(Packet* p)
 
 static const Parameter s_params[] =
 {
-    { "reset", Parameter::PT_ENUM, "source|dest|both", nullptr,
-      "send tcp reset to one or both ends" },
+    { "reset", Parameter::PT_ENUM, "none|source|dest|both", "both",
+      "send TCP reset to one or both ends" },
 
-    { "control", Parameter::PT_ENUM, "network|host|port|all", nullptr,
-      "send icmp unreachable(s)" },
+    { "control", Parameter::PT_ENUM, "none|network|host|port|forward|all", "none",
+      "send ICMP unreachable(s)" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -155,17 +174,23 @@ public:
     ProfileStats* get_profile() const override
     { return &rejPerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     uint32_t flags;
 };
 
-bool RejectModule::begin(const char*, int, SnortConfig*)
+bool RejectModule::begin(const char*, int, SnortConfig* sc)
 {
     flags = 0;
+    sc->set_active_enabled();
     return true;
 }
 
 static const int rst[] =
 {
+    REJ_NONE,
     REJ_RST_SRC,
     REJ_RST_DST,
     REJ_RST_BOTH
@@ -173,19 +198,27 @@ static const int rst[] =
 
 static const int unr[] =
 {
-    REJ_UNR_PORT,
-    REJ_UNR_HOST,
+    REJ_NONE,
     REJ_UNR_NET,
+    REJ_UNR_HOST,
+    REJ_UNR_PORT,
+    REJ_UNR_FWD,
     REJ_UNR_ALL
 };
 
 bool RejectModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("reset") )
-        flags |= rst[v.get_long()];
+    {
+        flags &= ~REJ_RST_BOTH;
+        flags |= rst[v.get_uint8()];
+    }
 
     else if ( v.is("control") )
-        flags |= unr[v.get_long()];
+    {
+        flags &= ~REJ_UNR_ALL;
+        flags |= unr[v.get_uint8()];
+    }
 
     else
         return false;
@@ -210,7 +243,6 @@ static void mod_dtor(Module* m)
 static IpsAction* rej_ctor(Module* p)
 {
     RejectModule* m = (RejectModule*)p;
-    Active::set_enabled();
     return new RejectAction(m->flags);
 }
 
@@ -233,7 +265,7 @@ static const ActionApi rej_api =
         mod_ctor,
         mod_dtor
     },
-    RULE_TYPE__RESET,
+    Actions::RESET,
     nullptr,
     nullptr,
     nullptr,
@@ -244,11 +276,11 @@ static const ActionApi rej_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* act_reject[] =
+#endif
 {
     &rej_api.base,
     nullptr
 };
-#else
-const BaseApi* act_reject = &rej_api.base;
-#endif
 

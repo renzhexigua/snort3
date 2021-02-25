@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,28 +20,20 @@
 #ifndef PROTOCOLS_IP_H
 #define PROTOCOLS_IP_H
 
-#ifndef WIN32
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <net/if.h>
-#else /* !WIN32 */
-#include <netinet/in_systm.h>
-#ifndef IFNAMSIZ
-#define IFNAMESIZ MAX_ADAPTER_NAME
-#endif /* !IFNAMSIZ */
-#endif /* !WIN32 */
-
 #include <cstring>
 
+#include "main/snort_types.h"
 #include "protocols/ipv4.h"
 #include "protocols/ipv6.h"
-#include "sfip/sfip_t.h"
-#include "main/snort_types.h"
+#include "sfip/sf_ip.h"
 
+namespace snort
+{
 struct Packet;
 
-// FIXIT-J : can I assume api si always valid?  i.e. if not ip4, then ipv6?
-//          or if not ip4, also make sure its not ip6
+// FIXIT-L can I assume api is always valid?
+// i.e. if not ip4, then ipv6?
+// or if not ip4, also make sure its not ip6
 
 namespace ip
 {
@@ -57,8 +49,9 @@ public:
 
     void set(const IP4Hdr* h4);
     void set(const IP6Hdr* h6);
-    void set(const sfip_t& src, const sfip_t& dst);
+    void set(const SfIp& src, const SfIp& dst);
     bool set(const uint8_t* raw_ip_data);
+    void update(const SfIp& sip, const SfIp& dip);
     void reset();
 
     // return the 16 bits associated with this IP layers frag_offset/flags
@@ -70,7 +63,7 @@ public:
     uint32_t id() const;
     const uint8_t* ip_data() const; // return a pointer to the ip layers data
 
-    // FIXIT-L J get rid of the unnecessary ones
+    // FIXIT-L get rid of the unnecessary ones
     // returns the sum of the ip header + payload lengths in host byte order
     uint16_t dgram_len() const;
     // returns this ip layer's payload length in host byte order
@@ -100,46 +93,46 @@ public:
     { return is_ip4() or is_ip6(); }
 
     inline const IP4Hdr* get_ip4h() const
-    { return (type == IAT_4) ? (IP4Hdr*)iph : nullptr; }
+    { return (type == IAT_4) ? (const IP4Hdr*)iph : nullptr; }
 
     inline const IP6Hdr* get_ip6h() const
-    { return (type == IAT_6) ? (IP6Hdr*)iph : nullptr; }
+    { return (type == IAT_6) ? (const IP6Hdr*)iph : nullptr; }
 
-    inline const sfip_t* get_src() const
+    inline const SfIp* get_src() const
     { return (type != IAT_NONE) ? &src : nullptr; }
 
-    inline const sfip_t* get_dst() const
+    inline const SfIp* get_dst() const
     { return (type != IAT_NONE) ? &dst : nullptr; }
 
     // only relevant to IP4
     inline uint8_t get_ip_opt_len() const
-    { return (type == IAT_4) ? ((IP4Hdr*)iph)->get_opt_len() : 0; }
+    { return (type == IAT_4) ? ((const IP4Hdr*)iph)->get_opt_len() : 0; }
 
     // only relevant to IP4
     inline const uint8_t* get_ip_opt_data() const
     { return (type == IAT_4) ? reinterpret_cast<const uint8_t*>(iph) + IP4_HEADER_LEN : nullptr; }
 
     inline const snort_in6_addr* get_ip6_src() const
-    { return (type == IAT_6) ? ((IP6Hdr*)iph)->get_src() : nullptr; }
+    { return (type == IAT_6) ? ((const IP6Hdr*)iph)->get_src() : nullptr; }
 
     inline const snort_in6_addr* get_ip6_dst() const
-    { return (type == IAT_6) ? ((IP6Hdr*)iph)->get_dst() : nullptr; }
+    { return (type == IAT_6) ? ((const IP6Hdr*)iph)->get_dst() : nullptr; }
 
     uint16_t tos() const;
     uint8_t ttl() const;
-    uint8_t proto() const;
+    IpProtocol proto() const;
     uint16_t raw_len() const;
     uint8_t hlen() const;
     uint8_t ver() const;
 
 private:
-    sfip_t src;
-    sfip_t dst;
+    SfIp src;
+    SfIp dst;
     const void* iph;
     Type type;
 };
 
 } // namespace ip
-
+} // namespace snort
 #endif
 

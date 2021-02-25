@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,17 +17,24 @@
 //--------------------------------------------------------------------------
 // ip.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
-#include <arpa/inet.h>
-#include "protocols/ip.h"
-#include "protocols/packet.h"
-#include "sfip/sf_ip.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
+#include "ip.h"
+
+#include "layer.h"
+
+namespace snort
+{
 namespace ip
 {
 void IpApi::reset()
 {
     type = IAT_NONE;
     iph = nullptr;
+    src.clear();
+    dst.clear();
 }
 
 void IpApi::set(const IP4Hdr* h4)
@@ -35,15 +42,8 @@ void IpApi::set(const IP4Hdr* h4)
     iph = (const void*)h4;
     type = IAT_4;
 
-    src.family = AF_INET;
-    src.bits = 32;
-    src.ip32[0] = *(uint32_t*)(&h4->ip_src);
-    std::memset(&(src.ip32[1]), 0, 12);
-
-    dst.family = AF_INET;
-    dst.bits = 32;
-    dst.ip32[0] = *(uint32_t*)(&h4->ip_dst);
-    std::memset(&(dst.ip32[1]), 0, 12);
+    src.set(&h4->ip_src, AF_INET);
+    dst.set(&h4->ip_dst, AF_INET);
 }
 
 void IpApi::set(const ip::IP6Hdr* h6)
@@ -51,20 +51,15 @@ void IpApi::set(const ip::IP6Hdr* h6)
     iph = (const void*)h6;
     type = IAT_6;
 
-    src.family = AF_INET6;
-    src.bits = 128;
-    std::memcpy(&(src.ip8), &(h6->ip6_src), 16);
-
-    dst.family = AF_INET6;
-    dst.bits = 128;
-    std::memcpy(&(dst.ip8), &(h6->ip6_dst), 16);
+    src.set(&h6->ip6_src, AF_INET6);
+    dst.set(&h6->ip6_dst, AF_INET6);
 }
 
-void IpApi::set(const sfip_t& sip, const sfip_t& dip)
+void IpApi::set(const SfIp& sip, const SfIp& dip)
 {
     type = IAT_DATA;
-    sfip_set_ip(&src, &sip);
-    sfip_set_ip(&dst, &dip);
+    src = sip;
+    dst = dip;
     iph = nullptr;
 }
 
@@ -88,12 +83,18 @@ bool IpApi::set(const uint8_t* raw_ip_data)
     return false;
 }
 
+void IpApi::update(const SfIp& sip, const SfIp& dip)
+{
+    src = sip;
+    dst = dip;
+}
+
 uint16_t IpApi::tos() const
 {
     switch ( type )
     {
-    case IAT_4: return ((IP4Hdr*)iph)->tos();
-    case IAT_6: return ((IP6Hdr*)iph)->tos();
+    case IAT_4: return ((const IP4Hdr*)iph)->tos();
+    case IAT_6: return ((const IP6Hdr*)iph)->tos();
     default: break;
     }
     return 0;
@@ -103,8 +104,8 @@ uint8_t IpApi::ttl() const
 {
     switch ( type )
     {
-    case IAT_4: return ((IP4Hdr*)iph)->ttl();
-    case IAT_6: return ((IP6Hdr*)iph)->hop_lim();
+    case IAT_4: return ((const IP4Hdr*)iph)->ttl();
+    case IAT_6: return ((const IP6Hdr*)iph)->hop_lim();
     default: break;
     }
     return 0;
@@ -114,15 +115,15 @@ uint8_t IpApi::ttl() const
  * variable hold the first non-ip and non-ipv6 extension protocols,
  * while proto() returns the next or proto() field of the raw IP
  * header */
-uint8_t IpApi::proto() const
+IpProtocol IpApi::proto() const
 {
     switch ( type )
     {
-    case IAT_4: return ((IP4Hdr*)iph)->proto();
-    case IAT_6: return ((IP6Hdr*)iph)->next();
+    case IAT_4: return ((const IP4Hdr*)iph)->proto();
+    case IAT_6: return ((const IP6Hdr*)iph)->next();
     default: break;
     }
-    return 0xFF;
+    return IpProtocol::PROTO_NOT_SET;
 }
 
 // header length field: datagram/payload-only length for 4/6
@@ -131,8 +132,8 @@ uint16_t IpApi::raw_len() const
 {
     switch ( type )
     {
-    case IAT_4: return ((IP4Hdr*)iph)->raw_len();
-    case IAT_6: return ((IP6Hdr*)iph)->raw_len();
+    case IAT_4: return ((const IP4Hdr*)iph)->raw_len();
+    case IAT_6: return ((const IP6Hdr*)iph)->raw_len();
     default: break;
     }
     return 0;
@@ -142,8 +143,8 @@ uint8_t IpApi::hlen() const
 {
     switch ( type )
     {
-    case IAT_4: return ((IP4Hdr*)iph)->hlen();
-    case IAT_6: return ((IP6Hdr*)iph)->hlen();
+    case IAT_4: return ((const IP4Hdr*)iph)->hlen();
+    case IAT_6: return ((const IP6Hdr*)iph)->hlen();
     default: break;
     }
     return 0;
@@ -153,19 +154,19 @@ uint8_t IpApi::ver() const
 {
     switch ( type )
     {
-    case IAT_4: return ((IP4Hdr*)iph)->ver();
-    case IAT_6: return ((IP6Hdr*)iph)->ver();
+    case IAT_4: return ((const IP4Hdr*)iph)->ver();
+    case IAT_6: return ((const IP6Hdr*)iph)->ver();
     default: break;
     }
     return 0;
 }
 
+// FIXIT-H is this really supposed to be a shallow compare?
 bool operator==(const IpApi& lhs, const IpApi& rhs)
 {
     if ( lhs.type != rhs.type )
         return false;
 
-    // FIXIT-H is this really supposed to be a shallow compare?
     return ( lhs.iph == rhs.iph );
 }
 
@@ -175,7 +176,7 @@ bool operator!=(const IpApi& lhs, const IpApi& rhs)
 uint32_t IpApi::id() const
 {
     if ( type == IAT_4 )
-        return (uint32_t)((IP4Hdr*)iph)->id();
+        return (uint32_t)((const IP4Hdr*)iph)->id();
 
     if ( type != IAT_6 )
         return 0;
@@ -191,7 +192,7 @@ uint32_t IpApi::id() const
 uint16_t IpApi::off() const
 {
     if ( type == IAT_4 )
-        return (uint32_t)((IP4Hdr*)iph)->off();
+        return (uint32_t)((const IP4Hdr*)iph)->off();
 
     if ( type != IAT_6 )
         return 0;
@@ -207,7 +208,7 @@ uint16_t IpApi::off() const
 uint16_t IpApi::off_w_flags() const
 {
     if ( type == IAT_4 )
-        return (uint32_t)((IP4Hdr*)iph)->off_w_flags();
+        return (uint32_t)((const IP4Hdr*)iph)->off_w_flags();
 
     if ( type != IAT_6 )
         return 0;
@@ -224,8 +225,8 @@ const uint8_t* IpApi::ip_data() const
 {
     switch ( type )
     {
-    case IAT_4: return reinterpret_cast<const uint8_t*>(iph) + ((IP4Hdr*)iph)->hlen();
-    case IAT_6: return reinterpret_cast<const uint8_t*>(iph) + ((IP6Hdr*)iph)->hlen();
+    case IAT_4: return reinterpret_cast<const uint8_t*>(iph) + ((const IP4Hdr*)iph)->hlen();
+    case IAT_6: return reinterpret_cast<const uint8_t*>(iph) + ((const IP6Hdr*)iph)->hlen();
     default: break;
     }
     return nullptr;
@@ -235,8 +236,8 @@ uint16_t IpApi::actual_ip_len() const
 {
     switch ( type )
     {
-    case IAT_4: return ((IP4Hdr*)iph)->len();
-    case IAT_6: return ((IP6Hdr*)iph)->len();
+    case IAT_4: return ((const IP4Hdr*)iph)->len();
+    case IAT_6: return ((const IP6Hdr*)iph)->len();
     default: break;
     }
     return 0;
@@ -246,8 +247,8 @@ uint16_t IpApi::dgram_len() const
 {
     switch ( type )
     {
-    case IAT_4: return ((IP4Hdr*)iph)->len();
-    case IAT_6: return ((IP6Hdr*)iph)->len() + IP6_HEADER_LEN;
+    case IAT_4: return ((const IP4Hdr*)iph)->len();
+    case IAT_6: return ((const IP6Hdr*)iph)->len() + IP6_HEADER_LEN;
     default: break;
     }
     return 0;
@@ -257,8 +258,8 @@ uint16_t IpApi::pay_len() const
 {
     switch ( type )
     {
-    case IAT_4: return ((IP4Hdr*)iph)->len() - ((IP4Hdr*)iph)->hlen();
-    case IAT_6: return ((IP6Hdr*)iph)->len();
+    case IAT_4: return ((const IP4Hdr*)iph)->len() - ((const IP4Hdr*)iph)->hlen();
+    case IAT_6: return ((const IP6Hdr*)iph)->len();
     default: break;
     }
     return 0;
@@ -277,7 +278,8 @@ static bool is_loopback(const snort_in6_addr* const ip)
         return false;
 
     /* Check if the 3rd 32-bit int is zero */
-    if ( p[2] == 0 ) {
+    if ( p[2] == 0 )
+    {
         /* ::7F00:0/104 is ipv4 compatible ipv6 */
         /* ::1 is the IPv6 loopback */
         return ( (ip->u6_addr8[12] == 0x7F) || (ntohl(p[3]) == 0x1) );
@@ -296,8 +298,8 @@ bool IpApi::is_src_loopback() const
 {
     switch ( type )
     {
-    case IAT_4: return is_loopback(ntohl(((IP4Hdr*)iph)->get_src()));
-    case IAT_6: return is_loopback(((IP6Hdr*)iph)->get_src());
+    case IAT_4: return is_loopback(ntohl(((const IP4Hdr*)iph)->get_src()));
+    case IAT_6: return is_loopback(((const IP6Hdr*)iph)->get_src());
     default: break;
     }
     return false;
@@ -308,11 +310,12 @@ bool IpApi::is_dst_loopback() const
 {
     switch ( type )
     {
-    case IAT_4: return ((ntohl(((IP4Hdr*)iph)->get_dst())) >> 24) == 0x7F;
-    case IAT_6: return is_loopback(((IP6Hdr*)iph)->get_dst());
+    case IAT_4: return ((ntohl(((const IP4Hdr*)iph)->get_dst())) >> 24) == 0x7F;
+    case IAT_6: return is_loopback(((const IP6Hdr*)iph)->get_dst());
     default: break;
     }
     return false;
 }
 } // namespace ip
+} // namespace snort
 

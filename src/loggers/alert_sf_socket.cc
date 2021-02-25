@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -19,33 +19,29 @@
 
 /* We use some Linux only socket capabilities */
 
-#include <errno.h>
-#include <stdlib.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#ifdef LINUX
 #include <sys/socket.h>
 #include <sys/un.h>
 
-#include <string>
-#include <vector>
-
-#include "main/snort_types.h"
-#include "main/snort_config.h"
-#include "main/snort_debug.h"
-#include "framework/logger.h"
-#include "framework/module.h"
-#include "managers/event_manager.h"
-#include "detection/rules.h"
 #include "detection/treenodes.h"
 #include "events/event.h"
-#include "hash/sfghash.h"
+#include "framework/logger.h"
+#include "framework/module.h"
+#include "hash/ghash.h"
+#include "log/messages.h"
+#include "main/snort_config.h"
+#include "managers/event_manager.h"
 #include "parser/parser.h"
+#include "protocols/packet.h"
 #include "target_based/snort_protocols.h"
 #include "utils/util.h"
+#include "utils/util_cstring.h"
+
+using namespace snort;
+using namespace std;
 
 struct SfSock
 {
@@ -62,7 +58,6 @@ struct RuleId
 
 static THREAD_LOCAL SfSock context;
 
-using namespace std;
 typedef vector<RuleId> RuleVector;
 
 #define s_name "alert_sfsocket"
@@ -73,10 +68,10 @@ typedef vector<RuleId> RuleVector;
 
 static const Parameter rule_params[] =
 {
-    { "gid", Parameter::PT_INT, "1:", "1",
+    { "gid", Parameter::PT_INT, "1:max32", "1",
       "rule generator ID" },
 
-    { "sid", Parameter::PT_INT, "1:", "1",
+    { "sid", Parameter::PT_INT, "1:max32", "1",
       "rule signature ID" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
@@ -105,10 +100,13 @@ public:
     bool begin(const char*, int, SnortConfig*) override;
     bool end(const char*, int, SnortConfig*) override;
 
+    Usage get_usage() const override
+    { return GLOBAL; }
+
 public:
     string file;
     RuleVector rulez;
-    RuleId rule;
+    RuleId rule = {};
 };
 
 bool SfSocketModule::set(const char*, Value& v, SnortConfig*)
@@ -117,10 +115,10 @@ bool SfSocketModule::set(const char*, Value& v, SnortConfig*)
         file = v.get_string();
 
     else if ( v.is("gid") )
-        rule.gid = v.get_long();
+        rule.gid = v.get_uint32();
 
     else if ( v.is("sid") )
-        rule.sid = v.get_long();
+        rule.sid = v.get_uint32();
 
     return true;
 }
@@ -135,7 +133,7 @@ bool SfSocketModule::begin(const char*, int, SnortConfig*)
 bool SfSocketModule::end(const char* fqn, int, SnortConfig*)
 {
     if ( !strcmp(fqn, "alert_sfsocket.rules") )
-        rulez.push_back(rule);
+        rulez.emplace_back(rule);
 
     return true;
 }
@@ -143,7 +141,7 @@ bool SfSocketModule::end(const char* fqn, int, SnortConfig*)
 //-------------------------------------------------------------------------
 // socket stuff
 
-static int AlertSFSocket_Connect(void)
+static int AlertSFSocket_Connect()
 {
     /* check sock value */
     if (context.sock == -1)
@@ -176,13 +174,13 @@ static void sock_init(const char* args)
 
     memset(&context.addr, 0, sizeof(context.addr));
     context.addr.sun_family = AF_UNIX;
-    memcpy(context.addr.sun_path + 1, name.c_str(), strlen(name.c_str()));
+    SnortStrncpy(context.addr.sun_path, name.c_str(), sizeof(context.addr.sun_path));
 
     if (AlertSFSocket_Connect() == 0)
         context.connected = 1;
 }
 
-void send_sar(uint8_t* data, unsigned len)
+static void send_sar(uint8_t* data, unsigned len)
 {
     int tries = 0;
 
@@ -242,32 +240,32 @@ void send_sar(uint8_t* data, unsigned len)
 // sig stuff
 
 /* search for an OptTreeNode by sid in specific policy*/
-// FIXIT-L wow - this should be encapsulated somewhere ...
+// FIXIT-L wow - OptTreeNode_Search should be encapsulated somewhere ...
 // (actually, the whole reason for doing this needs to be rethought)
 static OptTreeNode* OptTreeNode_Search(uint32_t, uint32_t sid)
 {
-    SFGHASH_NODE* hashNode;
-    OptTreeNode* otn = NULL;
-    RuleTreeNode* rtn = NULL;
+    GHashNode* hashNode;
 
     if (sid == 0)
-        return NULL;
+        return nullptr;
 
-    for (hashNode = sfghash_findfirst(snort_conf->otn_map);
+    const SnortConfig* sc = SnortConfig::get_conf();
+
+    for (hashNode = sc->otn_map->find_first();
         hashNode;
-        hashNode = sfghash_findnext(snort_conf->otn_map))
+        hashNode = sc->otn_map->find_next())
     {
-        otn = (OptTreeNode*)hashNode->data;
-        rtn = getRuntimeRtnFromOtn(otn);
+        OptTreeNode* otn = (OptTreeNode*)hashNode->data;
+        RuleTreeNode* rtn = getRuntimeRtnFromOtn(otn);
 
-        if ( rtn and is_network_protocol(rtn->proto) )
+        if ( rtn and is_network_protocol(rtn->snort_protocol_id) )
         {
-            if (otn->sigInfo.id == sid)
+            if (otn->sigInfo.sid == sid)
                 return otn;
         }
     }
 
-    return NULL;
+    return nullptr;
 }
 
 //-------------------------------------------------------------------------
@@ -277,18 +275,18 @@ struct SnortActionRequest
 {
     uint32_t event_id;
     uint32_t tv_sec;
-    uint32_t generator;
+    uint32_t gid;
     uint32_t sid;
     uint32_t src_ip;
     uint32_t dest_ip;
     uint16_t sport;
     uint16_t dport;
-    uint8_t protocol;
+    IpProtocol ip_proto;
 };
 
-void load_sar(Packet* packet, Event* event, SnortActionRequest& sar)
+static void load_sar(Packet* packet, const Event& event, SnortActionRequest& sar)
 {
-    if(!event || !packet || !packet->ptrs.ip_api.is_ip())
+    if ( !packet || !packet->ptrs.ip_api.is_ip() )
         return;
 
     // for now, only support ip4
@@ -296,10 +294,10 @@ void load_sar(Packet* packet, Event* event, SnortActionRequest& sar)
         return;
 
     /* construct the action request */
-    sar.event_id = event->event_id;
+    sar.event_id = event.event_id;
     sar.tv_sec = packet->pkth->ts.tv_sec;
-    sar.generator = event->sig_info->generator;
-    sar.sid = event->sig_info->id;
+    sar.gid = event.sig_info->gid;
+    sar.sid = event.sig_info->sid;
 
     // when ip6 is supported:
     // * suggest TLV format where T == family, L is implied by
@@ -309,9 +307,9 @@ void load_sar(Packet* packet, Event* event, SnortActionRequest& sar)
     //   can be determined by reading 1 byte
     // * addresses could be moved to end of struct in uint8_t[32]
     //   and only 1st 8 used for ip4
-    sar.src_ip =  ntohl(packet->ptrs.ip_api.get_src()->ip32[0]);
-    sar.dest_ip = ntohl(packet->ptrs.ip_api.get_dst()->ip32[0]);
-    sar.protocol = packet->get_ip_proto_next();
+    sar.src_ip =  ntohl(packet->ptrs.ip_api.get_src()->get_ip4_value());
+    sar.dest_ip = ntohl(packet->ptrs.ip_api.get_dst()->get_ip4_value());
+    sar.ip_proto = packet->get_ip_proto_next();
 
     if (packet->is_tcp() || packet->is_udp())
     {
@@ -337,7 +335,7 @@ public:
     void open() override;
     void close() override;
 
-    void alert(Packet*, const char* msg, Event*) override;
+    void alert(Packet*, const char* msg, const Event&) override;
 
 private:
     string file;
@@ -356,7 +354,7 @@ void SfSocketLogger::configure(RuleId& r)
     OptTreeNode* otn = OptTreeNode_Search(r.gid, r.sid);
 
     if ( !otn )
-        ParseError("Unable to find OptTreeNode for %u:%u\n", r.gid, r.sid);
+        ParseError("Unable to find OptTreeNode for %u:%u", r.gid, r.sid);
 
     else
         EventManager::add_output(&otn->outputFuncs, this);
@@ -373,7 +371,7 @@ void SfSocketLogger::close()
     context.sock = -1;
 }
 
-void SfSocketLogger::alert(Packet* packet, const char*, Event* event)
+void SfSocketLogger::alert(Packet* packet, const char*, const Event& event)
 {
     SnortActionRequest sar;
     load_sar(packet, event, sar);
@@ -388,7 +386,7 @@ static Module* mod_ctor()
 static void mod_dtor(Module* m)
 { delete m; }
 
-static Logger* sf_sock_ctor(SnortConfig*, Module* mod)
+static Logger* sf_sock_ctor(Module* mod)
 { return new SfSocketLogger((SfSocketModule*)mod); }
 
 static void sf_sock_dtor(Logger* p)
@@ -413,7 +411,9 @@ static LogApi sf_sock_api
     sf_sock_dtor
 };
 
-const BaseApi* alert_sf_socket = &sf_sock_api.base;
-
-#endif   /* LINUX */
+const BaseApi* alert_sf_socket[] =
+{
+    &sf_sock_api.base,
+    nullptr
+};
 

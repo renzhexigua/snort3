@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,10 +21,7 @@
 #ifndef ARP_SPOOF_MODULE_H
 #define ARP_SPOOF_MODULE_H
 
-#include <vector>
-
 #include "framework/module.h"
-#include "main/thread.h"
 
 #define MOD_NAME "arp_spoof"
 #define MOD_HELP "detect ARP attacks and anomalies"
@@ -37,7 +34,7 @@
 #define ARPSPOOF_ARP_CACHE_OVERWRITE_ATTACK   4
 
 extern THREAD_LOCAL SimpleStats asstats;
-extern THREAD_LOCAL ProfileStats arpPerfStats;
+extern THREAD_LOCAL snort::ProfileStats arpPerfStats;
 
 struct IPMacEntry
 {
@@ -54,15 +51,15 @@ struct ArpSpoofConfig
     IPMacEntryList ipmel;
 };
 
-class ArpSpoofModule : public Module
+class ArpSpoofModule : public snort::Module
 {
 public:
     ArpSpoofModule();
-    ~ArpSpoofModule();
+    ~ArpSpoofModule() override;
 
-    bool set(const char*, Value&, SnortConfig*) override;
-    bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
+    bool begin(const char*, int, snort::SnortConfig*) override;
+    bool end(const char*, int, snort::SnortConfig*) override;
 
     ArpSpoofConfig* get_config();
 
@@ -72,8 +69,11 @@ public:
     unsigned get_gid() const override
     { return GID_ARP_SPOOF; }
 
-    const RuleMap* get_rules() const override;
-    ProfileStats* get_profile() const override;
+    const snort::RuleMap* get_rules() const override;
+    snort::ProfileStats* get_profile() const override;
+
+    Usage get_usage() const override
+    { return INSPECT; }
 
 private:
     ArpSpoofConfig* config;

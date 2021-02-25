@@ -1,29 +1,33 @@
-/****************************************************************************
- * Copyright (C) 2015 Cisco and/or its affiliates. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License Version 2 as
- * published by the Free Software Foundation.  You may not use, modify or
- * distribute this program under any other version of the GNU General
- * Public License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
- *
- ****************************************************************************/
+//--------------------------------------------------------------------------
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
+//
+// This program is free software; you can redistribute it and/or modify it
+// under the terms of the GNU General Public License Version 2 as published
+// by the Free Software Foundation.  You may not use, modify or distribute
+// this program under any other version of the GNU General Public License.
+//
+// This program is distributed in the hope that it will be useful, but
+// WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+//--------------------------------------------------------------------------
 
-#include <sys/types.h>
-#include "snort_types.h"
-#include "snort_debug.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include "pop_paf.h"
+
+#include "protocols/packet.h"
+#include "stream/stream.h"
+
 #include "pop.h"
+
+using namespace snort;
 
 extern POPToken pop_known_cmds[];
 
@@ -32,8 +36,8 @@ static inline PopPafData* get_state(Flow* flow, bool c2s)
     if ( !flow )
         return nullptr;
 
-    PopSplitter* s = (PopSplitter*)stream.get_splitter(flow, c2s);
-    return s ? &s->state : nullptr;
+    PopSplitter* s = (PopSplitter*)Stream::get_splitter(flow, c2s);
+    return (s and s->is_paf()) ? &s->state : nullptr;
 }
 
 /*
@@ -134,7 +138,7 @@ static inline bool process_command(PopPafData* pfdata, const uint8_t ch)
 static inline void reset_data_states(PopPafData* pfdata)
 {
     // reset MIME info
-    file_api->reset_mime_paf_state(&(pfdata->data_info));
+    reset_mime_paf_state(&(pfdata->data_info));
 
     // reset general pop fields
     pfdata->cmd_continued = false;
@@ -159,14 +163,13 @@ static inline int valid_response(const uint8_t data)
 
 /*
  * Client PAF calls this command to set the server's state.  This is the
- * function which ensure's the server know the correct expected
+ * function which ensures the server know the correct expected
  * DATA
  */
 static inline void set_server_state(Flow* ssn, PopExpectedResp state)
 {
     PopPafData* server_data = get_state(ssn, false);
 
-    // ERROR IF SERVER DATA DOES NOT EXIST!! SHOULD NOT BE POSSIBLE!!
     if (server_data)
     {
         reset_data_states(server_data);
@@ -197,11 +200,10 @@ static inline void reset_client_cmd_info(PopPafData* pfdata)
  */
 static bool find_data_end_multi_line(PopPafData* pfdata, const uint8_t ch, bool mime_data)
 {
-    // TODO:  This will currently flush on MIME boundary, and one line later at end of PDU
+    // FIXIT-M this will currently flush on MIME boundary, and one line later at end of PDU
 
-    if (file_api->check_data_end(&(pfdata->end_state), ch))
+    if (check_data_end(&(pfdata->end_state), ch))
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_POP, "End of Multi-line response found\n"); );
         pfdata->end_of_data = true;
         pfdata->pop_state = POP_PAF_SINGLE_LINE_STATE;
         reset_data_states(pfdata);
@@ -211,9 +213,8 @@ static bool find_data_end_multi_line(PopPafData* pfdata, const uint8_t ch, bool 
     // if this is a data command, search for MIME ending
     if (mime_data)
     {
-        if (file_api->process_mime_paf_data(&(pfdata->data_info), ch))
+        if (process_mime_paf_data(&(pfdata->data_info), ch))
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_POP, "Mime Boundary found.  Flushing data!\n"); );
             pfdata->cmd_continued = true;
             return true;
         }
@@ -229,7 +230,7 @@ static bool find_data_end_multi_line(PopPafData* pfdata, const uint8_t ch, bool 
  * PARAMS:
  *
  * RETURNS:
- *         0 - if terminatino sequence not found
+ *         0 - if termination sequence not found
  *         1 - if termination sequence found
  */
 static inline bool find_data_end_single_line(PopPafData* pfdata, const uint8_t ch, bool client)
@@ -242,8 +243,6 @@ static inline bool find_data_end_single_line(PopPafData* pfdata, const uint8_t c
         else
             reset_data_states(pfdata);
 
-        DEBUG_WRAP(DebugMessage(DEBUG_POP, "End of single-line response "
-            "found.  Flushing data!\n"); );
         return true;
     }
 
@@ -276,7 +275,7 @@ static StreamSplitter::Status pop_paf_server(PopPafData* pfdata,
             break;
 
         case POP_PAF_DATA_STATE:
-            // TODO --> statefully get length
+            // FIXIT-M statefully get length
             if ( find_data_end_multi_line(pfdata, ch, true) )
             {
                 *fp = i + 1;
@@ -316,7 +315,7 @@ static StreamSplitter::Status pop_paf_client(Flow* ssn, PopPafData* pfdata,
 {
     uint32_t i;
 
-    // TODO ... ensure current command is smaller than max command length
+    // FIXIT-M ensure current command is smaller than max command length
 
     for (i = 0; i < len; i++)
     {
@@ -330,7 +329,8 @@ static StreamSplitter::Status pop_paf_client(Flow* ssn, PopPafData* pfdata,
                 set_server_state(ssn, pfdata->pop_state);
             }
 
-        //break;  DO NOT UNCOMMENT!!  both cases should check for a LF.
+            // both cases should check for a LF.
+            // fallthrough
 
         case POP_CMD_FIN:
             if (find_data_end_single_line(pfdata, ch, true) )
@@ -368,7 +368,6 @@ PopSplitter::PopSplitter(bool c2s) : StreamSplitter(c2s)
     reset_data_states(&state);
 }
 
-PopSplitter::~PopSplitter() { }
 
 /* Function: pop_paf()
 
@@ -391,27 +390,20 @@ PopSplitter::~PopSplitter() { }
 */
 
 StreamSplitter::Status PopSplitter::scan(
-    Flow* ssn, const uint8_t* data, uint32_t len,
+    Packet* pkt, const uint8_t* data, uint32_t len,
     uint32_t flags, uint32_t* fp)
 {
     PopPafData* pfdata = &state;
 
     if (flags & PKT_FROM_SERVER)
-    {
-        DEBUG_WRAP(DebugMessage(DEBUG_POP, "PAF: From server.\n"); );
         return pop_paf_server(pfdata, data, len, fp);
-    }
     else
-    {
-        DEBUG_WRAP(DebugMessage(DEBUG_POP, "PAF: From client.\n"); );
-        return pop_paf_client(ssn, pfdata, data, len, fp);
-    }
+        return pop_paf_client(pkt->flow, pfdata, data, len, fp);
 }
 
-bool pop_is_data_end(void* session)
+bool pop_is_data_end(Flow* ssn)
 {
-    Flow* ssn = (Flow*)session;
     PopPafData* s = get_state(ssn, false);
-    return s->end_of_data;
+    return s ? s->end_of_data : false;
 }
 

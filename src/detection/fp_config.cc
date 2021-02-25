@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -23,57 +23,68 @@
 **  Marc Norton <mnorton@sourcefire.com>
 */
 
-#include "fp_config.h"
-
-#include <assert.h>
-#include <stdlib.h>
-#include <string.h>
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include "fp_config.h"
+
+#include <cassert>
+#include <cstring>
+
 #include "framework/mpse.h"
+#include "log/messages.h"
 #include "managers/mpse_manager.h"
-#include "parser/parser.h"
+
+using namespace snort;
 
 FastPatternConfig::FastPatternConfig()
 {
-    memset(this, 0, sizeof(*this));
-
-    inspect_stream_insert = false;
-    max_queue_events = 5;
-    bleedover_port_limit = 1024;
-
-    search_api = MpseManager::get_search_api("ac_bnfa_q");
+    search_api = MpseManager::get_search_api("ac_bnfa");
     assert(search_api);
-    trim = MpseManager::search_engine_trim(search_api);
 }
 
-FastPatternConfig::~FastPatternConfig()
-{ }
 
-int FastPatternConfig::set_detect_search_method(const char* method)
+bool FastPatternConfig::set_search_method(const char* method)
 {
-    search_api = MpseManager::get_search_api(method);
+    const MpseApi* api = MpseManager::get_search_api(method);
 
+    if ( !api )
+        return false;
+
+    search_api = api;
+    return true;
+}
+
+const char* FastPatternConfig::get_search_method()
+{
     if ( !search_api )
-    {
-        ParseError("invalid search-method '%s'", method);
-        return -1;
-    }
+        return nullptr;
 
-    trim = MpseManager::search_engine_trim(search_api);
-    return 0;
+    return search_api->base.name;
+}
+
+bool FastPatternConfig::set_offload_search_method(const char* method)
+{
+    const MpseApi* api = MpseManager::get_search_api(method);
+
+    if ( !api )
+        return false;
+
+    offload_search_api = api;
+    return true;
 }
 
 void FastPatternConfig::set_max_pattern_len(unsigned int max_len)
 {
     if (max_pattern_len != 0)
-        ParseWarning(WARN_CONF, "maximum pattern length redefined from %d to %d.\n",
+        ParseWarning(WARN_CONF, "maximum pattern length redefined from %d to %u.\n",
             max_pattern_len, max_len);
 
     max_pattern_len = max_len;
 }
 
-int FastPatternConfig::set_max(int bytes)
+unsigned FastPatternConfig::set_max(unsigned bytes)
 {
     if ( max_pattern_len and (bytes > max_pattern_len) )
     {
@@ -81,5 +92,10 @@ int FastPatternConfig::set_max(int bytes)
         num_patterns_truncated++;
     }
     return bytes;
+}
+
+void FastPatternConfig::set_queue_limit(unsigned int limit)
+{
+    queue_limit = limit;
 }
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,25 +17,38 @@
 //--------------------------------------------------------------------------
 // ftp_splitter.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "ftp_splitter.h"
-#include <string.h>
+#include "protocols/ssl.h"
+#include "protocols/packet.h"
+
+#include <cstring>
+
+using namespace snort;
 
 FtpSplitter::FtpSplitter(bool c2s) : StreamSplitter(c2s) { }
-FtpSplitter::~FtpSplitter() { }
 
 // flush at last line feed in data
 // preproc will deal with any pipelined commands
 StreamSplitter::Status FtpSplitter::scan(
-    Flow*, const uint8_t* data, uint32_t len,
+    Packet* p, const uint8_t* data, uint32_t len,
     uint32_t, uint32_t* fp)
 {
+    if(IsSSL(data, len, p->packet_flags))
+    {
+        *fp = len;
+        return FLUSH;
+    }
 #ifdef HAVE_MEMRCHR
-    uint8_t* lf =  (uint8_t*)memrchr(data, '\n', len);
+    const uint8_t* lf =  (const uint8_t*)memrchr(data, '\n', len);
 #else
     uint32_t n = len;
-    uint8_t* lf = NULL, * tmp = (uint8_t*)data;
+    const uint8_t* lf = nullptr, * tmp = data;
 
-    while ( (tmp = (uint8_t*)memchr(tmp, '\n', n)) )
+    while ( (tmp = (const uint8_t*)memchr(tmp, '\n', n)) )
     {
         lf = tmp++;
         n = len - (tmp - data);

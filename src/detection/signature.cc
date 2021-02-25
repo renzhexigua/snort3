@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -18,357 +18,522 @@
 //--------------------------------------------------------------------------
 // Author(s):   Andrew R. Baker <andrewb@sourcefire.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include <cassert>
+#include <iostream>
+#include <unordered_map>
+
 #include "signature.h"
 
-#include <string.h>
-#include <ctype.h>
-
-#include "utils/util.h"
-#include "detection/rules.h"
-#include "detection/treenodes.h"
-#include "hash/sfghash.h"
-#include "parser/parser.h"
+#include "framework/decode_data.h"
+#include "hash/hash_defs.h"
+#include "hash/ghash.h"
+#include "helpers/json_stream.h"
+#include "ips_options/ips_flowbits.h"
+#include "log/messages.h"
 #include "main/snort_config.h"
+#include "main/policy.h"
+#include "managers/inspector_manager.h"
+#include "parser/parser.h"
+#include "utils/util.h"
+#include "utils/util_cstring.h"
 
-/* for eval and free functions */
-#include "ips_options/ips_content.h"
+#include "treenodes.h"
 
-/********************* Reference Implementation *******************************/
+using namespace snort;
 
-ReferenceNode* AddReference(
-    SnortConfig* sc, ReferenceNode** head, const char* system, const char* id)
+//--------------------------------------------------------------------------
+// reference systems
+//--------------------------------------------------------------------------
+
+const ReferenceSystem* reference_system_add(
+    SnortConfig* sc, const std::string& name, const char* url)
 {
-    ReferenceNode* node;
+    if ( !sc->alert_refs() )
+        return nullptr;
 
-    if ((system == NULL) || (id == NULL) ||
-        (sc == NULL) || (head == NULL))
-    {
-        return NULL;
-    }
+    assert(!name.empty());
 
-    /* create the new node */
-    node = (ReferenceNode*)SnortAlloc(sizeof(ReferenceNode));
+    ReferenceSystem* sys = new ReferenceSystem(name, url);
+    sc->references[sys->name] = sys;
 
-    /* lookup the reference system */
-    node->system = ReferenceSystemLookup(sc->references, system);
-    if (node->system == NULL)
-        node->system = ReferenceSystemAdd(sc, system, NULL);
-
-    node->id = SnortStrdup(id);
-
-    /* Add the node to the front of the list */
-    node->next = *head;
-    *head = node;
-
-    return node;
+    return sys;
 }
 
-/* print a reference node */
-void FPrintReference(FILE* fp, ReferenceNode* ref_node)
+static const ReferenceSystem* reference_system_lookup(SnortConfig* sc, const std::string& key)
 {
-    if ((fp == NULL) || (ref_node == NULL))
+    const auto it = sc->references.find(key);
+
+    if ( it != sc->references.end() )
+        return it->second;
+
+    return nullptr;
+}
+
+//--------------------------------------------------------------------------
+// references
+//--------------------------------------------------------------------------
+
+void add_reference(
+    SnortConfig* sc, OptTreeNode* otn, const std::string& system, const std::string& id)
+{
+    if ( !sc->alert_refs() )
         return;
 
-    if (ref_node->system != NULL)
-    {
-        if (ref_node->system->url)
-        {
-            fprintf(fp, "[Xref => %s%s]", ref_node->system->url,
-                ref_node->id);
-        }
-        else
-        {
-            fprintf(fp, "[Xref => %s %s]", ref_node->system->name,
-                ref_node->id);
-        }
-    }
-    else
-    {
-        fprintf(fp, "[Xref => %s]", ref_node->id);
-    }
+    assert(sc and otn and !system.empty() and !id.empty());
+
+    const ReferenceSystem* sys = reference_system_lookup(sc, system);
+
+    if ( !sys )
+        sys = reference_system_add(sc, system);
+
+    ReferenceNode* node = new ReferenceNode(sys, id);
+    otn->sigInfo.refs.push_back(node);
 }
 
-/********************* End of Reference Implementation ************************/
+//--------------------------------------------------------------------------
+// classifications
+//--------------------------------------------------------------------------
 
-/********************** Reference System Implementation ***********************/
-
-ReferenceSystemNode* ReferenceSystemAdd(
-    SnortConfig* sc, const char* name, const char* url)
+void add_classification(
+    SnortConfig* sc, const char* name, const char* text, unsigned priority)
 {
-    ReferenceSystemNode** head = &sc->references;
-    ReferenceSystemNode* node;
-
-    if (name == NULL)
+    if ( get_classification(sc, name) )
     {
-        ErrorMessage("NULL reference system name\n");
-        return NULL;
+        ParseWarning(WARN_CONF, "Duplicate classification '%s' found, ignoring this line", name);
+        return;
     }
 
-    if (head == NULL)
-        return NULL;
-
-    /* create the new node */
-    node = (ReferenceSystemNode*)SnortAlloc(sizeof(ReferenceSystemNode));
-
-    node->name = SnortStrdup(name);
-    if (url != NULL)
-        node->url = SnortStrdup(url);
-
-    /* Add to the front of the list */
-    node->next = *head;
-    *head = node;
-
-    return node;
+    ClassType* ct = new ClassType(name, text, priority, sc->classifications.size() + 1);
+    sc->classifications[ct->name] = ct;
 }
 
-ReferenceSystemNode* ReferenceSystemLookup(ReferenceSystemNode* head, const char* name)
+const ClassType* get_classification(SnortConfig* sc, const char* type)
 {
-    if (name == NULL)
-        return NULL;
+    std::string key = type;
+    const auto it = sc->classifications.find(key);
 
-    while (head != NULL)
-    {
-        if (strcasecmp(name, head->name) == 0)
-            break;
+    if ( it != sc->classifications.end() )
+        return it->second;
 
-        head = head->next;
-    }
-
-    return head;
+    return nullptr;
 }
 
-/****************** End of Reference System Implementation ********************/
+//--------------------------------------------------------------------------
+// otn utilities
+//--------------------------------------------------------------------------
 
-/************************ Class/Priority Implementation ***********************/
-
-void AddClassification(
-    SnortConfig* sc, const char* type, const char* name, int priority)
+void OtnRemove(GHash* otn_map, OptTreeNode* otn)
 {
-    int max_id = 0;
-    ClassType* current = sc->classifications;
+    assert(otn_map and otn);
 
-    while (current != NULL)
-    {
-        /* dup check */
-        if (strcasecmp(current->type, type) == 0)
-        {
-            ParseWarning(WARN_CONF,
-                "Duplicate classification \"%s\""
-                "found, ignoring this line", type);
-            return;
-        }
-
-        if (current->id > max_id)
-            max_id = current->id;
-
-        current = current->next;
-    }
-
-    ClassType* new_node = (ClassType*)SnortAlloc(sizeof(ClassType));
-
-    new_node->type = SnortStrdup(type);
-    new_node->name = SnortStrdup(name);
-    new_node->priority = priority;
-    new_node->id = max_id + 1;
-
-    /* insert node */
-    new_node->next = sc->classifications;
-    sc->classifications = new_node;
-}
-
-/* NOTE:  This lookup can only be done during parse time */
-ClassType* ClassTypeLookupByType(SnortConfig* sc, const char* type)
-{
-    ClassType* node;
-
-    if (sc == NULL)
-        FatalError("%s(%d) Snort config is NULL.\n", __FILE__, __LINE__);
-
-    if (type == NULL)
-        return NULL;
-
-    node = sc->classifications;
-
-    while (node != NULL)
-    {
-        if (strcasecmp(type, node->type) == 0)
-            break;
-
-        node = node->next;
-    }
-
-    return node;
-}
-
-/* NOTE:  This lookup can only be done during parse time */
-ClassType* ClassTypeLookupById(SnortConfig* sc, int id)
-{
-    ClassType* node;
-
-    if (sc == NULL)
-        FatalError("%s(%d) Snort config is NULL.\n", __FILE__, __LINE__);
-
-    node = sc->classifications;
-
-    while (node != NULL)
-    {
-        if (id == node->id)
-            break;
-
-        node = node->next;
-    }
-
-    return node;
-}
-
-void OtnRemove(SFGHASH* otn_map, OptTreeNode* otn)
-{
     OtnKey key;
+    key.gid = otn->sigInfo.gid;
+    key.sid = otn->sigInfo.sid;
 
-    if (otn == NULL)
-        return;
-
-    key.gid = otn->sigInfo.generator;
-    key.sid = otn->sigInfo.id;
-
-    if (otn_map != NULL)
-        sfghash_remove(otn_map, &key);
+    otn_map->remove(&key);
 }
 
-void OtnFree(void* data)
+OptTreeNode::~OptTreeNode()
+{
+    OptFpList* opt = opt_func;
+
+    while ( opt )
+    {
+        OptFpList* tmp = opt;
+        opt = opt->next;
+        snort_free(tmp);
+    }
+
+    for ( auto& ref : sigInfo.refs )
+        delete ref;
+
+    if ( tag )
+        snort_free(tag);
+
+    if ( soid )
+        snort_free(soid);
+
+    if (proto_nodes)
+        snort_free(proto_nodes);
+
+    if (detection_filter)
+        snort_free(detection_filter);
+
+    delete sigInfo.body;
+    delete[] state;
+}
+
+static void OtnFree(void* data)
 {
     OptTreeNode* otn = (OptTreeNode*)data;
-    OptFpList* opt_func;
-    ReferenceNode* ref_node;
-    unsigned int svc_idx;
+    delete otn;
+}
 
-    if (otn == NULL)
+GHash* OtnLookupNew()
+{
+    return new GHash(10000, sizeof(OtnKey), 0, OtnFree);
+}
+
+void OtnLookupAdd(GHash* otn_map, OptTreeNode* otn)
+{
+    assert(otn_map);
+
+    OtnKey key;
+    key.gid = otn->sigInfo.gid;
+    key.sid = otn->sigInfo.sid;
+
+    int status = otn_map->insert(&key, otn);
+    if ( status == HASH_OK )
         return;
 
-    opt_func = otn->opt_func;
-
-    while (opt_func != NULL)
-    {
-        OptFpList* tmp = opt_func;
-        opt_func = opt_func->next;
-        free(tmp);
-    }
-
-    if (otn->sigInfo.message != NULL)
-    {
-        if (!otn->generated)
-            free(otn->sigInfo.message);
-    }
-    for (svc_idx = 0; svc_idx < otn->sigInfo.num_services; svc_idx++)
-    {
-        if (otn->sigInfo.services[svc_idx].service)
-            free(otn->sigInfo.services[svc_idx].service);
-    }
-    if (otn->sigInfo.services)
-        free(otn->sigInfo.services);
-
-    ref_node = otn->sigInfo.refs;
-    while (ref_node != NULL)
-    {
-        ReferenceNode* tmp = ref_node;
-
-        ref_node = ref_node->next;
-        free(tmp->id);
-        free(tmp);
-    }
-
-    if (otn->tag != NULL)
-        free(otn->tag);
-
-    if ( otn->soid )
-        free(otn->soid);
-
-    /* RTN was generated on the fly.  Don't necessarily know which policy
-     * at this point so go through all RTNs and delete them */
-    if (otn->generated)
-    {
-        int i;
-
-        for (i = 0; i < otn->proto_node_num; i++)
-        {
-            RuleTreeNode* rtn = deleteRtnFromOtn(otn, i);
-            if (rtn != NULL)
-                free(rtn);
-        }
-    }
-
-    if (otn->proto_nodes)
-        free(otn->proto_nodes);
-
-    if (otn->detection_filter)
-        free(otn->detection_filter);
-
-    free(otn->state);
-    free(otn);
+    assert(status == HASH_INTABLE);
+    ParseError("duplicate rule with same gid (%u) and sid (%u)", key.gid, key.sid);
 }
 
-SFGHASH* OtnLookupNew(void)
+OptTreeNode* OtnLookup(GHash* otn_map, uint32_t gid, uint32_t sid)
 {
-    return sfghash_new(10000, sizeof(OtnKey), 0, OtnFree);
-}
+    assert(otn_map);
 
-void OtnLookupAdd(SFGHASH* otn_map, OptTreeNode* otn)
-{
-    int status;
     OtnKey key;
-
-    if (otn_map == NULL)
-        return;
-
-    key.gid = otn->sigInfo.generator;
-    key.sid = otn->sigInfo.id;
-
-    status = sfghash_add(otn_map, &key, otn);
-    switch (status)
-    {
-    case SFGHASH_OK:
-        /* otn was inserted successfully */
-        break;
-
-    case SFGHASH_INTABLE:
-        ParseError("duplicate rule with same gid (%u) and sid (%u)",
-            key.gid, key.sid);
-        break;
-
-    case SFGHASH_NOMEM:
-        FatalError("Failed to allocate memory for rule.\n");
-        break;
-
-    default:
-        FatalError("%s(%d): OtnLookupAdd() - unexpected return value "
-            "from sfghash_add().\n", __FILE__, __LINE__);
-        break;
-    }
-}
-
-OptTreeNode* OtnLookup(SFGHASH* otn_map, uint32_t gid, uint32_t sid)
-{
-    OptTreeNode* otn;
-    OtnKey key;
-
-    if (otn_map == NULL)
-        return NULL;
-
     key.gid = gid;
     key.sid = sid;
 
-    otn = (OptTreeNode*)sfghash_find(otn_map, &key);
+    OptTreeNode* otn = (OptTreeNode*)otn_map->find(&key);
 
     return otn;
 }
 
-void OtnLookupFree(SFGHASH* otn_map)
+OptTreeNode* GetOTN(uint32_t gid, uint32_t sid)
 {
-    if (otn_map == NULL)
-        return;
+    OptTreeNode* otn = OtnLookup(SnortConfig::get_conf()->otn_map, gid, sid);
 
-    sfghash_delete(otn_map);
+    if ( !otn )
+        return nullptr;
+
+    if ( !getRtnFromOtn(otn) )
+    {
+        // If not configured to autogenerate and there isn't an RTN, meaning
+        // this rule isn't in the current policy, return nullptr.
+        return nullptr;
+    }
+
+    return otn;
 }
 
-/***************** End of Class/Priority Implementation ***********************/
+void OtnLookupFree(GHash* otn_map)
+{
+    if ( otn_map )
+        delete otn_map;
+}
+
+//--------------------------------------------------------------------------
+// dump msg map
+//--------------------------------------------------------------------------
+
+void dump_msg_map(const SnortConfig* sc)
+{
+    GHashNode* ghn = sc->otn_map->find_first();
+
+    while ( ghn )
+    {
+        const OptTreeNode* otn = (OptTreeNode*)ghn->data;
+        const SigInfo& si = otn->sigInfo;
+
+        std::cout << si.gid << " || ";
+        std::cout << si.sid << " || ";
+        std::cout << si.rev << " || ";
+        std::cout << si.message;
+
+        for ( const auto& rn : si.refs )
+            std::cout << " || " << rn->system->name << "," << rn->id;
+
+        std::cout << std::endl;
+        ghn = sc->otn_map->find_next();
+    }
+}
+
+//--------------------------------------------------------------------------
+// dump rule meta
+//--------------------------------------------------------------------------
+
+static void get_flow_bits(
+    const OptTreeNode* otn, std::vector<std::string>& setters, std::vector<std::string>& checkers)
+{
+    OptFpList* p = otn->opt_func;
+
+    while ( p )
+    {
+        if ( p->type == RULE_OPTION_TYPE_FLOWBIT )
+        {
+            bool set;
+            std::vector<std::string> bits;
+            get_flowbits_dependencies(p->ips_opt, set, bits);
+
+            if ( !bits.empty() )
+            {
+                if ( set )
+                    setters.insert(setters.end(), bits.begin(), bits.end());
+                else
+                    checkers.insert(checkers.end(), bits.begin(), bits.end());
+            }
+        }
+        p = p->next;
+    }
+}
+
+static void dump_sid(JsonStream& j, const SigInfo& si)
+{
+    j.put("gid", si.gid);
+    j.put("sid", si.sid);
+    j.put("rev", si.rev);
+}
+
+static void dump_header(JsonStream& j, const RuleHeader* h)
+{
+    assert(h);
+
+    // all rules have actions
+    j.put("action", h->action);
+
+    // builtin stubs only have actions
+    if ( !h->proto.empty() )
+        j.put("proto", h->proto);
+
+    if ( !h->src_nets.empty() )
+        j.put("src_nets", h->src_nets);
+
+    if ( !h->src_ports.empty() )
+        j.put("src_ports", h->src_ports);
+
+    if ( !h->dir.empty() )
+        j.put("direction", h->dir);
+
+    if ( !h->dst_nets.empty() )
+        j.put("dst_nets", h->dst_nets);
+
+    if ( !h->dst_ports.empty() )
+        j.put("dst_ports", h->dst_ports);
+}
+
+static void dump_info(JsonStream& j, const SigInfo& si)
+{
+    if ( si.class_type )
+        j.put("classtype", si.class_type->name);
+
+    j.put("priority", si.priority);
+
+    size_t n = si.message.length();
+    assert(n > 2 and si.message[0] == '"' and si.message[n-1] == '"');
+    std::string msg = si.message.substr(1, n-2);
+
+    if ( msg != "no msg in rule" )
+        j.put("msg", msg);
+}
+
+static void dump_services(JsonStream& json, const SigInfo& si)
+{
+    if ( si.services.empty() )
+        return;
+
+    json.open_array("services");
+
+    for ( const auto& svc : si.services )
+        json.put(nullptr, svc.service);
+
+    json.close_array();
+}
+
+static void dump_bits(JsonStream& json, const char* key, std::vector<std::string>& bits)
+{
+    if ( bits.empty() )
+        return;
+
+    json.open_array(key);
+
+    for ( const auto& s : bits )
+        json.put(nullptr, s);
+
+    json.close_array();
+}
+
+static void dump_refs(JsonStream& json, const SigInfo& si)
+{
+    if ( si.refs.empty() )
+        return;
+
+    json.open_array("references");
+
+    for ( const auto& rn : si.refs )
+    {
+        json.open();
+        json.put("system", rn->system->name);
+        json.put("id", rn->id);
+        json.close();
+    }
+
+    json.close_array();
+}
+
+static void dump_rule(JsonStream& json, const RuleHeader* h, const SigInfo& si)
+{
+    json.put("body", *si.body);
+
+    std::string s = h->action;
+
+    if ( !h->proto.empty() )
+        s += " " + h->proto;
+
+    if ( !h->src_nets.empty() )
+        s += " " + h->src_nets;
+
+    if ( !h->src_ports.empty() )
+        s += " " + h->src_ports;
+
+    if ( !h->dir.empty() )
+        s += " " + h->dir;
+
+    if ( !h->dst_nets.empty() )
+        s += " " + h->dst_nets;
+
+    if ( !h->dst_ports.empty() )
+        s += " " + h->dst_ports;
+
+    s += " " + *si.body;
+    json.put("rule", s);
+}
+
+void dump_rule_meta(const SnortConfig* sc)
+{
+    GHashNode* ghn = sc->otn_map->find_first();
+    JsonStream json(std::cout);
+
+    while ( ghn )
+    {
+        const OptTreeNode* otn = (OptTreeNode*)ghn->data;
+        const RuleTreeNode* rtn = otn->proto_nodes[0];
+        const SigInfo& si = otn->sigInfo;
+
+        json.open();
+
+        dump_sid(json, si);
+        dump_header(json, rtn->header);
+        dump_info(json, si);
+        dump_services(json, si);
+
+        std::vector<std::string> setters;
+        std::vector<std::string> checkers;
+        get_flow_bits(otn, setters, checkers);
+
+        dump_bits(json, "sets", setters);
+        dump_bits(json, "checks", checkers);
+
+        dump_refs(json, si);
+        dump_rule(json, rtn->header, si);
+
+        json.close();
+        ghn = sc->otn_map->find_next();
+    }
+}
+
+//--------------------------------------------------------------------------
+// dump rule states
+//--------------------------------------------------------------------------
+
+void dump_rule_state(const SnortConfig* sc)
+{
+    GHashNode* ghn = sc->otn_map->find_first();
+    JsonStream json(std::cout);
+
+    while ( ghn )
+    {
+        const OptTreeNode* otn = (OptTreeNode*)ghn->data;
+        const SigInfo& si = otn->sigInfo;
+
+        json.open();
+        json.put("gid", si.gid);
+        json.put("sid", si.sid);
+        json.put("rev", si.rev);
+        json.open_array("states");
+
+        for ( unsigned i = 0; i < otn->proto_node_num; ++i )
+        {
+            const RuleTreeNode* rtn = otn->proto_nodes[i];
+
+            if ( !rtn )
+                continue;
+
+            json.open();
+
+            auto pid = snort::get_ips_policy(sc, i)->user_policy_id;
+            json.put("policy", pid);
+
+            const char* s = Actions::get_string(rtn->action);
+            json.put("action", s);
+
+            s = rtn->enabled() ? "enabled" : "disabled";
+            json.put("state", s);
+
+            json.close();
+        }
+        json.close_array();
+        json.close();
+
+        ghn = sc->otn_map->find_next();
+    }
+}
+
+//--------------------------------------------------------------------------
+// dump rule dependencies
+//--------------------------------------------------------------------------
+
+using SvcMap = std::unordered_map<std::string, std::vector<std::string>>;
+
+static SvcMap get_dependencies()
+{
+    SvcMap map;
+    std::vector<const InspectApi*> apis = InspectorManager::get_apis();
+
+    for ( const auto* p : apis )
+    {
+        if ( !p->service )
+            continue;
+
+        std::vector<std::string>& v = map[p->service];
+        v.emplace_back(p->base.name);
+
+        // FIXIT-L need NHI to advertise dependency on H2I
+        if ( !strcmp(p->base.name, "http2_inspect") )
+            v.emplace_back("http_inspect");
+
+        if ( p->proto_bits & (PROTO_BIT__TCP|PROTO_BIT__PDU) )
+            v.emplace_back("stream_tcp");
+
+        if ( p->proto_bits & PROTO_BIT__UDP )
+            v.emplace_back("stream_udp");
+    }
+    return map;
+}
+
+void dump_rule_deps(const SnortConfig*)
+{
+    SvcMap map = get_dependencies();
+    JsonStream json(std::cout);
+
+    for ( const auto& it : map )
+    {
+        json.open();
+        json.put("service", it.first);
+        json.open_array("requires");
+
+        for ( const auto& s : it.second )
+            json.put(nullptr, s);
+
+        json.close_array();
+        json.close();
+    }
+}
 

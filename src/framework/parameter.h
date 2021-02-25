@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,18 +20,33 @@
 #ifndef PARAMETER_H
 #define PARAMETER_H
 
+// Parameter provides basic parsing from Lua types into meaningful C++
+// types.  Modules support a list of parameters.
+//
 // number ranges are given by:
 // nullptr -> any
 // # | #: | :# | #:#
 // where # is any valid pos|neg dec|hex|octal number
-struct Parameter
+
+#include <functional>
+#include "main/snort_types.h"
+
+namespace snort
 {
+class Value;
+
+struct SO_PUBLIC Parameter
+{
+    using RangeQuery = std::function<const char*()>;
+
     enum Type
     {
         PT_TABLE,      // range is Parameter*, no default
         PT_LIST,       // range is Parameter*, no default
+        PT_DYNAMIC,    // range is RangeQuery*
         PT_BOOL,       // if you are reading this, get more coffee
-        PT_INT,        // signed 64 bits or less determined by range
+        PT_INT,        // signed 53 bits or less determined by range
+        PT_INTERVAL,   // string that defines an interval, bounds within range
         PT_REAL,       // double
         PT_PORT,       // 0 to 64K-1 unless specified otherwise
         PT_STRING,     // any string less than len chars
@@ -49,13 +64,17 @@ struct Parameter
     };
     const char* name;
     Type type;
-    const void* range;  // nullptr|const char*|const Parameter*
+    const void* range;  // nullptr|const char*|RangeQuery*|const Parameter*
     const char* deflt;
     const char* help;
 
-    const char* get_type() const;
+    Parameter(const char* n, Type t, const void* r, const char* d, const char* h) :
+        name(n), type(t), range(r), deflt(d), help(h) { }
 
-    bool validate(class Value&) const;
+    const char* get_type() const;
+    const char* get_range() const;
+
+    bool validate(Value&) const;
 
     bool is_positional() const
     { return ( name && *name == '~' ); }
@@ -77,7 +96,10 @@ struct Parameter
 
     // 0-based; -1 if not found; list is | delimited
     static int index(const char* list, const char* key);
-};
 
+    // convert string to long (including 'maxN' literals)
+    static int64_t get_int(const char*);
+};
+}
 #endif
 

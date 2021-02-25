@@ -1,31 +1,25 @@
 
 set (HASH_INCLUDES
+    ghash.h
     hashes.h
-    sfghash.h 
-    sfxhash.h 
-    sfhashfcn.h 
+    hash_defs.h
+    hash_key_operations.h
+    lru_cache_shared.h
+    xhash.h
 )
 
-set (HASH_SOURCES )
-
-if ( NOT HAVE_OPENSSL_MD5 )
-    list(APPEND HASH_SOURCES md5.c md5.h)
-endif ()
-
-if ( NOT HAVE_OPENSSL_SHA )
-    list(APPEND HASH_SOURCES sha2.c sha2.h)
-endif ()
-
-add_library( hash STATIC
+add_library( hash OBJECT
     ${HASH_INCLUDES}
-    ${HASH_SOURCES}
+    ghash.cc
     hashes.cc
-    sfghash.cc 
-    sfhashfcn.cc 
-    sfprimetable.cc 
-    sfprimetable.h 
-    sfxhash.cc 
-    zhash.cc 
+    hash_lru_cache.cc
+    hash_lru_cache.h
+    hash_key_operations.cc
+    lru_cache_shared.cc
+    primetable.cc
+    primetable.h
+    xhash.cc
+    zhash.cc
     zhash.h
 )
 
@@ -33,3 +27,4 @@ install(FILES ${HASH_INCLUDES}
     DESTINATION "${INCLUDE_INSTALL_PATH}/hash"
 )
 
+add_subdirectory ( test )

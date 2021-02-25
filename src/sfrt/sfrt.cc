@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2006-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -18,9 +18,8 @@
 //--------------------------------------------------------------------------
 
 /*
- * @file    sfrt.c
- * @author  Adam Keeton <akeeton@sourcefire.com>
- * @date    Thu July 20 10:16:26 EDT 2006
+ * sfrt.cc author Adam Keeton <akeeton@sourcefire.com>
+ * Thu July 20 10:16:26 EDT 2006
  *
  * Route implements two different routing table lookup mechanisms.  The table
  * lookups have been adapted to return a void pointer so any information can
@@ -35,7 +34,7 @@
  * then more specific information will be written into the routing tables
  * from RNA.  Ideally, information will only move from less specific to more
  * specific.  If a more general information is to overwrite existing entries,
- * the table should be free'ed and rebuilt.
+ * the table should be freed and rebuilt.
  *
  *
  * Implementation:
@@ -48,13 +47,13 @@
  * Inserts are performed by specifying a CIDR and a pointer to its associated
  * data.  Since a new routing table entry may overwrite previous entries,
  * a flag selects whether the insert favors the most recent or favors the most
- * specific.  Favoring most specific should be the default behvior.  If
+ * specific.  Favoring most specific should be the default behavior.  If
  * the user wishes to overwrite routing entries with more general data, the
  * table should be flushed, rather than using favor-most-recent.
  *
  * Before modifying the routing or data tables, the insert function performs a
- * lookup on the CIDR-to-be-insertted.  If no entry or an entry *of differing
- * bit length* is found, the data is insertted into the data table, and its
+ * lookup on the CIDR-to-be-inserted.  If no entry or an entry *of differing
+ * bit length* is found, the data is inserted into the data table, and its
  * index is used for the new routing table entry.  If an entry is found that
  * is as specific as the new CIDR, the index stored points to where the new
  * data is written into the data table.
@@ -78,12 +77,16 @@
  *  sfrt_free   - free table
 */
 
-#include "sfrt.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "snort_types.h"
+
+#include "sfrt.h"
+
+#include "sfip/sf_cidr.h"
+#include "utils/util.h"
+
+using namespace snort;
 
 const char* rt_error_messages[] =
 {
@@ -93,12 +96,6 @@ const char* rt_error_messages[] =
     "Dir Insert Failure",
     "Dir Lookup Failure",
     "Memory Allocation Failure"
-#ifdef SUPPORT_LCTRIE
-    ,
-    "LC Trie Compile Failure",
-    "LC Trie Insert Failure",
-    "LC Trie Lookup Failure"
-#endif
 };
 
 static inline int allocateTableIndex(table_t* table);
@@ -111,32 +108,19 @@ static inline int allocateTableIndex(table_t* table);
  * Returns the new table. */
 table_t* sfrt_new(char table_type, char ip_type, long data_size, uint32_t mem_cap)
 {
-    table_t* table = (table_t*)malloc(sizeof(table_t));
-
-    if (!table)
-    {
-        return NULL;
-    }
+    table_t* table = (table_t*)snort_alloc(sizeof(table_t));
 
     /* If this limit is exceeded, there will be no way to distinguish
-     * between pointers and indeces into the data table.  Only
+     * between pointers and indices into the data table.  Only
      * applies to DIR-n-m. */
-#ifdef SUPPORT_LCTRIE
-#if SIZEOF_LONG_INT == 8
-    if (data_size >= 0x800000000000000 && table_type == LCT)
-#else
-    if (data_size >= 0x8000000 && table_type != LCT)
-#endif
-#else /* SUPPORT_LCTRIE */
 #if SIZEOF_LONG_INT == 8
     if (data_size >= 0x800000000000000)
 #else
     if (data_size >= 0x8000000)
 #endif
-#endif
     {
-        free(table);
-        return NULL;
+        snort_free(table);
+        return nullptr;
     }
 
     /* mem_cap is specified in megabytes, but internally uses bytes. Convert */
@@ -146,46 +130,21 @@ table_t* sfrt_new(char table_type, char ip_type, long data_size, uint32_t mem_ca
     table->max_size = data_size;
     table->lastAllocatedIndex = 0;
 
-    table->data = (GENERIC*)calloc(sizeof(GENERIC) * table->max_size, 1);
-
-    if (!table->data)
-    {
-        free(table);
-        return NULL;
-    }
-
+    table->data = (GENERIC*)snort_calloc(sizeof(GENERIC) * table->max_size);
     table->allocated = sizeof(table_t) + sizeof(GENERIC) * table->max_size;
 
     table->ip_type = ip_type;
     table->table_type = table_type;
 
     /* This will point to the actual table lookup algorithm */
-    table->rt = NULL;
-    table->rt6 = NULL;
+    table->rt = nullptr;
+    table->rt6 = nullptr;
 
     /* index 0 will be used for failed lookups, so set this to 1 */
     table->num_ent = 1;
 
     switch (table_type)
     {
-#ifdef SUPPORT_LCTRIE
-    /* Setup LC-trie table */
-    case LCT:
-        /* LC trie is presently not allowed  */
-        table->insert = sfrt_lct_insert;
-        table->lookup = sfrt_lct_lookup;
-        table->free = sfrt_lct_free;
-        table->usage = sfrt_lct_usage;
-        table->print = NULL;
-        table->remove = NULL;
-
-        table->rt = sfrt_lct_new(data_size);
-        free(table->data);
-        free(table);
-        return NULL;
-
-        break;
-#endif
     /* Setup DIR-n-m table */
     case DIR_24_8:
     case DIR_16x2:
@@ -208,9 +167,9 @@ table_t* sfrt_new(char table_type, char ip_type, long data_size, uint32_t mem_ca
         break;
 
     default:
-        free(table->data);
-        free(table);
-        return NULL;
+        snort_free(table->data);
+        snort_free(table);
+        return nullptr;
     }
 
     /* Allocate the user-specified DIR-n-m table */
@@ -267,9 +226,9 @@ table_t* sfrt_new(char table_type, char ip_type, long data_size, uint32_t mem_ca
             table->free(table->rt);
         if (table->rt6)
             table->free(table->rt6);
-        free(table->data);
-        free(table);
-        return NULL;
+        snort_free(table->data);
+        snort_free(table);
+        return nullptr;
     }
 
     return table;
@@ -290,7 +249,7 @@ void sfrt_free(table_t* table)
     }
     else
     {
-        free(table->data);
+        snort_free(table->data);
     }
 
     if (!table->rt)
@@ -311,163 +270,42 @@ void sfrt_free(table_t* table)
         table->free(table->rt6);
     }
 
-    free(table);
+    snort_free(table);
 }
 
 /* Perform a lookup on value contained in "ip" */
-GENERIC sfrt_lookup(sfip_t* ip, table_t* table)
+GENERIC sfrt_lookup(const SfIp* ip, table_t* table)
 {
     tuple_t tuple;
-    void* rt = NULL;
+    const uint32_t* addr;
+    int numAddrDwords;
+    void* rt ;
 
-    if (!ip)
-    {
-        return NULL;
-    }
+    if (!ip || !table || !table->lookup)
+        return nullptr;
 
-    if (!table || !table->lookup)
+    if (ip->is_ip4())
     {
-        return NULL;
-    }
-
-    if (ip->family == AF_INET)
-    {
+        addr = ip->get_ip4_ptr();
+        numAddrDwords = 1;
         rt = table->rt;
     }
-    else if (ip->family == AF_INET6)
+    else
     {
+        addr = ip->get_ip6_ptr();
+        numAddrDwords = 4;
         rt = table->rt6;
     }
 
     if (!rt)
-    {
-        return NULL;
-    }
+        return nullptr;
 
-    tuple = table->lookup(ip, rt);
+    tuple = table->lookup(addr, numAddrDwords, rt);
 
     if (tuple.index >= table->max_size)
-    {
-        return NULL;
-    }
+        return nullptr;
 
     return table->data[tuple.index];
-}
-
-void sfrt_iterate(table_t* table, sfrt_iterator_callback userfunc)
-{
-    uint32_t index, count;
-
-    if (!table)
-        return;
-
-    for (index = 0, count = 0;
-        index < table->max_size;
-        index++)
-    {
-        if (table->data[index])
-        {
-            userfunc(table->data[index]);
-            if (++count == table->num_ent)
-                break;
-        }
-    }
-}
-
-void sfrt_iterate_with_snort_config(
-    SnortConfig* sc, table_t* table, sfrt_sc_iterator_callback userfunc)
-{
-    uint32_t index, count;
-
-    if (!table)
-        return;
-
-    for (index = 0, count = 0;
-        index < table->max_size;
-        index++)
-    {
-        if (table->data[index])
-        {
-            userfunc(sc, table->data[index]);
-            if (++count == table->num_ent)
-                break;
-        }
-    }
-}
-
-int sfrt_iterate2(table_t* table, sfrt_iterator_callback3 userfunc)
-{
-    uint32_t index, count;
-    if (!table)
-        return 0;
-
-    for (index = 0, count = 0;
-        index < table->max_size;
-        index++)
-    {
-        if (table->data[index])
-        {
-            int ret = userfunc(table->data[index]);
-            if (ret != 0)
-                return ret;
-            if (++count == table->num_ent)
-                break;
-        }
-    }
-
-    return 0;
-}
-
-int sfrt_iterate2_with_snort_config(
-    SnortConfig* sc, table_t* table, sfrt_sc_iterator_callback3 userfunc)
-{
-    uint32_t index, count;
-    if (!table)
-        return 0;
-
-    for (index = 0, count = 0;
-        index < table->max_size;
-        index++)
-    {
-        if (table->data[index])
-        {
-            int ret = userfunc(sc, table->data[index]);
-            if (ret != 0)
-                return ret;
-            if (++count == table->num_ent)
-                break;
-        }
-    }
-
-    return 0;
-}
-
-void sfrt_cleanup2(
-    table_t* table,
-    sfrt_iterator_callback2 cleanup_func,
-    void* data
-    )
-{
-    uint32_t index, count;
-    if (!table)
-        return;
-
-    for (index = 0, count = 0;
-        index < table->max_size;
-        index++)
-    {
-        if (table->data[index])
-        {
-            cleanup_func(table->data[index], data);
-
-            /* cleanup_func is supposed to free memory associated with this
-             * table->data[index].  Set that to NULL.
-             */
-            table->data[index] = NULL;
-            if (++count == table->num_ent)
-                break;
-        }
-    }
 }
 
 void sfrt_cleanup(table_t* table, sfrt_iterator_callback cleanup_func)
@@ -488,7 +326,7 @@ void sfrt_cleanup(table_t* table, sfrt_iterator_callback cleanup_func)
             /* cleanup_func is supposed to free memory associated with this
              * table->data[index].  Set that to NULL.
              */
-            table->data[index] = NULL;
+            table->data[index] = nullptr;
 
             if (++count == table->num_ent)
                 break;
@@ -496,52 +334,63 @@ void sfrt_cleanup(table_t* table, sfrt_iterator_callback cleanup_func)
     }
 }
 
-GENERIC sfrt_search(sfip_t* ip, unsigned char len, table_t* table)
+GENERIC sfrt_search(const SfIp* ip, unsigned char len, table_t* table)
 {
+    const uint32_t* addr;
+    int numAddrDwords;
     tuple_t tuple;
-    void* rt = NULL;
+    void* rt;
 
-    if ((ip == NULL) || (table == NULL) || (len == 0))
-        return NULL;
+    if ((ip == nullptr) || (table == nullptr) || (len == 0))
+        return nullptr;
 
-    if (ip->family == AF_INET)
+    if (ip->is_ip4())
     {
+        addr = ip->get_ip4_ptr();
+        numAddrDwords = 1;
         rt = table->rt;
     }
-    else if (ip->family == AF_INET6)
+    else if (ip->is_ip6())
     {
+        addr = ip->get_ip6_ptr();
+        numAddrDwords = 4;
         rt = table->rt6;
     }
-    /* IPv6 not yet supported */
+    else
+        return nullptr;
+
+    // FIXIT-RC IPv6 not yet supported by sfrt?
     if (table->ip_type == IPv6)
-        return NULL;
+        return nullptr;
 
     if ( (table->ip_type == IPv4 && len > 32) ||
         (table->ip_type == IPv6 && len > 128) )
     {
-        return NULL;
+        return nullptr;
     }
 
-    tuple = table->lookup(ip, rt);
+    tuple = table->lookup(addr, numAddrDwords, rt);
 
     if (tuple.length != len)
-        return NULL;
+        return nullptr;
 
     return table->data[tuple.index];
 }
 
-/* Insert "ip", of length "len", into "table", and have it point to "ptr"
-   Insert "ip", of length "len", into "table", and have it point to "ptr" */
-int sfrt_insert(sfip_t* ip, unsigned char len, GENERIC ptr,
+/* Insert "ip", of length "len", into "table", and have it point to "ptr" */
+int sfrt_insert(SfCidr* cidr, unsigned char len, GENERIC ptr,
     int behavior, table_t* table)
 {
+    const uint32_t* addr;
+    const SfIp* ip;
+    int numAddrDwords;
     int index;
     int newIndex = 0;
     int res;
     tuple_t tuple;
-    void* rt = NULL;
+    void* rt;
 
-    if (!ip)
+    if (!cidr)
     {
         return RT_INSERT_FAILURE;
     }
@@ -562,39 +411,29 @@ int sfrt_insert(sfip_t* ip, unsigned char len, GENERIC ptr,
 
     /* Check if we can reuse an existing data table entry by
      * seeing if there is an existing entry with the same length. */
-    /* Only perform this if the table is not an LC-trie */
-#ifdef SUPPORT_LCTRIE
-    if (table->table_type != LCT)
+    ip = cidr->get_addr();
+    if (ip->is_ip4())
     {
-#endif
-
-    if (ip->family == AF_INET)
-    {
+        if (len < 96)
+            return RT_INSERT_FAILURE;
+        len -= 96;
+        addr = ip->get_ip4_ptr();
+        numAddrDwords = 1;
         rt = table->rt;
     }
-    else if (ip->family == AF_INET6)
+    else if (ip->is_ip6())
     {
+        addr = ip->get_ip6_ptr();
+        numAddrDwords = 4;
         rt = table->rt6;
     }
-    if (!rt)
-    {
+    else
         return RT_INSERT_FAILURE;
-    }
 
-    tuple = table->lookup(ip, rt);
+    tuple = table->lookup(addr, numAddrDwords, rt);
 
-#ifdef SUPPORT_LCTRIE
-}
-
-#endif
-
-#ifdef SUPPORT_LCTRIE
-    if (table->table_type == LCT || tuple.length != len)
-    {
-#else
     if (tuple.length != len)
     {
-#endif
         if ( table->num_ent >= table->max_size)
         {
             return RT_POLICY_TABLE_EXCEEDED;
@@ -611,7 +450,7 @@ int sfrt_insert(sfip_t* ip, unsigned char len, GENERIC ptr,
 
     /* The actual value that is looked-up is an index
      * into the data table. */
-    res = table->insert(ip, len, index, behavior, rt);
+    res = table->insert(addr, numAddrDwords, len, index, behavior, rt);
 
     if ((res == RT_SUCCESS) && newIndex)
     {
@@ -677,13 +516,16 @@ uint32_t sfrt_usage(table_t* table)
  * will then point to null data. This can cause hung or crosslinked data. RT_FAVOR_SPECIFIC does not have this drawback.
  * hung or crosslinked entries.
  */
-int sfrt_remove(sfip_t* ip, unsigned char len, GENERIC* ptr,
+int sfrt_remove(SfCidr* cidr, unsigned char len, GENERIC* ptr,
     int behavior, table_t* table)
 {
+    const uint32_t* addr;
+    const SfIp* ip;
+    int numAddrDwords;
     int index;
-    void* rt = NULL;
+    void* rt;
 
-    if (!ip)
+    if (!cidr)
     {
         return RT_REMOVE_FAILURE;
     }
@@ -692,10 +534,7 @@ int sfrt_remove(sfip_t* ip, unsigned char len, GENERIC* ptr,
         return RT_REMOVE_FAILURE;
 
     if (!table || !table->data || !table->remove || !table->lookup )
-    {
-        //remove operation will fail for LCT since this operation is not implemented
         return RT_REMOVE_FAILURE;
-    }
 
     if ( (table->ip_type == IPv4 && len > 32) ||
         (table->ip_type == IPv6 && len > 128) )
@@ -703,38 +542,34 @@ int sfrt_remove(sfip_t* ip, unsigned char len, GENERIC* ptr,
         return RT_REMOVE_FAILURE;
     }
 
-#ifdef SUPPORT_LCTRIE
-    if (table->table_type != LCT)
+    ip = cidr->get_addr();
+    if (ip->is_ip4())
     {
-#endif
-
-    if (ip->family == AF_INET)
-    {
+        if (len < 96)
+            return RT_REMOVE_FAILURE;
+        len -= 96;
+        addr = ip->get_ip4_ptr();
+        numAddrDwords = 1;
         rt = table->rt;
     }
-    else if (ip->family == AF_INET6)
+    else if (ip->is_ip6())
     {
+        addr = ip->get_ip6_ptr();
+        numAddrDwords = 4;
         rt = table->rt6;
     }
-    if (!rt)
-    {
+    else
         return RT_REMOVE_FAILURE;
-    }
-
-#ifdef SUPPORT_LCTRIE
-}
-
-#endif
 
     /* The actual value that is looked-up is an index
      * into the data table. */
-    index = table->remove(ip, len, behavior, rt);
+    index = table->remove(addr, numAddrDwords, len, behavior, rt);
 
     /* Remove value into policy table. See TBD in function header*/
     if (index)
     {
         *ptr = table->data[ index ];
-        table->data[ index ] = 0;
+        table->data[ index ] = nullptr;
         table->num_ent--;
     }
 
@@ -749,7 +584,7 @@ static inline int allocateTableIndex(table_t* table)
 {
     uint32_t index;
 
-    //0 is special index for failed entries.
+    // 0 is special index for failed entries.
     for (index = table->lastAllocatedIndex+1;
         index != table->lastAllocatedIndex;
         index = (index+1) % table->max_size)
@@ -762,58 +597,4 @@ static inline int allocateTableIndex(table_t* table)
     }
     return 0;
 }
-
-#ifdef DEBUG_SFRT
-
-#define NUM_IPS 32
-#define NUM_DATA 4
-
-int main()
-{
-    table_t* dir;
-    uint32_t ip_list[NUM_IPS];  /* entirely arbitrary */
-    char data[NUM_DATA];     /* also entirely arbitrary */
-    uint32_t index, val;
-
-    for (index=0; index<NUM_IPS; index++)
-    {
-        ip_list[index] = (uint32_t)rand()%NUM_IPS;
-        data[index%NUM_DATA] = index%26 + 65;    /* Random letter */
-    }
-
-    dir = sfrt_new(DIR_16x2, IPv4, NUM_IPS, 20);
-
-    if (!dir)
-    {
-        printf("Failed to create DIR\n");
-        return 1;
-    }
-
-    for (index=0; index < NUM_IPS; index++)
-    {
-        if (sfrt_insert(&ip_list[index], 32, &data[index%NUM_DATA],
-            RT_FAVOR_SPECIFIC, dir) != RT_SUCCESS)
-        {
-            printf("DIR Insertion failure\n");
-            return 1;
-        }
-
-        printf("%d\t %x: %c -> %c\n", index, ip_list[index],
-            data[index%NUM_DATA], *(uint32_t*)sfrt_lookup(&ip_list[index], dir));
-    }
-
-    for (index=0; index < NUM_IPS; index++)
-    {
-        val = *(uint32_t*)sfrt_lookup(&ip_list[index], dir);
-        printf("\t@%d\t%x: %c.  originally:\t%c\n",
-            index, ip_list[index], val, data[index%NUM_DATA]);
-    }
-
-    printf("Usage: %d bytes\n", ((dir_table_t*)(dir->rt))->allocated);
-
-    sfrt_free(dir);
-    return 0;
-}
-
-#endif /* DEBUG_SFRT */
 

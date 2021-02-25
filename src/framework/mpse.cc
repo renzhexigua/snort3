@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,65 +17,116 @@
 //--------------------------------------------------------------------------
 // mpse.cc author Russ Combs <rucombs@cisco.com>
 
-#include "mpse.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
+#include "mpse.h"
+
+#include <cassert>
+
+#include "profiler/profiler_defs.h"
+#include "search_engines/pat_stats.h"
+#include "managers/mpse_manager.h"
+#include "managers/module_manager.h"
+#include "main/snort_config.h"
+#include "detection/fp_config.h"
+
+#include "mpse_batch.h"
+
 using namespace std;
 
-#include "snort_debug.h"
-#include "snort_types.h"
-
-// this is accumulated only for fast pattern
-// searches for the detection engine
-static THREAD_LOCAL uint64_t s_bcnt=0;
-
-#ifdef PERF_PROFILING
-THREAD_LOCAL ProfileStats mpsePerfStats;
-#endif
+namespace snort
+{
 
 //-------------------------------------------------------------------------
 // base stuff
 //-------------------------------------------------------------------------
 
-Mpse::Mpse(const char* m, bool use_gc)
+Mpse::Mpse(const char* m)
 {
     method = m;
-    inc_global_counter = use_gc;
     verbose = 0;
+    api = nullptr;
 }
 
 int Mpse::search(
-    const unsigned char* T, int n, mpse_action_f action,
-    void* data, int* current_state)
+    const unsigned char* T, int n, MpseMatch match,
+    void* context, int* current_state)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(mpsePerfStats);
-
-    int ret = _search(T, n, action, data, current_state);
-
-    if ( inc_global_counter )
-        s_bcnt += n;
-
-    MODULE_PROFILE_END(mpsePerfStats);
-    return ret;
+    pmqs.matched_bytes += n;
+    return _search(T, n, match, context, current_state);
 }
 
 int Mpse::search_all(
-    const unsigned char* T, int n, mpse_action_f action,
-    void* data, int* current_state)
+    const unsigned char* T, int n, MpseMatch match,
+    void* context, int* current_state)
 {
-    return _search(T, n, action, data, current_state);
+    pmqs.matched_bytes += n;
+    return _search(T, n, match, context, current_state);
 }
 
-uint64_t Mpse::get_pattern_byte_count()
+void Mpse::search(MpseBatch& batch, MpseType mpse_type)
 {
-    return s_bcnt;
+    _search(batch, mpse_type);
 }
 
-void Mpse::reset_pattern_byte_count()
+void Mpse::_search(MpseBatch& batch, MpseType mpse_type)
 {
-    s_bcnt = 0;
+    int start_state;
+
+    for ( auto& item : batch.items )
+    {
+        if (item.second.done)
+            continue;
+
+        item.second.error = false;
+        item.second.matches = 0;
+
+        for ( auto& so : item.second.so )
+        {
+            start_state = 0;
+
+            Mpse* mpse = (mpse_type == MPSE_TYPE_OFFLOAD) ?
+                so->get_offload_mpse() : so->get_normal_mpse();
+
+            item.second.matches += mpse->search(
+                item.first.buf, item.first.len, batch.mf, batch.context, &start_state);
+        }
+        item.second.done = true;
+    }
+}
+
+Mpse::MpseRespType Mpse::poll_responses(MpseBatch*& batch, MpseType mpse_type)
+{
+    // FIXIT-L validate for reload during offload
+    FastPatternConfig* fp = SnortConfig::get_conf()->fast_pattern_config;
+    assert(fp);
+
+    const MpseApi* search_api = nullptr;
+
+    switch (mpse_type)
+    {
+    case MPSE_TYPE_NORMAL:
+        search_api = fp->get_search_api();
+        break;
+
+    case MPSE_TYPE_OFFLOAD:
+        search_api = fp->get_offload_search_api();
+
+        if (!search_api)
+            search_api = fp->get_search_api();
+        break;
+    }
+
+    if (search_api)
+    {
+        assert(search_api->poll);
+        return search_api->poll(batch, mpse_type);
+    }
+
+    return MPSE_RESP_NOT_COMPLETE;
+}
+
 }
 

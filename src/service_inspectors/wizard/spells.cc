@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,8 +17,11 @@
 //--------------------------------------------------------------------------
 // spells.cc author Russ Combs <rucombs@cisco.com>
 
-#include <ctype.h>
-#include <strings.h>
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include <cassert>
 
 #include "magic.h"
 
@@ -42,12 +45,15 @@ bool SpellBook::translate(const char* in, HexVector& out)
 
     while ( in[i] )
     {
+        if ( !isprint(in[i]) )
+            return false;
+
         if ( wild )
         {
             if ( in[i] != '*' )
-                out.push_back(WILD);
+                out.emplace_back(WILD);
 
-            out.push_back(in[i]);
+            out.emplace_back(in[i]);
             wild = false;
         }
         else
@@ -55,7 +61,7 @@ bool SpellBook::translate(const char* in, HexVector& out)
             if ( in[i] == '*' )
                 wild = true;
             else
-                out.push_back(in[i]);
+                out.emplace_back(in[i]);
         }
         ++i;
     }
@@ -81,16 +87,20 @@ void SpellBook::add_spell(
     p->value = val;
 }
 
-bool SpellBook::add_spell(const char* key, const char* val)
+bool SpellBook::add_spell(const char* key, const char*& val)
 {
     HexVector hv;
 
     if ( !translate(key, hv) )
+    {
+        val = nullptr;
         return false;
+    }
 
     unsigned i = 0;
     MagicPage* p = root;
 
+    // Perform a longest prefix match before inserting the pattern.
     while ( i < hv.size() )
     {
         int c = toupper(hv[i]);
@@ -98,7 +108,7 @@ bool SpellBook::add_spell(const char* key, const char* val)
         if ( c == WILD && p->any )
             p = p->any;
 
-        else if ( p->next[c] )
+        else if ( c != WILD && p->next[c] )
             p = p->next[c];
 
         else
@@ -107,7 +117,10 @@ bool SpellBook::add_spell(const char* key, const char* val)
         ++i;
     }
     if ( p->key == key )
+    {
+        val = p->value.c_str();
         return false;
+    }
 
     add_spell(key, val, hv, i, p);
     return true;
@@ -142,8 +155,9 @@ const MagicPage* SpellBook::find_spell(
                     return q;
                 ++i;
             }
+            return p->any;
         }
-        break;
+        return p->value.empty() ? nullptr : p;
     }
     return p;
 }
@@ -152,14 +166,15 @@ const char* SpellBook::find_spell(
     const uint8_t* data, unsigned len, const MagicPage*& p) const
 {
     // FIXIT-L make configurable upper bound to limit globbing
-    unsigned max = 16;
+    unsigned max = 64;
+    assert(p);
 
     if ( len > max )
         len = max;
 
     p = find_spell(data, len, p, 0);
 
-    if ( !p->value.empty() )
+    if ( p and !p->value.empty() )
         return p->value.c_str();
 
     return nullptr;

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2009-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,22 +17,25 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+// sfrf.h author Dilbagh Chahal <dchahal@sourcefire.com>
+
 #ifndef SFRF_H
 #define SFRF_H
-/* @file  sfrf.h
- * @brief rate filter implementation for Snort
- * @ingroup rate_filter
- * @author Dilbagh Chahal
- */
-/* @defgroup rate_filter sourcefire.rate_filter
- * Implements rate_filter feature for snort
- * @{
- */
 
-#include "main/policy.h"
+// Implements rate_filter feature for snort
+
+#include <ctime>
+
 #include "actions/actions.h"
+#include "framework/counts.h"
+#include "main/policy.h"
 
-struct sfip_t;
+namespace snort
+{
+class GHash;
+struct SfIp;
+struct SnortConfig;
+}
 
 // define to use over rate threshold
 #define SFRF_OVER_RATE
@@ -92,7 +95,7 @@ struct tSFRFConfigNode
     unsigned seconds;
 
     // Action that replaces original rule action on reaching threshold
-    RuleType newAction;
+    snort::Actions::Type newAction;
 
     // Threshold action duration in seconds before reverting to original rule action
     unsigned timeout;
@@ -136,51 +139,53 @@ struct RateFilterConfig
     /* Array of hash, indexed by gid. Each array element is a hash, which
      * is keyed on sid/policyId and data is a tSFRFSidNode node.
      */
-    struct SFGHASH* genHash [SFRF_MAX_GENID];
+    snort::GHash* genHash [SFRF_MAX_GENID];
 
-    // Number of DOS thresholds added.
-    int count;
-
-    // count of no revert DOS thresholds
+    unsigned memcap;
     unsigned noRevertCount;
-
-    int memcap;
-
+    int count;
     int internal_event_mask;
+};
+
+struct RateFilterStats
+{
+    PegCount xhash_nomem_peg = 0;
 };
 
 /*
  * Prototypes
  */
-void SFRF_Delete(void);
-void SFRF_Flush(void);
-int SFRF_ConfigAdd(struct SnortConfig*, RateFilterConfig*, tSFRFConfigNode*);
+void SFRF_Delete();
+void SFRF_Flush();
+int SFRF_ConfigAdd(snort::SnortConfig*, RateFilterConfig*, tSFRFConfigNode*);
 
 int SFRF_TestThreshold(
     RateFilterConfig *config,
     unsigned gid,
     unsigned sid,
-    const sfip_t *sip,
-    const sfip_t *dip,
+    const snort::SfIp *sip,
+    const snort::SfIp *dip,
     time_t curTime,
     SFRF_COUNT_OPERATION);
 
 void SFRF_ShowObjects(RateFilterConfig*);
 
-static inline void EnableInternalEvent(RateFilterConfig* config, uint32_t sid)
+inline void enable_internal_event(RateFilterConfig* config, uint32_t sid)
 {
-    if (config == NULL)
+    if (config == nullptr)
         return;
 
     config->internal_event_mask |= (1 << sid);
 }
 
-static inline bool InternalEventIsEnabled(RateFilterConfig* config, uint32_t sid)
+inline bool is_internal_event_enabled(RateFilterConfig* config, uint32_t sid)
 {
-    if (config == NULL)
-        return 0;
+    if (config == nullptr)
+        return false;
 
     return (config->internal_event_mask & (1 << sid));
 }
-#endif
 
+int SFRF_Alloc(unsigned int memcap);
+
+#endif

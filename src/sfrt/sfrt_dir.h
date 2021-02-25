@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2006-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,14 +22,15 @@
  * @author  Adam Keeton <akeeton@sourcefire.com>
  * @date    Thu July 20 10:16:26 EDT 2006
  *
- * The implementation uses an multibit-trie that is similar to Gupta et-al's
- * DIR-n-m.
-*/
+ */
 
 #ifndef SFRT_DIR_H
 #define SFRT_DIR_H
 
-#include <stdint.h>
+ // The implementation uses an multibit-trie that is similar to Gupta et-al's
+ // DIR-n-m.
+
+#include <cstdint>
 
 /*******************************************************************/
 /* DIR-n-m data structures
@@ -46,8 +47,8 @@ typedef struct
                       * are used. */
     int cur_num;     /* Present number of used nodes */
 
-    /** number of entries filled including chidren sub_tables. This is used
-     * for freeing sub_tables when all entried are freed by delete operation.
+    /** number of entries filled including children sub_tables. This is used
+     * for freeing sub_tables when all entries are freed by delete operation.
      */
     int filledEntries;
 } dir_sub_table_t;
@@ -74,12 +75,12 @@ typedef struct
    DIR-n-m functions, these are not intended to be called directly */
 dir_table_t* sfrt_dir_new(uint32_t mem_cap, int count,...);
 void sfrt_dir_free(void*);
-tuple_t sfrt_dir_lookup(IP ip, void* table);
-int sfrt_dir_insert(IP ip, int len, word data_index,
+tuple_t sfrt_dir_lookup(const uint32_t* addr, int numAddrDwords, void* table);
+int sfrt_dir_insert(const uint32_t* addr, int numAddrDwords, int len, word data_index,
     int behavior, void* table);
 uint32_t sfrt_dir_usage(void* table);
 void sfrt_dir_print(void* table);
-word sfrt_dir_remove(IP ip, int len, int behavior, void* table);
+word sfrt_dir_remove(const uint32_t* addr, int numAddrDwords, int len, int behavior, void* table);
 
 #endif /* SFRT_DIR_H */
 

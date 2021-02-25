@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,44 +16,44 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-/*
-** Dan Roelker <droelker@sourcefire.com>
-** Marc Norton <mnorton@sourcefire.com>
-**
-** NOTES
-** 5.15.02 - Initial Source Code. Norton/Roelker
-*/
+
+// fp_detect.h is derived from fpdetect.h by:
+//
+// Dan Roelker <droelker@sourcefire.com>
+// Marc Norton <mnorton@sourcefire.com>
 
 #ifndef FPDETECT_H
 #define FPDETECT_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+// this is where the high-level fast pattern matching action is
+// rule groups are selected based on traffic and any fast pattern
+// matches trigger rule tree evaluation.
 
-#include "fp_create.h"
-#include "snort_debug.h"
-#include "protocols/packet.h"
-#include "time/profiler.h"
-#include "utils/sflsq.h"
+#include "main/thread.h"
+#include "profiler/profiler_defs.h"
 
 #define REBUILD_FLAGS (PKT_REBUILT_FRAG | PKT_REBUILT_STREAM)
 
-#ifdef PERF_PROFILING
-extern THREAD_LOCAL ProfileStats rulePerfStats;
-extern THREAD_LOCAL ProfileStats ncrulePerfStats;
-extern THREAD_LOCAL ProfileStats ruleRTNEvalPerfStats;
-extern THREAD_LOCAL ProfileStats ruleOTNEvalPerfStats;
-#endif
+namespace snort
+{
+class IpsContext;
+struct Packet;
+struct ProfileStats;
+}
 
-/*
-**  This is the only function that is needed to do an
-**  inspection on a packet.
-*/
-int fpEvalPacket(Packet* p);
+class Cursor;
+struct PortGroup;
+struct OptTreeNode;
 
-int fpLogEvent(RuleTreeNode* rtn, OptTreeNode* otn, Packet* p);
-int fpEvalRTN(RuleTreeNode* rtn, Packet* p, int check_ports);
+extern THREAD_LOCAL snort::ProfileStats mpsePerfStats;
+extern THREAD_LOCAL snort::ProfileStats rulePerfStats;
+
+struct RuleTreeNode;
+int fpLogEvent(const RuleTreeNode*, const OptTreeNode*, snort::Packet*);
+bool fp_eval_rtn(RuleTreeNode*, snort::Packet*, int check_ports);
+int fp_eval_option(void*, Cursor&, snort::Packet*);
+
+#define MAX_NUM_RULE_TYPES 16   // max number of allowed rule types
 
 /*
 **  This define is for the number of unique events
@@ -63,21 +63,19 @@ int fpEvalRTN(RuleTreeNode* rtn, Packet* p, int check_ports);
 #define MAX_EVENT_MATCH 100
 
 /*
-**  MATCH_INFO
 **  The events that are matched get held in this structure,
 **  and iMatchIndex gets set to the event that holds the
 **  highest priority.
 */
-typedef struct
+struct MatchInfo
 {
-    OptTreeNode* MatchArray[MAX_EVENT_MATCH];
-    int iMatchCount;
-    int iMatchIndex;
-    int iMatchMaxLen;
-}MATCH_INFO;
+    const OptTreeNode* MatchArray[MAX_EVENT_MATCH];
+    unsigned iMatchCount;
+    unsigned iMatchIndex;
+    unsigned iMatchMaxLen;
+};
 
 /*
-**  OTNX_MATCH_DATA
 **  This structure holds information that is
 **  referenced during setwise pattern matches.
 **  It also contains information regarding the
@@ -85,24 +83,20 @@ typedef struct
 **  the event to log based on the event comparison
 **  function.
 */
-typedef struct
+struct OtnxMatchData
 {
-    PortGroup* pg;
-    Packet* p;
-    int check_ports;
+    MatchInfo* matchInfo;
+    bool have_match;
+};
 
-    MATCH_INFO* matchInfo;
-    int iMatchInfoArraySize;
-} OTNX_MATCH_DATA;
+int fpAddMatch(OtnxMatchData*, const OptTreeNode*);
 
-void otnx_match_data_init(int);
-void otnx_match_data_term();
+void fp_set_context(snort::IpsContext&);
+void fp_clear_context(snort::IpsContext&);
 
-int fpAddMatch(OTNX_MATCH_DATA* omd_local, int pLen, OptTreeNode* otn);
-OptTreeNode* GetOTN(uint32_t gid, uint32_t sid);
-
-#define TO_SERVER 1
-#define TO_CLIENT 0
+void fp_full(snort::Packet*);
+void fp_partial(snort::Packet*);
+void fp_complete(snort::Packet*, bool search = false);
 
 #endif
 

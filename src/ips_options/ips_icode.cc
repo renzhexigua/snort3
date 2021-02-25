@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,26 +17,19 @@
 //--------------------------------------------------------------------------
 // ips_icode.cc author Russ Combs <rucombs@cisco.com>
 
-#include <stdlib.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <string.h>
-#include <ctype.h>
 
-#include "snort_types.h"
-#include "protocols/packet.h"
-#include "snort_debug.h"
-#include "sfhashfcn.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
 #include "framework/range.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
 #include "protocols/icmp4.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "icode"
 
@@ -52,7 +45,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     RangeCheck config;
@@ -64,53 +57,50 @@ private:
 
 uint32_t IcodeOption::hash() const
 {
-    uint32_t a,b,c;
+    uint32_t a = config.op;
+    uint32_t b = config.min;
+    uint32_t c = config.max;
 
-    a = config.op;
-    b = config.min;
-    c = config.max;
+    mix(a,b,c);
+    a += IpsOption::hash();
 
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
-
+    finalize(a,b,c);
     return c;
 }
 
 bool IcodeOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    IcodeOption& rhs = (IcodeOption&)ips;
+    const IcodeOption& rhs = (const IcodeOption&)ips;
     return ( config == rhs.config );
 }
 
-int IcodeOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus IcodeOption::eval(Cursor&, Packet* p)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
-    PROFILE_VARS;
+    RuleProfile profile(icmpCodePerfStats);
 
-    /* return 0  if we don't have an icmp header */
+    // return 0  if we don't have an icmp header
     if (!p->ptrs.icmph)
-        return rval;
-
-    MODULE_PROFILE_START(icmpCodePerfStats);
+        return NO_MATCH;
 
     if ( config.eval(p->ptrs.icmph->code) )
-        rval = DETECTION_OPTION_MATCH;
+        return MATCH;
 
-    MODULE_PROFILE_END(icmpCodePerfStats);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
 // module
 //-------------------------------------------------------------------------
 
+#define RANGE "0:255"
+
 static const Parameter s_params[] =
 {
-    { "~range", Parameter::PT_STRING, nullptr, nullptr,
-      "check if ICMP code is 'code | min<>max | <max | >min'" },
+    { "~range", Parameter::PT_INTERVAL, RANGE, nullptr,
+      "check if ICMP code is in given range is" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -129,6 +119,10 @@ public:
     ProfileStats* get_profile() const override
     { return &icmpCodePerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     RangeCheck data;
 };
 
@@ -143,7 +137,7 @@ bool IcodeModule::set(const char*, Value& v, SnortConfig*)
     if ( !v.is("~range") )
         return false;
 
-    return data.parse(v.get_string());
+    return data.validate(v.get_string(), RANGE);
 }
 
 //-------------------------------------------------------------------------
@@ -198,11 +192,11 @@ static const IpsApi icode_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_icode[] =
+#endif
 {
     &icode_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_icode = &icode_api.base;
-#endif
 

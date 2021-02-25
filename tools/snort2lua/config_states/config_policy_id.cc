@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -30,8 +30,7 @@ class PolicyId : public ConversionState
 {
 public:
     PolicyId(Converter& c) : ConversionState(c) { }
-    virtual ~PolicyId() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -42,13 +41,13 @@ bool PolicyId::convert(std::istringstream& data_stream)
 
     if (data_stream >> policy_id)
     {
-        table_api.open_table("ips");
-        table_api.add_option("id", policy_id);
-        table_api.close_table();
+        cv.get_table_api().open_table("ips");
+        cv.get_table_api().add_option("id", policy_id);
+        cv.get_table_api().close_table();
 
-        table_api.open_table("network");
-        table_api.add_option("id", policy_id);
-        table_api.close_table();
+        cv.get_table_api().open_table("network");
+        cv.get_table_api().add_option("id", policy_id);
+        cv.get_table_api().close_table();
     }
     else
     {

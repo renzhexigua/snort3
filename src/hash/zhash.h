@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,66 +20,28 @@
 #ifndef ZHASH_H
 #define ZHASH_H
 
-struct SFHASHFCN;
-struct ZHashNode;
+#include <cstddef>
 
-class ZHash
+#include "hash/xhash.h"
+
+class ZHash : public snort::XHash
 {
 public:
     ZHash(int nrows, int keysize);
-    ~ZHash();
+
+    ZHash(const ZHash&) = delete;
+    ZHash& operator=(const ZHash&) = delete;
 
     void* push(void* p);
     void* pop();
 
-    void* first();
-    void* next();
-    void* current();
-    bool touch();
-
-    void* find(const void* key);
     void* get(const void* key);
+    void* remove();
 
-    bool remove(const void* key);
-    bool remove();
-
-    inline unsigned get_count() { return count; }
-
-    int set_keyops(
-        unsigned (* hash_fcn)(SFHASHFCN* p, unsigned char* d, int n),
-        int (* keycmp_fcn)(const void* s1, const void* s2, size_t n));
-
-private:
-    ZHashNode* get_free_node();
-    ZHashNode* find_node_row(const void*, int*);
-
-    void glink_node(ZHashNode*);
-    void gunlink_node(ZHashNode*);
-
-    void link_node(ZHashNode*);
-    void unlink_node(ZHashNode*);
-
-    void delete_free_list();
-    void save_free_node(ZHashNode*);
-
-    bool remove(ZHashNode*);
-    void move_to_front(ZHashNode*);
-    int nearest_powerof2(int nrows);
-
-private:
-    SFHASHFCN* sfhashfcn;
-    int keysize;
-
-    unsigned nrows;
-    unsigned count;
-
-    unsigned find_fail;
-    unsigned find_success;
-
-    ZHashNode** table;
-    ZHashNode* ghead, * gtail;
-    ZHashNode* fhead;
-    ZHashNode* cursor;
+    void* lru_first();
+    void* lru_next();
+    void* lru_current();
+    void lru_touch();
 };
 
 #endif

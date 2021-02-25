@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -24,21 +24,50 @@
 #ifndef MODULE_H
 #define MODULE_H
 
+// Module provides a data-driven way to manage much of Snort++.  For
+// example, it provides an interface to configured components.  There is at
+// most one instance of a Module at any time.  A given module instance is
+// used to configure all related components.  As such it stores data only
+// for the sake of constructing the next component instance.
+//
+// Module will set all parameter defaults immediately after calling
+// begin() so defaults should not be explicitly set in begin() or a ctor
+// called by begin, except as needed for infrastructure and sanity.
+//
+// Note that there are no internal default lists.  Put appropriate default
+// lists in snort_defaults.lua or some such.  Each list item, however, will
+// have any defaults applied.
+
+#include <cassert>
+#include <string>
 #include <vector>
-#include <luajit-2.0/lua.hpp>
 
-#include "main/snort_types.h"
-#include "framework/value.h"
-#include "framework/parameter.h"
 #include "framework/counts.h"
+#include "framework/parameter.h"
+#include "framework/value.h"
+#include "main/snort_types.h"
+#include "utils/stats.h"
 
+struct lua_State;
+
+namespace snort
+{
+class ModuleManager;
+class Trace;
+struct ProfileStats;
 struct SnortConfig;
+struct TraceOption;
+
+using LuaCFunction = int(*)(lua_State*);
 
 struct Command
 {
     const char* name;
-    lua_CFunction func;
+    LuaCFunction func;
+    const Parameter* params;
     const char* help;
+
+    std::string get_arg_list() const;
 };
 
 struct RuleMap
@@ -47,12 +76,10 @@ struct RuleMap
     const char* msg;
 };
 
-struct ProfileStats;
-
 class SO_PUBLIC Module
 {
 public:
-    virtual ~Module() { }
+    virtual ~Module() = default;
 
     // configuration:
     // for lists (tables with numeric indices):
@@ -65,7 +92,16 @@ public:
     { return true; }
 
     virtual bool set(const char*, Value&, SnortConfig*)
-    { return !get_parameters(); }
+    { return true; }
+
+    virtual void set_trace(const Trace*) const { }
+
+    virtual const TraceOption* get_trace_options() const
+    { return nullptr; }
+
+    // used to match parameters with $var names like <gid:sid> for rule_state
+    virtual bool matches(const char* /*param_name*/, std::string& /*lua_name*/)
+    { return false; }
 
     // ips events:
     virtual unsigned get_gid() const
@@ -105,9 +141,19 @@ public:
     virtual const PegInfo* get_pegs() const
     { return nullptr; }
 
+    virtual bool counts_need_prep() const
+    { return false; }
+
+    virtual void prep_counts() { }
+
     // counts and profile are thread local
     virtual PegCount* get_counts() const
     { return nullptr; }
+
+    virtual PegCount get_global_count(const char* name) const;
+
+    virtual int get_num_counts() const
+    { return num_counts; }
 
     virtual ProfileStats* get_profile() const
     { return nullptr; }
@@ -120,30 +166,74 @@ public:
     virtual const char* get_defaults() const
     { return nullptr; }
 
-    virtual void sum_stats();
+    virtual bool global_stats() const
+    { return false; }
+
+    virtual void sum_stats(bool accumulate_now_stats);
+    virtual void show_interval_stats(IndexVec&, FILE*);
     virtual void show_stats();
     virtual void reset_stats();
+    virtual void show_dynamic_stats() {}
+
+    // Wrappers to check that lists are not tables
+    bool verified_begin(const char*, int, SnortConfig*);
+    bool verified_set(const char*, Value&, SnortConfig*);
+    bool verified_end(const char*, int, SnortConfig*);
+
+    enum Usage
+    {
+        GLOBAL,
+        CONTEXT,
+        INSPECT,
+        DETECT
+    };
+
+    virtual Usage get_usage() const
+    { return CONTEXT; }
+
+    virtual bool is_bindable() const
+    { return false; }
 
 protected:
     Module(const char* name, const char* help);
     Module(const char* name, const char* help, const Parameter*, bool is_list = false);
 
+    void set_params(const Parameter* p)
+    { params = p; }
+
 private:
-    friend class ModuleManager;
+    friend ModuleManager;
     void init(const char*, const char* = nullptr);
+
+    std::vector<PegCount> counts;
+    int num_counts = -1;
 
     const char* name;
     const char* help;
 
     const Parameter* params;
     bool list;
+    int table_level = 0;
 
-    const Command* cmds;
-    const RuleMap* rules;
+    void set_peg_count(int index, PegCount value)
+    {
+        assert(index < num_counts);
+        counts[index] = value;
+    }
 
-    std::vector<PegCount> counts;
-    int num_counts;
+    void set_max_peg_count(int index, PegCount value)
+    {
+        assert(index < num_counts);
+        if(value > counts[index])
+            counts[index] = value;
+    }
+
+    void add_peg_count(int index, PegCount value)
+    {
+        assert(index < num_counts);
+        counts[index] += value;
+    }
 };
-
+}
 #endif
 

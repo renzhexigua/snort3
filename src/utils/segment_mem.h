@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2011-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,21 +16,24 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-// 8/7/2011 - Initial implementation ... Hui Cao <hcao@sourcefire.com>
+// segment_mem.h author Hui Cao <huica@cisco.com>
 
 #ifndef SEGMENT_MEM_H
 #define SEGMENT_MEM_H
 
-#include <stdlib.h>
-#include "main/snort_types.h"
+// Segment memory allocation used by sfrt
 
-typedef uint32_t MEM_OFFSET;
+#include <cstddef>
+#include <cstdint>
+
+using MEM_OFFSET = uint32_t;
 
 int segment_meminit(uint8_t*, size_t);
-MEM_OFFSET segment_malloc(size_t size);
+MEM_OFFSET segment_snort_alloc(size_t size);
 void segment_free(MEM_OFFSET ptr);
-MEM_OFFSET segment_calloc(size_t num, size_t size);
+MEM_OFFSET segment_snort_calloc(size_t num, size_t size);
 size_t segment_unusedmem();
 void* segment_basePtr();
+
 #endif
 

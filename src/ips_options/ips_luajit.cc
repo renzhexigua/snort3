@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,41 +17,30 @@
 //--------------------------------------------------------------------------
 // ips_luajit.cc author Russ Combs <rucombs@cisco.com>
 
-#include <assert.h>
-#include <luajit-2.0/lua.hpp>
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
-#include "main/snort_types.h"
+#include "framework/cursor.h"
+#include "framework/decode_data.h"
+#include "framework/module.h"
+#include "hash/hash_key_operations.h"
 #include "helpers/chunk.h"
+#include "lua/lua.h"
+#include "log/messages.h"
+#include "main/thread_config.h"
 #include "managers/ips_manager.h"
+#include "managers/lua_plugin_defs.h"
 #include "managers/plugin_manager.h"
 #include "managers/script_manager.h"
-#include "hash/sfhashfcn.h"
-#include "parser/parser.h"
-#include "framework/cursor.h"
-#include "framework/module.h"
-#include "framework/parameter.h"
-#include "time/profiler.h"
-#include "detection/detection_defines.h"
+#include "profiler/profiler.h"
+#include "utils/util.h"
+
+using namespace snort;
 
 static THREAD_LOCAL ProfileStats luaIpsPerfStats;
 
 #define opt_eval "eval"
-
-//-------------------------------------------------------------------------
-// ffi stuff
-//-------------------------------------------------------------------------
-
-struct SnortBuffer
-{
-    const char* type;
-    const uint8_t* data;
-    unsigned len;
-};
-
-extern "C" {
-// ensure Lua can link with this
-    const SnortBuffer* get_buffer();
-}
 
 static THREAD_LOCAL Cursor* cursor;
 static THREAD_LOCAL SnortBuffer buf;
@@ -92,6 +81,9 @@ public:
     ProfileStats* get_profile() const override
     { return &luaIpsPerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
 public:
     std::string args;
 };
@@ -125,62 +117,59 @@ class LuaJitOption : public IpsOption
 {
 public:
     LuaJitOption(const char* name, std::string& chunk, LuaJitModule*);
-    ~LuaJitOption();
+    ~LuaJitOption() override;
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    IpsOption::EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     void init(const char*, const char*);
 
     std::string config;
-    struct lua_State** lua;
+    std::vector<Lua::State> states;
+    char* my_name;
 };
 
 LuaJitOption::LuaJitOption(
     const char* name, std::string& chunk, LuaJitModule* mod)
-    : IpsOption(name)
+    : IpsOption((my_name = snort_strdup(name)), RULE_OPTION_TYPE_BUFFER_USE)
 {
     // create an args table with any rule options
     config = "args = { ";
     config += mod->args;
     config += "}";
 
-    unsigned max = get_instance_max();
-
-    lua = new lua_State*[max];
+    unsigned max = ThreadConfig::get_instance_max();
+    states.reserve(max);
 
     for ( unsigned i = 0; i < max; ++i )
-        init_chunk(lua[i], chunk, name, config);
+    {
+        states.emplace_back(true);
+        init_chunk(states[i], chunk, name, config);
+    }
 }
 
 LuaJitOption::~LuaJitOption()
 {
-    unsigned max = get_instance_max();
-
-    for ( unsigned i = 0; i < max; ++i )
-        term_chunk(lua[i]);
-
-    delete[] lua;
+    snort_free((void*)my_name);
 }
 
 uint32_t LuaJitOption::hash() const
 {
-    uint32_t a = 0, b = 0, c = 0;
-    mix_str(a,b,c,get_name());
+    uint32_t a = IpsOption::hash(), b = 0, c = 0;
     mix_str(a,b,c,config.c_str());
-    final(a,b,c);
+    finalize(a,b,c);
     return c;
 }
 
 bool LuaJitOption::operator==(const IpsOption& ips) const
 {
-    LuaJitOption& rhs = (LuaJitOption&)ips;
-
-    if ( strcmp(get_name(), rhs.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
+
+    const LuaJitOption& rhs = (const LuaJitOption&)ips;
 
     if ( config != rhs.config )
         return false;
@@ -188,30 +177,31 @@ bool LuaJitOption::operator==(const IpsOption& ips) const
     return true;
 }
 
-int LuaJitOption::eval(Cursor& c, Packet*)
+IpsOption::EvalStatus LuaJitOption::eval(Cursor& c, Packet*)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(luaIpsPerfStats);
+    RuleProfile profile(luaIpsPerfStats);
 
     cursor = &c;
 
-    lua_State* L = lua[get_instance_id()];
-    lua_getglobal(L, opt_eval);
+    lua_State* L = states[get_instance_id()];
 
-    if ( lua_pcall(L, 0, 1, 0) )
     {
-        const char* err = lua_tostring(L, -1);
-        ErrorMessage("%s\n", err);
-        MODULE_PROFILE_END(luaIpsPerfStats);
-        return DETECTION_OPTION_NO_MATCH;
+        Lua::ManageStack ms(L, 1);
+
+        lua_getglobal(L, opt_eval);
+
+        if ( lua_pcall(L, 0, 1, 0) )
+        {
+            const char* err = lua_tostring(L, -1);
+            ErrorMessage("%s\n", err);
+            return NO_MATCH;
+        }
+
+        if ( lua_toboolean(L, -1) )
+            return MATCH;
+
+        return NO_MATCH;
     }
-    bool result = lua_toboolean(L, -1);
-    lua_pop(L, 1);
-
-    int ret = result ? DETECTION_OPTION_MATCH : DETECTION_OPTION_NO_MATCH;
-    MODULE_PROFILE_END(luaIpsPerfStats);
-
-    return ret;
 }
 
 //-------------------------------------------------------------------------

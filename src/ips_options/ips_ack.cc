@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,28 +17,19 @@
 //--------------------------------------------------------------------------
 // ips_ack.cc author Russ Combs <rucombs@cisco.com>
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <ctype.h>
 
-#include "snort_types.h"
-#include "detection/treenodes.h"
-#include "protocols/packet.h"
-#include "parser.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
 #include "framework/range.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler_defs.h"
+#include "protocols/packet.h"
 #include "protocols/tcp.h"
+
+using namespace snort;
 
 #define s_name "ack"
 
@@ -57,7 +48,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     RangeCheck config;
@@ -69,52 +60,46 @@ private:
 
 uint32_t TcpAckOption::hash() const
 {
-    uint32_t a,b,c;
+    uint32_t a = config.op;
+    uint32_t b = config.min;
+    uint32_t c = config.max;
 
-    a = config.op;
-    b = config.min;
-    c = config.max;
+    mix(a,b,c);
+    a += IpsOption::hash();
 
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
-
+    finalize(a,b,c);
     return c;
 }
 
 bool TcpAckOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(s_name, ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    TcpAckOption& rhs = (TcpAckOption&)ips;
+    const TcpAckOption& rhs = (const TcpAckOption&)ips;
     return ( config == rhs.config );
 }
 
-int TcpAckOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus TcpAckOption::eval(Cursor&, Packet* p)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(tcpAckPerfStats);
-
-    int rval;
+    RuleProfile profile(tcpAckPerfStats);
 
     if ( p->ptrs.tcph && config.eval(p->ptrs.tcph->th_ack) )
-        rval = DETECTION_OPTION_MATCH;
+        return MATCH;
 
-    else
-        rval = DETECTION_OPTION_NO_MATCH;
-
-    MODULE_PROFILE_END(tcpAckPerfStats);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
 // module
 //-------------------------------------------------------------------------
 
+#define RANGE "0:"
+
 static const Parameter s_params[] =
 {
-    { "~range", Parameter::PT_STRING, nullptr, nullptr,
-      "check if packet payload size is 'size | min<>max | <max | >min'" },
+    { "~range", Parameter::PT_INTERVAL, RANGE, nullptr,
+      "check if TCP ack value is 'value | min<>max | <max | >min'" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -130,6 +115,10 @@ public:
     ProfileStats* get_profile() const override
     { return &tcpAckPerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     RangeCheck data;
 };
 
@@ -144,7 +133,7 @@ bool AckModule::set(const char*, Value& v, SnortConfig*)
     if ( !v.is("~range") )
         return false;
 
-    return data.parse(v.get_string());
+    return data.validate(v.get_string(), RANGE);
 }
 
 //-------------------------------------------------------------------------
@@ -199,11 +188,11 @@ static const IpsApi ack_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_ack[] =
+#endif
 {
     &ack_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_ack = &ack_api.base;
-#endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,13 +17,20 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+// file_decomp_swf.h author Ed Borgoyn eborgoyn@sourcefire.com
+
 #ifndef FILE_DECOMP_SWF_H
 #define FILE_DECOMP_SWF_H
 
-#include <zlib.h>
 #ifdef HAVE_LZMA
 #include <lzma.h>
 #endif
+#include <zlib.h>
+
+#include "file_decomp.h"
+
+/* FIXIT-RC Other than the API prototypes, the other parts of this header should
+   be private to file_decomp_swf. */
 
 /* Both ZLIB & LZMA files have an uncompressed eight byte header.  The signature is
    three bytes.  The header consists of a three byte sig, a one byte version,
@@ -45,15 +52,15 @@
 
 /* Types */
 
-typedef enum swf_states
+enum fd_SWF_States
 {
     SWF_STATE_NEW,
     SWF_STATE_GET_HEADER,     /* Found sig bytes, looking for end of uncomp header */
     SWF_STATE_PROC_HEADER,    /* Found header bytes, now process the header */
     SWF_STATE_DATA            /* Done with header, looking for start of data */
-} fd_SWF_States;
+};
 
-typedef struct fd_SWF_s
+struct fd_SWF_t
 {
     z_stream StreamZLIB;
 #ifdef HAVE_LZMA
@@ -63,15 +70,18 @@ typedef struct fd_SWF_s
     uint8_t State;
     uint8_t Header_Len;
     uint8_t Header_Cnt;
-} fd_SWF_t;
+};
 
 /* API Functions */
 
-fd_status_t File_Decomp_Init_SWF(fd_session_p_t SessionPtr);
+/* Initialize the SWF file decompressor */
+fd_status_t File_Decomp_Init_SWF(fd_session_t*);
 
-fd_status_t File_Decomp_SWF(fd_session_p_t SessionPtr);
+/* Process the file incrementally */
+fd_status_t File_Decomp_SWF(fd_session_t*);
 
-fd_status_t File_Decomp_End_SWF(fd_session_p_t SessionPtr);
+/* End the SWF file decompression */
+fd_status_t File_Decomp_End_SWF(fd_session_t*);
 
 #endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,14 +20,19 @@
 #ifndef INSPECTOR_MANAGER_H
 #define INSPECTOR_MANAGER_H
 
-#include "main/snort_types.h"
-#include "framework/base_api.h"
+// Factory for Inspectors.
+// Also provides packet evaluation.
+
 #include "framework/inspector.h"
 
-struct Packet;
+class Binder;
 struct FrameworkPolicy;
-struct SnortConfig;
 struct InspectionPolicy;
+
+namespace snort
+{
+struct Packet;
+struct SnortConfig;
 
 //-------------------------------------------------------------------------
 
@@ -35,12 +40,16 @@ class InspectorManager
 {
 public:
     static void add_plugin(const InspectApi* api);
-    static void dump_plugins(void);
-    static void dump_buffers(void);
-    static void release_plugins(void);
+    static void dump_plugins();
+    static void dump_buffers();
+    static void release_plugins();
 
-    static void new_policy(InspectionPolicy*);
-    static void delete_policy(InspectionPolicy*);
+    static std::vector<const InspectApi*> get_apis();
+    static const char* get_inspector_type(const char* name);
+
+    static void new_policy(InspectionPolicy*, InspectionPolicy*);
+    static void delete_policy(InspectionPolicy*, bool cloned);
+    static void update_policy(SnortConfig* sc);
 
     static void new_config(SnortConfig*);
     static void delete_config(SnortConfig*);
@@ -48,36 +57,50 @@ public:
     static void instantiate(
         const InspectApi*, Module*, SnortConfig*, const char* name = nullptr);
 
+    static bool delete_inspector(SnortConfig*, const char* iname);
     static void free_inspector(Inspector*);
     static InspectSsnFunc get_session(uint16_t proto);
 
-    static InspectorType get_type(const char* key);
-    static Inspector* get_inspector(const char* key, bool dflt_only = false);
+    SO_PUBLIC static Inspector* get_inspector(
+        const char* key, bool dflt_only = false, const SnortConfig* = nullptr);
 
-    static Inspector* get_binder();
-    static Inspector* get_wizard();
+    SO_PUBLIC static Inspector* get_inspector_by_service(const char*, InspectorType type = IT_SERVICE);
 
-    SO_PUBLIC static Inspector* acquire(const char* key, SnortConfig*);
+    SO_PUBLIC static Binder* get_binder();
+
+    SO_PUBLIC static Inspector* acquire(const char* key, bool dflt_only = false);
     SO_PUBLIC static void release(Inspector*);
 
-    static bool configure(SnortConfig*);
+    static bool configure(SnortConfig*, bool cloned = false);
+    static void prepare_controls(SnortConfig*);
     static void print_config(SnortConfig*);
 
-    static void thread_init(SnortConfig*);
-    static void thread_stop(SnortConfig*);
-    static void thread_term(SnortConfig*);
+    static void thread_init(const SnortConfig*);
+    static void thread_reinit(const SnortConfig*);
+    static void thread_stop_removed(const SnortConfig*);
+
+    static void thread_stop(const SnortConfig*);
+    static void thread_term();
 
     static void release_policy(FrameworkPolicy*);
-    static void dispatch_meta(FrameworkPolicy*, int type, const uint8_t* data);
 
     static void execute(Packet*);
+    static void probe(Packet*);
+
     static void clear(Packet*);
     static void empty_trash();
+    static void tear_down_removed_inspectors(const SnortConfig*, SnortConfig*);
+    static void clear_removed_inspectors(SnortConfig*);
+
+#ifdef PIGLET
+    static Inspector* instantiate(const char*, Module*, SnortConfig*);
+#endif
 
 private:
     static void bumble(Packet*);
-    static void full_inspection(FrameworkPolicy*, Packet*);
+    template<bool T> static void full_inspection(Packet*);
+    template<bool T> static void internal_execute(Packet*);
 };
-
+}
 #endif
 

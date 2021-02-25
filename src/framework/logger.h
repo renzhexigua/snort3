@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,14 +20,16 @@
 #ifndef LOGGER_H
 #define LOGGER_H
 
-#ifdef HAVE_CONFIG_H
-# include "config.h"
-#endif
+// Logger is used to log packets and events.  Events are thresholded before
+// they reach the Logger.  Packets may be logged along with events or as a
+// result of tagging.
 
-#include "main/snort_types.h"
-#include "events/event.h"
 #include "framework/base_api.h"
+#include "main/snort_types.h"
 
+struct Event;
+namespace snort
+{
 struct Packet;
 
 // this is the current version of the api
@@ -48,13 +50,13 @@ struct LogApi;
 class SO_PUBLIC Logger
 {
 public:
-    virtual ~Logger() { }
+    virtual ~Logger() = default;
 
     virtual void open() { }
     virtual void close() { }
     virtual void reset() { }
 
-    virtual void alert(Packet*, const char*, Event*) { }
+    virtual void alert(Packet*, const char*, const Event&) { }
     virtual void log(Packet*, const char*, Event*) { }
 
     void set_api(const LogApi* p)
@@ -64,13 +66,13 @@ public:
     { return api; }
 
 protected:
-    Logger() { }
+    Logger() = default;
 
 private:
     const LogApi* api;
 };
 
-typedef Logger* (* LogNewFunc)(struct SnortConfig*, class Module*);
+typedef Logger* (* LogNewFunc)(class Module*);
 typedef void (* LogDelFunc)(Logger*);
 
 struct LogApi
@@ -80,6 +82,6 @@ struct LogApi
     LogNewFunc ctor;
     LogDelFunc dtor;
 };
-
+}
 #endif
 

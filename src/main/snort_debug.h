@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -21,100 +21,194 @@
 #ifndef SNORT_DEBUG_H
 #define SNORT_DEBUG_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+// this provides a module trace capability that can be set by config to
+// turn on the output of specific debug messages.
+//
 
-#include <stdint.h>
-#include <ctype.h>
+#include <cstdarg>
 
-#ifdef SF_WCHAR
-/* ISOC99 is defined to get required prototypes */
-#ifndef __USE_ISOC99
-#define __USE_ISOC99
-#endif
-#include <wchar.h>
-#endif
+#include "protocols/packet.h"
+#include "trace/trace.h"
+#include "trace/trace_api.h"
 
-#include "snort_types.h"
+static inline bool trace_enabled(const snort::Trace* trace,
+    TraceOptionID trace_option_id,
+    TraceLevel log_level = DEFAULT_TRACE_LOG_LEVEL,
+    const snort::Packet* p = nullptr)
+{
+    if ( !trace or !trace->enabled(trace_option_id, log_level) )
+        return false;
 
-// this env var uses the lower 32 bits of the flags:
-#define DEBUG_VARIABLE "SNORT_DEBUG"
+    if ( !p )
+        return true;
 
-#define DEBUG_INIT            0x0000000000000001LL
-#define DEBUG_PARSER          0x0000000000000002LL
-#define DEBUG_MSTRING         0x0000000000000004LL
-#define DEBUG_PORTLISTS       0x0000000000000008LL
-#define DEBUG_ATTRIBUTE       0x0000000000000010LL
-#define DEBUG_PLUGIN          0x0000000000000020LL
-#define DEBUG_PLUGBASE        0x0000000000000040LL
-#define DEBUG_DECODE          0x0000000000000080LL
-#define DEBUG_DATALINK        0x0000000000000100LL
-#define DEBUG_CONFIGRULES     0x0000000000000200LL
-#define DEBUG_RULES           0x0000000000000400LL
-#define DEBUG_DETECT          0x0000000000000800LL
-#define DEBUG_PATTERN_MATCH   0x0000000000001000LL
-#define DEBUG_FLOW            0x0000000000002000LL
-#define DEBUG_LOG             0x0000000000004000LL
-#define DEBUG_FLOWBITS        0x0000000000008000LL
-#define DEBUG_FILE            0x0000000000010000LL
-#define DEBUG_CONTROL         0x0000000000020000LL
-#define DEBUG_PPM             0x0000000000040000LL
-#define DEBUG_EXP             0x0000000080000000LL
+    const auto gid = snort::TraceApi::get_constraints_generation();
+    if ( !p->filtering_state.was_checked(gid) )
+        snort::TraceApi::filter(*p);
 
-// this env var uses the upper 32 bits of the flags:
-#define DEBUG_PP_VAR   "SNORT_PP_DEBUG"
+    return p->filtering_state.matched;
+}
 
-#define DEBUG_FRAG            0x0000000100000000LL
-#define DEBUG_STREAM          0x0000000200000000LL
-#define DEBUG_STREAM_STATE    0x0000000400000000LL
-#define DEBUG_STREAM_PAF      0x0000000800000000LL
-#define DEBUG_HTTP_DECODE     0x0000001000000000LL
-#define DEBUG_HTTPINSPECT     0x0000002000000000LL
-#define DEBUG_ASN1            0x0000004000000000LL
-#define DEBUG_DNS             0x0000008000000000LL
-#define DEBUG_FTPTELNET       0x0000010000000000LL
-#define DEBUG_GTP             0x0000020000000000LL
-#define DEBUG_IMAP            0x0000040000000000LL
-#define DEBUG_POP             0x0000080000000000LL
-#define DEBUG_RPC             0x0000100000000000LL
-#define DEBUG_SIP             0x0000200000000000LL
-#define DEBUG_SKYPE           0x0000400000000000LL
-#define DEBUG_SSL             0x0000800000000000LL
-#define DEBUG_SMTP            0x0001000000000000LL
-#define DEBUG_PP_EXP          0x8000000000000000LL
+namespace snort
+{
+SO_PUBLIC void trace_vprintf(const char* name, TraceLevel log_level,
+    const char* trace_option, const snort::Packet* p, const char* fmt, va_list);
+}
 
-#if 0
-// FIXIT delete duplicate declarations
-SO_PUBLIC void DebugMessageFunc(uint64_t dbg, const char* fmt, ...);
-#ifdef SF_WCHAR
-void DebugWideMessageFunc(uint64_t dbg, const wchar_t* fmt, ...);
-#endif
-#endif
+using trace_func = void(const char*, TraceLevel, const char*, const snort::Packet*, const char*, va_list);
+
+template <trace_func>
+static inline void trace_uprintf(const snort::Trace* trace,
+    TraceOptionID trace_option_id, const snort::Packet* p, const char* fmt, ...) __attribute__((format (printf, 4, 5)));
+
+template <trace_func trace_vprintf = snort::trace_vprintf>
+static inline void trace_uprintf(const snort::Trace* trace,
+    TraceOptionID trace_option_id, const snort::Packet* p, const char* fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+
+    const char* trace_option_name = trace->option_name(trace_option_id);
+    trace_vprintf(trace->module_name(), DEFAULT_TRACE_LOG_LEVEL, trace_option_name, p, fmt, ap);
+
+    va_end(ap);
+}
+
+template <trace_func>
+static inline void trace_printf(TraceLevel log_level,
+    const snort::Trace* trace, TraceOptionID trace_option_id,
+    const snort::Packet* p, const char* fmt, ...)
+    __attribute__((format (printf, 5, 6)));
+
+template <trace_func trace_vprintf = snort::trace_vprintf>
+static inline void trace_printf(TraceLevel log_level,
+    const snort::Trace* trace, TraceOptionID trace_option_id,
+    const snort::Packet* p, const char* fmt, ...)
+{
+    if ( !trace_enabled(trace, trace_option_id, log_level, p) )
+        return;
+
+    va_list ap;
+    va_start(ap, fmt);
+
+    const char* trace_option_name = trace->option_name(trace_option_id);
+    trace_vprintf(trace->module_name(), log_level, trace_option_name, p,
+        fmt, ap);
+
+    va_end(ap);
+}
+
+template <trace_func>
+static inline void trace_printf(TraceLevel log_level,
+    const snort::Trace* trace, const snort::Packet* p,
+    const char* fmt, ...) __attribute__((format (printf, 4, 5)));
+
+template <trace_func trace_vprintf = snort::trace_vprintf>
+static inline void trace_printf(TraceLevel log_level,
+    const snort::Trace* trace, const snort::Packet* p,
+    const char* fmt, ...)
+{
+    if ( !trace_enabled(trace, DEFAULT_TRACE_OPTION_ID, log_level, p) )
+        return;
+
+    va_list ap;
+    va_start(ap, fmt);
+
+    const char* trace_option_name = trace->option_name(DEFAULT_TRACE_OPTION_ID);
+    trace_vprintf(trace->module_name(), log_level, trace_option_name, p,
+        fmt, ap);
+
+    va_end(ap);
+}
+
+template <trace_func>
+static inline void trace_printf(const snort::Trace* trace,
+    TraceOptionID trace_option_id, const snort::Packet* p,
+    const char* fmt, ...) __attribute__((format (printf, 4, 5)));
+
+template <trace_func trace_vprintf = snort::trace_vprintf>
+static inline void trace_printf(const snort::Trace* trace,
+    TraceOptionID trace_option_id, const snort::Packet* p, const char* fmt, ...)
+{
+    if ( !trace_enabled(trace, trace_option_id, DEFAULT_TRACE_LOG_LEVEL, p) )
+        return;
+
+    va_list ap;
+    va_start(ap, fmt);
+
+    const char* trace_option_name = trace->option_name(trace_option_id);
+    trace_vprintf(trace->module_name(), DEFAULT_TRACE_LOG_LEVEL,
+        trace_option_name, p, fmt, ap);
+
+    va_end(ap);
+}
+
+template <trace_func>
+static inline void trace_printf(const snort::Trace* trace,
+    const snort::Packet* p, const char* fmt, ...)
+    __attribute__((format (printf, 3, 4)));
+
+template <trace_func trace_vprintf = snort::trace_vprintf>
+static inline void trace_printf(const snort::Trace* trace,
+    const snort::Packet* p, const char* fmt, ...)
+{
+    if ( !trace_enabled(trace, DEFAULT_TRACE_OPTION_ID, DEFAULT_TRACE_LOG_LEVEL, p) )
+        return;
+
+    va_list ap;
+    va_start(ap, fmt);
+
+    const char* trace_option_name = trace->option_name(DEFAULT_TRACE_OPTION_ID);
+    trace_vprintf(trace->module_name(), DEFAULT_TRACE_LOG_LEVEL,
+        trace_option_name, p, fmt, ap);
+
+    va_end(ap);
+}
+
+template <trace_func trace_vprintf = snort::trace_vprintf>
+static inline void trace_print(TraceLevel log_level,
+    const snort::Trace* trace, TraceOptionID trace_option_id,
+    const snort::Packet* p, const char* msg)
+{
+    trace_printf<trace_vprintf>(log_level, trace, trace_option_id, p,
+        "%s", msg);
+}
+
+template <trace_func trace_vprintf = snort::trace_vprintf>
+static inline void trace_print(const snort::Trace* trace,
+    TraceOptionID trace_option_id, const snort::Packet* p, const char* msg)
+{
+    trace_printf<trace_vprintf>(trace, trace_option_id, p, "%s", msg);
+}
+
+template <trace_func trace_vprintf = snort::trace_vprintf>
+static inline void trace_print(TraceLevel log_level,
+    const snort::Trace* trace, const snort::Packet* p, const char* msg)
+{
+    trace_printf<trace_vprintf>(log_level, trace, p, "%s", msg);
+}
+
+template <trace_func trace_vprintf = snort::trace_vprintf>
+static inline void trace_print(const snort::Trace* trace, const snort::Packet* p,
+    const char* msg)
+{
+    trace_printf<trace_vprintf>(trace, p, "%s", msg);
+}
+
+#define trace_print trace_print<snort::trace_vprintf>
+#define trace_printf trace_printf<snort::trace_vprintf>
+#define trace_uprintf trace_uprintf<snort::trace_vprintf>
+
+#define trace_log(...) trace_print(__VA_ARGS__)
+#define trace_logf(...) trace_printf(__VA_ARGS__)
+#define trace_ulogf(...) trace_uprintf(__VA_ARGS__)
 
 #ifdef DEBUG_MSGS
-SO_PUBLIC extern const char* DebugMessageFile;
-SO_PUBLIC extern int DebugMessageLine;
-
-#define DebugMessage DebugMessageFile = __FILE__; DebugMessageLine = __LINE__; DebugMessageFunc
-#define DebugWideMessage \
-    DebugMessageFile = __FILE__; DebugMessageLine = __LINE__; \
-    DebugWideMessageFunc
-
-uint64_t GetDebugLevel(void);
-int DebugThis(uint64_t level);
-#endif
-
-#ifdef DEBUG_MSGS
-#define DEBUG_WRAP(code) code
-SO_PUBLIC void DebugMessageFunc(uint64_t dbg, const char* fmt, ...);
-#ifdef SF_WCHAR
-SO_PUBLIC void DebugWideMessageFunc(uint64_t dbg, const wchar_t* fmt, ...);
-#endif
+#define debug_log trace_log
+#define debug_logf trace_logf
 #else
-#define DEBUG_WRAP(code)
-/* I would use DebugMessage(dbt,fmt...) but that only works with GCC */
+#define debug_log(...)
+#define debug_logf(...)
 #endif
 
 #endif
-

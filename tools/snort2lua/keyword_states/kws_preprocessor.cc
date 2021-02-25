@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -33,8 +33,7 @@ class Preprocessor : public ConversionState
 {
 public:
     Preprocessor(Converter& c) : ConversionState(c) { }
-    virtual ~Preprocessor() { }
-    virtual bool convert(std::istringstream& data);
+    bool convert(std::istringstream& data) override;
 };
 } // namespace
 
@@ -44,9 +43,14 @@ bool Preprocessor::convert(std::istringstream& data_stream)
 
     if (util::get_string(data_stream, keyword, ":"))
     {
-        const ConvertMap* map = util::find_map(preprocessors::preprocessor_api, keyword);
+        const ConvertMap* map = util::find_map(
+            preprocessors::get_preprocessor_api(), keyword, false);
+
         if (map)
         {
+            if (data_stream.peek() == EOF)
+                cv.set_empty_args(true);
+            /* cv.set_state() deletes this ConversionState object, so must return immediately after */
             cv.set_state(map->ctor(cv));
             return true;
         }

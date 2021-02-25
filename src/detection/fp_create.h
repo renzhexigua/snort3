@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,31 +16,29 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-/*
-** Dan Roelker <droelker@sourcefire.com>
-** Marc Norton <mnorton@sourcefire.com>
-**
-** NOTES
-** 5.7.02 - Initial Sourcecode.  Norton/Roelker
-** 6/13/05 - marc norton
-**   Added plugin support for fast pattern match data
-*/
+
+// fp_create.h is derived from fpcreate.h by:
+//
+// Dan Roelker <droelker@sourcefire.com>
+// Marc Norton <mnorton@sourcefire.com>
+
 #ifndef FPCREATE_H
 #define FPCREATE_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+// this is where rule groups are compiled and MPSE are instantiated
 
-#include "pcrm.h"
-#include "target_based/snort_protocols.h"
+#include <string>
+#include "ports/port_group.h"
 
+namespace snort
+{
 struct SnortConfig;
+}
 
 struct PMX
 {
-    void* RuleNode;
-    void* PatternMatchData;
+    struct PatternMatchData* pmd;
+    RULE_NODE rule_node;
 };
 
 /* Used for negative content list */
@@ -55,17 +53,11 @@ struct NCListNode
 **  engine.  It reads in the snort list of RTNs and OTNs and
 **  assigns them to PORT_MAPS.
 */
-int fpCreateFastPacketDetection(SnortConfig*);
-void fpDeleteFastPacketDetection(SnortConfig*);
-
-void fpShowEventStats(SnortConfig*);
-
-typedef int (* OtnWalkFcn)(int, struct RuleTreeNode*, struct OptTreeNode*);
-void fpWalkOtns(int, OtnWalkFcn);
-
-void fpDeletePortGroup(void*);
-
-bool set_fp_content(struct OptTreeNode*);
+int fpCreateFastPacketDetection(snort::SnortConfig*);
+void fpDeleteFastPacketDetection(snort::SnortConfig*);
+void get_pattern_info(const PatternMatchData* pmd,
+    const char* pattern, int pattern_length, std::string& hex, std::string& txt,
+    std::string& opts);
 
 #endif
 

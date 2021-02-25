@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -21,15 +21,11 @@
 #include "config.h"
 #endif
 
-#include "acsmx.h"
-#include "acsmx2.h"
-
-#include "snort_debug.h"
-#include "snort_types.h"
-#include "util.h"
-#include "profiler.h"
-#include "snort_config.h"
 #include "framework/mpse.h"
+
+#include "acsmx.h"
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // "ac_std"
@@ -41,51 +37,33 @@ private:
     ACSM_STRUCT* obj;
 
 public:
-    AcMpse(
-        SnortConfig*,
-        bool use_gc,
-        void (* user_free)(void*),
-        void (* tree_free)(void**),
-        void (* list_free)(void**))
-        : Mpse("ac_std", use_gc)
-    { obj = acsmNew(user_free, tree_free, list_free); }
+    AcMpse(const MpseAgent* agent) : Mpse("ac_std")
+    { obj = acsmNew(agent); }
 
-    ~AcMpse()
-    {
-        if (obj)
-            acsmFree(obj);
-    }
+    ~AcMpse() override
+    { acsmFree(obj); }
 
     int add_pattern(
-        SnortConfig*, const uint8_t* P, unsigned m,
-        bool noCase, bool negative, void* ID, int IID) override
+        const uint8_t* P, unsigned m, const PatternDescriptor& desc, void* user) override
     {
-        return acsmAddPattern(obj, P, m, noCase, negative, ID, IID);
+        return acsmAddPattern(obj, P, m, desc.no_case, desc.negated, user);
     }
 
-    int prep_patterns(
-        SnortConfig* sc, mpse_build_f build_tree, mpse_negate_f neg_list) override
-    {
-        return acsmCompile(sc, obj, build_tree, neg_list);
-    }
+    int prep_patterns(SnortConfig* sc) override
+    { return acsmCompile(sc, obj); }
 
     int _search(
-        const unsigned char* T, int n, mpse_action_f action,
-        void* data, int* current_state) override
+        const uint8_t* T, int n, MpseMatch match,
+        void* context, int* current_state) override
     {
-        return acsmSearch(
-            obj, (unsigned char*)T, n, action, data, current_state);
+        return acsmSearch(obj, T, n, match, context, current_state);
     }
 
     int print_info() override
-    {
-        return acsmPrintDetailInfo(obj);
-    }
+    { return acsmPrintDetailInfo(obj); }
 
-    int get_pattern_count() override
-    {
-        return acsmPatternCount(obj);
-    }
+    int get_pattern_count() const override
+    { return acsmPatternCount(obj); }
 };
 
 //-------------------------------------------------------------------------
@@ -93,14 +71,9 @@ public:
 //-------------------------------------------------------------------------
 
 static Mpse* ac_ctor(
-    SnortConfig* sc,
-    class Module*,
-    bool use_gc,
-    void (* user_free)(void*),
-    void (* tree_free)(void**),
-    void (* list_free)(void**))
+    const SnortConfig*, class Module*, const MpseAgent* agent)
 {
-    return new AcMpse(sc, use_gc, user_free, tree_free, list_free);
+    return new AcMpse(agent);
 }
 
 static void ac_dtor(Mpse* p)
@@ -111,14 +84,11 @@ static void ac_dtor(Mpse* p)
 static void ac_init()
 {
     acsmx_init_xlatcase();
-    // TBD this was never implemented for acsmx (only acsmx2)
-    //acsm_init_summary();
 }
 
 static void ac_print()
 {
-    // TBD this was apparently partly cloned from acsmx2 and never finished
-    //acsmPrintSummaryInfo();
+    acsmPrintSummaryInfo();
 }
 
 static const MpseApi ac_api =
@@ -135,7 +105,7 @@ static const MpseApi ac_api =
         nullptr,
         nullptr
     },
-    false,
+    MPSE_BASE,
     nullptr,
     nullptr,
     nullptr,
@@ -144,15 +114,16 @@ static const MpseApi ac_api =
     ac_dtor,
     ac_init,
     ac_print,
+    nullptr,
 };
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* se_ac_std[] =
+#endif
 {
     &ac_api.base,
     nullptr
 };
-#else
-const BaseApi* se_ac_std = &ac_api.base;
-#endif
 

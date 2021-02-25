@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2007-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,53 +20,37 @@
 // @file    log_text.c
 // @author  Russ Combs <rcombs@sourcefire.com>
 
-#include "log_text.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <sys/types.h>
-#include <stdlib.h>
-#include <string.h>
-#include <errno.h>
-#include <signal.h>
+#include "log_text.h"
+
+#include <daq_dlt.h>
+
+#include "detection/detection_engine.h"
+#include "detection/signature.h"
+#include "events/event.h"
+#include "main/snort_config.h"
+#include "network_inspectors/appid/appid_api.h"
+#include "packet_io/sfdaq.h"
+#include "protocols/eth.h"
+#include "protocols/gre.h"
+#include "protocols/icmp4.h"
+#include "protocols/ipv4_options.h"
+#include "protocols/packet_manager.h"
+#include "protocols/tcp.h"
+#include "protocols/tcp_options.h"
+#include "protocols/udp.h"
+#include "utils/util.h"
+#include "utils/util_net.h"
 
 #include "log.h"
-#include "rules.h"
-#include "treenodes.h"
-#include "util.h"
-#include "snort_debug.h"
-#include "signature.h"
-#include "util_net.h"
-#include "protocols/packet.h"
-#include "snort_config.h"
-#include "log/text_log.h"
-#include "snort_bounds.h"
-#include "obfuscation.h"
-#include "detection_util.h"
-#include "packet_io/sfdaq.h"
-#include "protocols/layer.h"
-#include "service_inspectors/http_inspect/hi_main.h"
+#include "messages.h"
+#include "obfuscator.h"
 
-#include "sfip/sf_ip.h"
-
-#include "protocols/eth.h"
-#include "protocols/ipv4.h"
-#include "protocols/ipv6.h"
-#include "protocols/icmp6.h"
-#include "protocols/icmp4.h"
-#include "protocols/udp.h"
-#include "protocols/tcp.h"
-#include "protocols/gre.h"
-#include "protocols/token_ring.h"
-#include "protocols/wlan.h"
-#include "protocols/linux_sll.h"
-#include "protocols/eapol.h"
-#include "protocols/ipv4_options.h"
-#include "protocols/tcp_options.h"
-#include "protocols/packet_manager.h"
-
+namespace snort
+{
 /*--------------------------------------------------------------------
  * utility functions
  *--------------------------------------------------------------------
@@ -74,7 +58,7 @@
 void LogTimeStamp(TextLog* log, Packet* p)
 {
     char timestamp[TIMEBUF_SIZE];
-    ts_print((struct timeval*)&p->pkth->ts, timestamp);
+    ts_print((const struct timeval*)&p->pkth->ts, timestamp);
     TextLog_Puts(log, timestamp);
 }
 
@@ -83,95 +67,43 @@ void LogTimeStamp(TextLog* log, Packet* p)
  *--------------------------------------------------------------------
  */
 /*--------------------------------------------------------------------
- * Function: LogPriorityData()
- *
- * Purpose: Prints out priority data associated with an alert
- *
- * Arguments: log => pointer to TextLog to write the data to
- *            doNewLine => tack a \n to the end of the line or not (bool)
- *
- * Returns: void function
+ * prints out priority data associated with an alert
  *--------------------------------------------------------------------
  */
-void LogPriorityData(TextLog* log, const Event* e, bool doNewLine)
+void LogPriorityData(TextLog* log, const Event& e)
 {
-    if ((e->sig_info->classType != NULL)
-        && (e->sig_info->classType->name != NULL))
-    {
-        TextLog_Print(log, "[Classification: %s] ",
-            e->sig_info->classType->name);
-    }
+    if ( e.sig_info->class_type and !e.sig_info->class_type->text.empty() )
+        TextLog_Print(log, "[Classification: %s] ", e.sig_info->class_type->text.c_str());
 
-    TextLog_Print(log, "[Priority: %d] ", e->sig_info->priority);
-
-    if (doNewLine)
-        TextLog_NewLine(log);
+    TextLog_Print(log, "[Priority: %d] ", e.sig_info->priority);
 }
 
 /*--------------------------------------------------------------------
- * Layer 2 header stuff cloned from log.c
+ * Purpose: Prints out AppID data associated with an alert
+ *
  *--------------------------------------------------------------------
  */
-/*--------------------------------------------------------------------
- * Function: LogTrHeader(TextLog*, Packet*)
- *
- * Purpose: Print the packet TokenRing header to the given TextLog
- *
- * Arguments: log => pointer to TextLog to print to
- *
- * Returns: void function
- *--------------------------------------------------------------------
- */
-
-void LogTrHeader(TextLog* log, Packet* p)
+bool LogAppID(TextLog* log, Packet* p)
 {
-    const token_ring::Trh_hdr* trh =
-        reinterpret_cast<const token_ring::Trh_hdr*>(layer::get_root_layer(p));
-
-    TextLog_Print(log, "%X:%X:%X:%X:%X:%X -> ", trh->saddr[0],
-        trh->saddr[1], trh->saddr[2], trh->saddr[3],
-        trh->saddr[4], trh->saddr[5]);
-    TextLog_Print(log, "%X:%X:%X:%X:%X:%X\n", trh->daddr[0],
-        trh->daddr[1], trh->daddr[2], trh->daddr[3],
-        trh->daddr[4], trh->daddr[5]);
-
-    const token_ring::Trh_llc* trhllc =
-        reinterpret_cast<const token_ring::Trh_llc*>(trh + sizeof(*trh));
-
-    TextLog_Print(log, "access control:0x%X frame control:0x%X\n", trh->ac,
-        trh->fc);
-
-    TextLog_Print(log, "DSAP: 0x%X SSAP 0x%X protoID: %X%X%X Ethertype: %X\n",
-        trhllc->dsap, trhllc->ssap, trhllc->protid[0],
-        trhllc->protid[1], trhllc->protid[2], trhllc->ethertype);
-
-    const token_ring::Trh_mr* trhmr = token_ring::get_trhmr(trhllc);
-
-    if (trhmr)
+    if ( p->flow )
     {
-        TextLog_Print(log, "RIF structure is present:\n");
-        TextLog_Print(log, "bcast: 0x%X length: 0x%X direction: 0x%X largest"
-            "fr. size: 0x%X res: 0x%X\n",
-            TRH_MR_BCAST(trhmr), TRH_MR_LEN(trhmr),
-            TRH_MR_DIR(trhmr), TRH_MR_LF(trhmr),
-            TRH_MR_RES(trhmr));
-        TextLog_Print(log, "rseg -> %X:%X:%X:%X:%X:%X:%X:%X\n",
-            trhmr->rseg[0], trhmr->rseg[1], trhmr->rseg[2],
-            trhmr->rseg[3], trhmr->rseg[4], trhmr->rseg[5],
-            trhmr->rseg[6], trhmr->rseg[7]);
+        const char* app_name = appid_api.get_application_name(*p->flow, p->is_from_client());
+
+        if ( app_name )
+        {
+            TextLog_Print(log, "[AppID: %s] ", app_name);
+            return true;
+        }
     }
+
+    return false;
 }
 
 /*--------------------------------------------------------------------
- * Function: LogEthHeader()
- *
- * Purpose: Print the packet Ethernet header to the given TextLog
- *
- * Arguments: log => pointer to TextLog to print to
- *
- * Returns: void function
+ * layer 2 header stuff cloned from log.c
  *--------------------------------------------------------------------
  */
+
 static void LogEthHeader(TextLog* log, Packet* p)
 {
     const eth::EtherHdr* eh = layer::get_eth_layer(p);
@@ -201,7 +133,7 @@ static void LogGREHeader(TextLog* log, Packet* p)
 {
     const gre::GREHdr* greh = layer::get_gre_layer(p);
 
-    if (greh == NULL)
+    if (greh == nullptr)
         return;
 
     TextLog_Print(log, "GRE version:%u flags:0x%02X ether-type:0x%04X\n",
@@ -209,241 +141,19 @@ static void LogGREHeader(TextLog* log, Packet* p)
 }
 
 /*--------------------------------------------------------------------
- * Function: LogSLLHeader(TextLog* )
- *
- * Purpose: Print the packet SLL (fake) header to the given TextLog
- * (piece partly is borrowed from tcpdump :))
- *
- * Arguments: log => pointer to TextLog to print to
- *
- * Returns: void function
- *--------------------------------------------------------------------
- */
-#ifdef DLT_LINUX_SLL
-static void LogSLLHeader(TextLog* log, Packet* p)
-{
-    const linux_sll::SLLHdr* sllh =
-        reinterpret_cast<const linux_sll::SLLHdr*>(layer::get_root_layer(p));
-
-    switch (ntohs(sllh->sll_pkttype))
-    {
-    case LINUX_SLL_HOST:
-        TextLog_Puts(log, "< ");
-        break;
-    case LINUX_SLL_BROADCAST:
-        TextLog_Puts(log, "B ");
-        break;
-    case LINUX_SLL_MULTICAST:
-        TextLog_Puts(log, "M ");
-        break;
-    case LINUX_SLL_OTHERHOST:
-        TextLog_Puts(log, "P ");
-        break;
-    case LINUX_SLL_OUTGOING:
-        TextLog_Puts(log, "> ");
-        break;
-    default:
-        TextLog_Puts(log, "? ");
-        break;
-    }
-
-    /* mac addr */
-    TextLog_Print(log, "l/l len: %i l/l type: 0x%X %02X:%02X:%02X:%02X:%02X:%02X\n",
-        htons(sllh->sll_halen), ntohs(sllh->sll_hatype),
-        sllh->sll_addr[0], sllh->sll_addr[1], sllh->sll_addr[2],
-        sllh->sll_addr[3], sllh->sll_addr[4], sllh->sll_addr[5]);
-
-    /* protocol and pkt size */
-    TextLog_Print(log, "pkt type:0x%X proto: 0x%X len:0x%X\n",
-        ntohs(sllh->sll_pkttype),
-        ntohs(sllh->sll_protocol), p->pkth->pktlen);
-}
-
-#endif
-
-/*--------------------------------------------------------------------
- * Function: LogWifiHeader(TextLog* )
- *
- * Purpose: Print the packet 802.11 header to the given TextLog
- *
- * Arguments: log => pointer to TextLog to print to
- *
- * Returns: void function
- *--------------------------------------------------------------------
- */
-static void LogWifiHeader(TextLog* log, Packet* p)
-{
-    const wlan::WifiHdr* wifih =
-        reinterpret_cast< const wlan::WifiHdr*>(layer::get_root_layer(p));
-
-    /* This assumes we are printing a data packet, could be changed
-       to print other types as well */
-    const uint8_t* da = NULL, * sa = NULL, * bssid = NULL, * ra = NULL,
-    * ta = NULL;
-    /* per table 4, IEEE802.11 section 7.2.2 */
-    if ((wifih->frame_control & WLAN_FLAG_TODS) &&
-        (wifih->frame_control & WLAN_FLAG_FROMDS))
-    {
-        ra = wifih->addr1;
-        ta = wifih->addr2;
-        da = wifih->addr3;
-        sa = wifih->addr4;
-    }
-    else if (wifih->frame_control & WLAN_FLAG_TODS)
-    {
-        bssid = wifih->addr1;
-        sa = wifih->addr2;
-        da = wifih->addr3;
-    }
-    else if (wifih->frame_control & WLAN_FLAG_FROMDS)
-    {
-        da = wifih->addr1;
-        bssid = wifih->addr2;
-        sa = wifih->addr3;
-    }
-    else
-    {
-        da = wifih->addr1;
-        sa = wifih->addr2;
-        bssid = wifih->addr3;
-    }
-
-    /* DO this switch to provide additional info on the type */
-    switch (wifih->frame_control & 0x00ff)
-    {
-    case WLAN_TYPE_MGMT_BEACON:
-        TextLog_Puts(log, "Beacon ");
-        break;
-    /* management frames */
-    case WLAN_TYPE_MGMT_ASREQ:
-        TextLog_Puts(log, "Assoc. Req. ");
-        break;
-    case WLAN_TYPE_MGMT_ASRES:
-        TextLog_Puts(log, "Assoc. Resp. ");
-        break;
-    case WLAN_TYPE_MGMT_REREQ:
-        TextLog_Puts(log, "Reassoc. Req. ");
-        break;
-    case WLAN_TYPE_MGMT_RERES:
-        TextLog_Puts(log, "Reassoc. Resp. ");
-        break;
-    case WLAN_TYPE_MGMT_PRREQ:
-        TextLog_Puts(log, "Probe Req. ");
-        break;
-    case WLAN_TYPE_MGMT_PRRES:
-        TextLog_Puts(log, "Probe Resp. ");
-        break;
-    case WLAN_TYPE_MGMT_ATIM:
-        TextLog_Puts(log, "ATIM ");
-        break;
-    case WLAN_TYPE_MGMT_DIS:
-        TextLog_Puts(log, "Dissassoc. ");
-        break;
-    case WLAN_TYPE_MGMT_AUTH:
-        TextLog_Puts(log, "Authent. ");
-        break;
-    case WLAN_TYPE_MGMT_DEAUTH:
-        TextLog_Puts(log, "Deauthent. ");
-        break;
-
-    /* Control frames */
-    case WLAN_TYPE_CONT_PS:
-    case WLAN_TYPE_CONT_RTS:
-    case WLAN_TYPE_CONT_CTS:
-    case WLAN_TYPE_CONT_ACK:
-    case WLAN_TYPE_CONT_CFE:
-    case WLAN_TYPE_CONT_CFACK:
-        TextLog_Puts(log, "Control ");
-        break;
-    }
-
-    if (sa != NULL)
-    {
-        TextLog_Print(log, "%X:%X:%X:%X:%X:%X -> ", sa[0],
-            sa[1], sa[2], sa[3], sa[4], sa[5]);
-    }
-    else if (ta != NULL)
-    {
-        TextLog_Print(log, "ta: %X:%X:%X:%X:%X:%X da: ", ta[0],
-            ta[1], ta[2], ta[3], ta[4], ta[5]);
-    }
-
-    TextLog_Print(log, "%X:%X:%X:%X:%X:%X\n", da[0],
-        da[1], da[2], da[3], da[4], da[5]);
-
-    if (bssid != NULL)
-    {
-        TextLog_Print(log, "bssid: %X:%X:%X:%X:%X:%X", bssid[0],
-            bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
-    }
-
-    if (ra != NULL)
-    {
-        TextLog_Print(log, " ra: %X:%X:%X:%X:%X:%X", ra[0],
-            ra[1], ra[2], ra[3], ra[4], ra[5]);
-    }
-    TextLog_Puts(log, " Flags:");
-    if (wifih->frame_control & WLAN_FLAG_TODS)
-        TextLog_Puts(log," ToDs");
-    if (wifih->frame_control & WLAN_FLAG_TODS)
-        TextLog_Puts(log," FrDs");
-    if (wifih->frame_control & WLAN_FLAG_FRAG)
-        TextLog_Puts(log," Frag");
-    if (wifih->frame_control & WLAN_FLAG_RETRY)
-        TextLog_Puts(log," Re");
-    if (wifih->frame_control & WLAN_FLAG_PWRMGMT)
-        TextLog_Puts(log," Pwr");
-    if (wifih->frame_control & WLAN_FLAG_MOREDAT)
-        TextLog_Puts(log," MD");
-    if (wifih->frame_control & WLAN_FLAG_WEP)
-        TextLog_Puts(log," Wep");
-    if (wifih->frame_control & WLAN_FLAG_ORDER)
-        TextLog_Puts(log," Ord");
-    TextLog_NewLine(log);
-}
-
-/*--------------------------------------------------------------------
- * Function: Log2ndHeader(TextLog* , Packet p)
- *
- * Purpose: Log2ndHeader -- prints second layber  header info.
- *
- * Arguments: log => pointer to TextLog to print to
- *
- * Returns: void function
+ * prints second layer header info
  *--------------------------------------------------------------------
  */
 void Log2ndHeader(TextLog* log, Packet* p)
 {
-    switch (DAQ_GetBaseProtocol())
-    {
-    case DLT_EN10MB:            /* Ethernet */
-        if (p && (p->num_layers > 0))
-            LogEthHeader(log, p);
-        break;
-#ifdef DLT_IEEE802_11
-    case DLT_IEEE802_11:
-        if (p && (p->num_layers > 0))
-            LogWifiHeader(log, p);
-        break;
-#endif
-    case DLT_IEEE802:                    /* Token Ring */
-        if (p && (p->num_layers > 0))
-            LogTrHeader(log, p);
-        break;
-#ifdef DLT_LINUX_SLL
-    case DLT_LINUX_SLL:
-        if (p && (p->num_layers > 0))
-            LogSLLHeader(log, p);      /* Linux cooked sockets */
-        break;
-#endif
-    default:
-        if (SnortConfig::log_verbose())
-        {
-            // FIXIT-L should only be output once!
-            ErrorMessage("Datalink %i type 2nd layer display is not "
-                "supported\n", DAQ_GetBaseProtocol());
-        }
-    }
+    if ( !p or !p->num_layers )
+        return;
+
+    if ( SFDAQ::get_base_protocol() == DLT_EN10MB )
+        LogEthHeader(log, p);
+
+    else if ( SnortConfig::log_verbose() )
+        ErrorMessage("Datalink %i (not supported)\n", SFDAQ::get_base_protocol());
 }
 
 /*-------------------------------------------------------------------
@@ -453,8 +163,6 @@ void Log2ndHeader(TextLog* log, Packet* p)
 
 static void LogIpOptions(TextLog* log, const ip::IpOptionIterator& options)
 {
-    int print_offset;
-    int init_offset = TextLog_Tell(log);
     unsigned c = 0;
 
     for (const auto& opt : options)
@@ -471,14 +179,6 @@ static void LogIpOptions(TextLog* log, const ip::IpOptionIterator& options)
 
     for (auto op : options)
     {
-        print_offset = TextLog_Tell(log);
-
-        if ((print_offset - init_offset) > 60)
-        {
-            TextLog_Puts(log, "\nIP Options => ");
-            init_offset = TextLog_Tell(log);
-        }
-
         switch (op.code)
         {
         case ip::IPOptionCodes::RR:
@@ -523,50 +223,39 @@ static void LogIpOptions(TextLog* log, const ip::IpOptionIterator& options)
             break;
 
         default:
-            TextLog_Print(log, "Opt %d: ", (int)op.code);
+            // the only cases where op.len is invalid were handled aboved
+            // op.len includes code and length bytes but data does not
+            TextLog_Print(log, "Type %u, Len %u", op.code, op.len);
 
-            // the only cases where len is invalid were handled aboved
-            const uint8_t opt_len = op.len;
-            int j;
+            if ( op.len <= 2 )
+                break;
 
-            for (j = 0; (j + 1) < opt_len; j += 2)
-            {
-                TextLog_Print(log, "%02X%02X ",op.data[j],
-                    op.data[j+1]);
-            }
+            TextLog_Print(log, " |%02X", op.data[0]);
 
-            // since we're skipping by two, if (j+1) == opt_len,
-            // we will not have printed j
-            if (j < opt_len)
-                TextLog_Print(log, "%02X", op.data[j]);
+            for ( unsigned j = 1, n = op.len - 2; j < n; ++j )
+                TextLog_Print(log, " %02X", op.data[j]);
+
+            TextLog_Print(log, "| ");
             break;
         }
     }
     TextLog_NewLine(log);
 }
 
-void LogIpOptions(TextLog* log, const IP4Hdr* ip4h, uint16_t valid_ip4_len)
+void LogIpOptions(TextLog* log, const ip::IP4Hdr* ip4h, uint16_t valid_ip4_len)
 {
     const ip::IpOptionIterator options(ip4h, valid_ip4_len);
     LogIpOptions(log, options);
 }
 
-void LogIpOptions(TextLog* log, const IP4Hdr* ip4h, const Packet* const p)
+static void LogIpOptions(TextLog* log, const ip::IP4Hdr* ip4h, const Packet* const p)
 {
     const ip::IpOptionIterator options(ip4h, p);
     LogIpOptions(log, options);
 }
 
 /*--------------------------------------------------------------------
- * Function: LogIPAddrs(TextLog* )
- *
- * Purpose: Dump the IP addresses to the given TextLog
- *          Handles obfuscation
- *
- * Arguments: log => TextLog to print to
- *            p => packet structure
- *
- * Returns: void function
+ * dump the IP addresses to the given TextLog, handles obfuscation
  *--------------------------------------------------------------------
  */
 void LogIpAddrs(TextLog* log, Packet* p)
@@ -574,47 +263,51 @@ void LogIpAddrs(TextLog* log, Packet* p)
     if ( p->is_fragment() || (!p->is_tcp() && !p->is_udp() && !p->is_data()) )
     {
         const char* ip_fmt = "%s -> %s";
+        InetBuf src, dst;
 
-        if (SnortConfig::obfuscate())
+        if (p->context->conf->obfuscate())
         {
-            TextLog_Print(log, ip_fmt,
-                ObfuscateIpToText(p->ptrs.ip_api.get_src()),
-                ObfuscateIpToText(p->ptrs.ip_api.get_dst()));
+            ObfuscateIpToText(p->ptrs.ip_api.get_src(),
+                p->context->conf->homenet, p->context->conf->obfuscation_net, src);
+
+            ObfuscateIpToText(p->ptrs.ip_api.get_dst(),
+                p->context->conf->homenet, p->context->conf->obfuscation_net, dst);
+
+            TextLog_Print(log, ip_fmt, src, dst);
         }
         else
         {
             TextLog_Print(log, ip_fmt,
-                inet_ntoax(p->ptrs.ip_api.get_src()),
-                inet_ntoax((p->ptrs.ip_api.get_dst())));
+                sfip_ntop(p->ptrs.ip_api.get_src(), src, sizeof(src)),
+                sfip_ntop(p->ptrs.ip_api.get_dst(), dst, sizeof(dst)));
         }
     }
     else
     {
         const char* ip_fmt = "%s:%d -> %s:%d";
+        InetBuf src, dst;
 
-        if (SnortConfig::obfuscate())
+        if (p->context->conf->obfuscate())
         {
-            TextLog_Print(log, ip_fmt,
-                ObfuscateIpToText(p->ptrs.ip_api.get_src()), p->ptrs.sp,
-                ObfuscateIpToText(p->ptrs.ip_api.get_dst()), p->ptrs.dp);
+            ObfuscateIpToText(p->ptrs.ip_api.get_src(),
+                p->context->conf->homenet, p->context->conf->obfuscation_net, src);
+
+            ObfuscateIpToText(p->ptrs.ip_api.get_dst(),
+                p->context->conf->homenet, p->context->conf->obfuscation_net, dst);
+
+            TextLog_Print(log, ip_fmt, src, p->ptrs.sp, dst, p->ptrs.dp);
         }
         else
         {
             TextLog_Print(log, ip_fmt,
-                inet_ntoax(p->ptrs.ip_api.get_src()), p->ptrs.sp,
-                inet_ntoax(p->ptrs.ip_api.get_dst()), p->ptrs.dp);
+                sfip_ntop(p->ptrs.ip_api.get_src(), src, sizeof(src)), p->ptrs.sp,
+                sfip_ntop(p->ptrs.ip_api.get_dst(), dst, sizeof(dst)), p->ptrs.dp);
         }
     }
 }
 
 /*--------------------------------------------------------------------
- * Function: LogIPHeader(TextLog* )
- *
- * Purpose: Dump the IP header info to the given TextLog
- *
- * Arguments: log => TextLog to print to
- *
- * Returns: void function
+ * dump the IP header info to the given TextLog
  *--------------------------------------------------------------------
  */
 void LogIPHeader(TextLog* log, Packet* p)
@@ -627,7 +320,7 @@ void LogIPHeader(TextLog* log, Packet* p)
 
     LogIpAddrs(log, p);
 
-    if (!SnortConfig::output_datalink())
+    if (!p->context->conf->output_datalink())
     {
         TextLog_NewLine(log);
     }
@@ -648,11 +341,10 @@ void LogIPHeader(TextLog* log, Packet* p)
     if (is_ip6)
     {
         const ip::IP6Hdr* const ip6h = p->ptrs.ip_api.get_ip6h(); // nullptr if ipv4
-        const ip::IP6Frag* const ip6_frag = // nullptr if ipv4
-            (is_ip6 ? layer::get_inner_ip6_frag() : nullptr);
+        const ip::IP6Frag* const ip6_frag = layer::get_inner_ip6_frag();
 
         TextLog_Print(log, "%s TTL:%u TOS:0x%X ID:%u IpLen:%u DgmLen:%u",
-            protocol_names[p->get_ip_proto_next()],
+            protocol_names[to_utype(p->get_ip_proto_next())],
             ip6h->hop_lim(),
             ip6h->tos(),
             (ip6_frag ? ip6_frag->id() : 0),
@@ -677,7 +369,7 @@ void LogIPHeader(TextLog* log, Packet* p)
     else
     {
         TextLog_Print(log, "%s TTL:%u TOS:0x%X ID:%u IpLen:%u DgmLen:%u",
-            protocol_names[ip4h->proto()],
+            protocol_names[to_utype(ip4h->proto())],
             ip4h->ttl(),
             ip4h->tos(),
             ip4h->id(),
@@ -716,15 +408,14 @@ void LogIPHeader(TextLog* log, Packet* p)
 static void LogOuterIPHeader(TextLog* log, Packet* p)
 {
     uint8_t save_frag_flag = (p->ptrs.decode_flags & DECODE_FRAG);
-    uint16_t save_sp, save_dp;
     ip::IpApi save_ip_api = p->ptrs.ip_api;
 
     p->ptrs.decode_flags &= ~DECODE_FRAG;
 
     if (p->proto_bits & PROTO_BIT__TEREDO)
     {
-        save_sp = p->ptrs.sp;
-        save_dp = p->ptrs.dp;
+        uint16_t save_sp = p->ptrs.sp;
+        uint16_t save_dp = p->ptrs.dp;
 
         const udp::UDPHdr* udph = layer::get_outer_udp_lyr(p);
         p->ptrs.sp = ntohs(udph->uh_sport);
@@ -752,10 +443,10 @@ static void LogOuterIPHeader(TextLog* log, Packet* p)
  *-------------------------------------------------------------------
  */
 inline uint16_t extract_16_bits(const uint8_t* const buf)
-{ return ntohs(*((uint16_t*)(buf)) ); }
+{ return ntohs(*((const uint16_t*)(buf)) ); }
 
 inline uint32_t extract_32_bits(const uint8_t* const buf)
-{ return ntohl(*((uint32_t*)(buf)) ); }
+{ return ntohl(*((const uint32_t*)(buf)) ); }
 
 static void LogTcpOptions(TextLog* log, const tcp::TcpOptIterator& opt_iter)
 {
@@ -775,15 +466,6 @@ static void LogTcpOptions(TextLog* log, const tcp::TcpOptIterator& opt_iter)
 
     for (const tcp::TcpOption& opt : opt_iter)
     {
-#if 0
-        print_offset = TextLog_Tell(log);
-
-        if ((print_offset - init_offset) > 60)
-        {
-            TextLog_Puts(log, "\nTCP Options => ");
-            init_offset = TextLog_Tell(log);
-        }
-#endif
         switch (opt.code)
         {
         case tcp::TcpOptCode::MAXSEG:
@@ -856,30 +538,18 @@ static void LogTcpOptions(TextLog* log, const tcp::TcpOptIterator& opt_iter)
             break;
 
         default:
-        {
-            const int opt_len = opt.len - 2;
+            TextLog_Print(log, " Kind %u, Len %u", opt.code, opt.len);
 
-            if (opt_len > 0)
-            {
-                TextLog_Print(log, "  Opt %d (%d):", opt.code,
-                    (int)opt_len);
+            if ( opt.len <= 2 )
+                break;
 
-                for (int i = 0; (i + 1) < opt_len; i += 2)
-                {
-                    TextLog_Print(log, " %02X%02X",  opt.data[i],
-                        opt.data[i+1]);
-                }
+            TextLog_Print(log, " |%02X",  opt.data[0]);
 
-                // if there is an odd number of bytes
-                if (opt_len & 1)
-                    TextLog_Print(log, " %02x", opt.data[opt_len - 1]);
-            }
-            else
-            {
-                TextLog_Print(log, "  Opt %d", opt.code);
-            }
+            for ( unsigned i = 1, n = opt.len - 2; i < n; ++i )
+                TextLog_Print(log, " %02X",  opt.data[i]);
+
+            TextLog_Print(log, "|");
             break;
-        }
         }
     }
 }
@@ -890,20 +560,14 @@ void LogTcpOptions(TextLog* log,  const tcp::TCPHdr* tcph, uint16_t valid_tcp_le
     LogTcpOptions(log, opt_iter);
 }
 
-void LogTcpOptions(TextLog* log, const Packet* const p)
+static void LogTcpOptions(TextLog* log, const Packet* const p)
 {
     tcp::TcpOptIterator opt_iter(p->ptrs.tcph, p);
     LogTcpOptions(log, opt_iter);
 }
 
 /*--------------------------------------------------------------------
- * Function: LogTCPHeader(TextLog* )
- *
- * Purpose: Dump the TCP header info to the given TextLog
- *
- * Arguments: log => pointer to TextLog to print data to
- *
- * Returns: void function
+ * dump the TCP header info to the given TextLog
  *--------------------------------------------------------------------
  */
 void LogTCPHeader(TextLog* log, Packet* p)
@@ -911,7 +575,7 @@ void LogTCPHeader(TextLog* log, Packet* p)
     char tcpFlags[9];
     const tcp::TCPHdr* tcph = p->ptrs.tcph;
 
-    if (tcph == NULL)
+    if (tcph == nullptr)
     {
         TextLog_Print(log, "TCP header truncated\n");
         return;
@@ -948,18 +612,12 @@ void LogTCPHeader(TextLog* log, Packet* p)
  *-------------------------------------------------------------------
  */
 /*--------------------------------------------------------------------
- * Function: LogUDPHeader(TextLog* )
- *
- * Purpose: Dump the UDP header to the given TextLog
- *
- * Arguments: log => pointer to TextLog
- *
- * Returns: void function
+ * dump the UDP header to the given TextLog
  *--------------------------------------------------------------------
  */
 void LogUDPHeader(TextLog* log, Packet* p)
 {
-    if (p->ptrs.udph == NULL)
+    if (p->ptrs.udph == nullptr)
     {
         TextLog_Print(log, "UDP header truncated\n");
         return;
@@ -973,20 +631,13 @@ void LogUDPHeader(TextLog* log, Packet* p)
  *--------------------------------------------------------------------
  */
 /*--------------------------------------------------------------------
- * Function: LogEmbeddedICMPHeader(TextLog* , ICMPHdr *)
- *
- * Purpose: Prints the 64 bits of the original IP payload in an ICMP packet
- *          that requires it
- *
- * Arguments: log => pointer to TextLog
- *            icmph  => ICMPHdr struct pointing to original ICMP
- *
- * Returns: void function
+ * prints the 64 bits of the original IP payload in an ICMP packet
+ * that requires it
  *--------------------------------------------------------------------
  */
 static void LogEmbeddedICMPHeader(TextLog* log, const ICMPHdr* icmph)
 {
-    if (log == NULL || icmph == NULL)
+    if (log == nullptr || icmph == nullptr)
         return;
 
     TextLog_Print(log, "Type: %d  Code: %d  Csum: %u",
@@ -1005,7 +656,7 @@ static void LogEmbeddedICMPHeader(TextLog* log, const ICMPHdr* icmph)
         break;
 
     case ICMP_REDIRECT:
-// XXX-IPv6 "NOT YET IMPLEMENTED - ICMP printing"
+        // FIXIT-L IPv6 not yet implemented - ICMP printing
         break;
 
     case ICMP_ECHO:
@@ -1034,28 +685,17 @@ static void LogEmbeddedICMPHeader(TextLog* log, const ICMPHdr* icmph)
 }
 
 /*--------------------------------------------------------------------
- * Function: LogICMPEmbeddedIP(TextLog* , Packet *)
- *
- * Purpose: Prints the original/encapsulated IP header + 64 bits of the
- *          original IP payload in an ICMP packet
- *
- * Arguments: log => pointer to TextLog
- *            p  => packet struct
- *
- * Returns: void function
+ * prints the original/encapsulated IP header + 64 bits of the
+ * original IP payload in an ICMP packet
  *--------------------------------------------------------------------
  */
 static void LogICMPEmbeddedIP(TextLog* log, Packet* p)
 {
-    if (log == NULL || p == NULL)
-        return;
+    // FIXIT-L -- Allocating a new Packet here is ridiculously excessive.
+    Packet* orig = DetectionEngine::set_next_packet(p);
+    orig->context->conf = p->context->conf;
 
-    // FIXIT-L -J  -- Allocating a new Packet here is ridiculously excessive.
-    Packet* orig_p = PacketManager::encode_new();
-    orig_p->reset();
-    Packet& op = *orig_p;
-
-    if (!layer::set_api_ip_embed_icmp(p, op.ptrs.ip_api))
+    if (!layer::set_api_ip_embed_icmp(p, orig->ptrs.ip_api))
     {
         TextLog_Puts(log, "\nORIGINAL DATAGRAM TRUNCATED");
     }
@@ -1065,38 +705,35 @@ static void LogICMPEmbeddedIP(TextLog* log, Packet* p)
         {
         case PROTO_BIT__TCP_EMBED_ICMP:
         {
-            const tcp::TCPHdr* const tcph = layer::get_tcp_embed_icmp(op.ptrs.ip_api);
+            const tcp::TCPHdr* const tcph = layer::get_tcp_embed_icmp(orig->ptrs.ip_api);
             if (tcph)
             {
-                orig_p->ptrs.sp = tcph->src_port();
-                orig_p->ptrs.dp = tcph->dst_port();
-                orig_p->ptrs.tcph = tcph;
-                orig_p->ptrs.set_pkt_type(PktType::TCP);
+                orig->ptrs.sp = tcph->src_port();
+                orig->ptrs.dp = tcph->dst_port();
+                orig->ptrs.tcph = tcph;
+                orig->ptrs.set_pkt_type(PktType::TCP);
 
                 TextLog_Print(log, "\n** ORIGINAL DATAGRAM DUMP:\n");
-                LogIPHeader(log, orig_p);
-
-                TextLog_Print(log, "Seq: 0x%lX\n",
-                    (u_long)ntohl(orig_p->ptrs.tcph->th_seq));
+                LogIPHeader(log, orig);
+                TextLog_Print(log, "Seq: 0x%lX\n", (u_long)ntohl(orig->ptrs.tcph->th_seq));
             }
             break;
         }
 
         case PROTO_BIT__UDP_EMBED_ICMP:
         {
-            const udp::UDPHdr* const udph = layer::get_udp_embed_icmp(op.ptrs.ip_api);
+            const udp::UDPHdr* const udph = layer::get_udp_embed_icmp(orig->ptrs.ip_api);
             if (udph)
             {
-                orig_p->ptrs.sp = udph->src_port();
-                orig_p->ptrs.dp = udph->dst_port();
-                orig_p->ptrs.udph = udph;
-                orig_p->ptrs.set_pkt_type(PktType::UDP);
+                orig->ptrs.sp = udph->src_port();
+                orig->ptrs.dp = udph->dst_port();
+                orig->ptrs.udph = udph;
+                orig->ptrs.set_pkt_type(PktType::UDP);
 
                 TextLog_Print(log, "\n** ORIGINAL DATAGRAM DUMP:\n");
-                LogIPHeader(log, orig_p);
-                TextLog_Print(log, "Len: %d  Csum: %d\n",
-                    udph->len() - udp::UDP_HEADER_LEN,
-                    udph->cksum());
+                LogIPHeader(log, orig);
+                TextLog_Print(
+                    log, "Len: %d  Csum: %d\n", udph->len() - udp::UDP_HEADER_LEN, udph->cksum());
             }
             break;
         }
@@ -1104,10 +741,11 @@ static void LogICMPEmbeddedIP(TextLog* log, Packet* p)
         case PROTO_BIT__ICMP_EMBED_ICMP:
         {
             TextLog_Print(log, "\n** ORIGINAL DATAGRAM DUMP:\n");
-            LogIPHeader(log, orig_p);
+            LogIPHeader(log, orig);
 
-            const icmp::ICMPHdr* icmph = layer::get_icmp_embed_icmp(op.ptrs.ip_api);
-            if (icmph != NULL)
+            const icmp::ICMPHdr* icmph = layer::get_icmp_embed_icmp(orig->ptrs.ip_api);
+
+            if (icmph)
                 LogEmbeddedICMPHeader(log, icmph);
             break;
         }
@@ -1115,37 +753,26 @@ static void LogICMPEmbeddedIP(TextLog* log, Packet* p)
         default:
         {
             TextLog_Print(log, "\n** ORIGINAL DATAGRAM DUMP:\n");
-            LogIPHeader(log, orig_p);
+            LogIPHeader(log, orig);
 
             TextLog_Print(log, "Protocol: 0x%X (unknown or "
-                "header truncated)", orig_p->ptrs.ip_api.proto());
+                "header truncated)", orig->ptrs.ip_api.proto());
             break;
         }
         } /* switch */
 
         /* if more than 8 bytes of original IP payload sent */
-
         const int16_t more_bytes = p->dsize - 8;
+
         if (more_bytes > 0)
-        {
-            TextLog_Print(log, "(%d more bytes of original packet)\n",
-                more_bytes);
-        }
+            TextLog_Print(log, "(%d more bytes of original packet)\n", more_bytes);
 
         TextLog_Puts(log, "** END OF DUMP");
     }
-
-    PacketManager::encode_delete(orig_p);
 }
 
 /*--------------------------------------------------------------------
- * Function: LogICMPHeader(TextLog* )
- *
- * Purpose: Print ICMP header
- *
- * Arguments: log => pointer to TextLog
- *
- * Returns: void function
+ * print ICMP header
  *--------------------------------------------------------------------
  */
 void LogICMPHeader(TextLog* log, Packet* p)
@@ -1153,7 +780,7 @@ void LogICMPHeader(TextLog* log, Packet* p)
     /* 32 digits plus 7 colons and a NULL byte */
     char buf[8*4 + 7 + 1];
 
-    if (p->ptrs.icmph == NULL)
+    if (p->ptrs.icmph == nullptr)
     {
         TextLog_Puts(log, "ICMP header truncated\n");
         return;
@@ -1245,14 +872,11 @@ void LogICMPHeader(TextLog* log, Packet* p)
         }
 
         LogICMPEmbeddedIP(log, p);
-
         break;
 
     case ICMP_SOURCE_QUENCH:
         TextLog_Puts(log, "SOURCE QUENCH");
-
         LogICMPEmbeddedIP(log, p);
-
         break;
 
     case ICMP_REDIRECT:
@@ -1279,14 +903,8 @@ void LogICMPHeader(TextLog* log, Packet* p)
             break;
         }
 
-/* written this way since inet_ntoa was typedef'ed to use sfip_ntoa
-* which requires sfip_t instead of inaddr's.  This call to inet_ntoa
-* is a rare case that doesn't use sfip_t's. */
-
-// XXX-IPv6 NOT YET IMPLEMENTED - IPV6 addresses technically not supported - need to change ICMP
-
-        /* no inet_ntop in Windows */
-        sfip_raw_ntop(AF_INET, (const void*)(&p->ptrs.icmph->s_icmp_gwaddr.s_addr),
+        // FIXIT-L IPv6 NOT YET IMPLEMENTED - need to change ICMP
+        snort_inet_ntop(AF_INET, (const void*)(&p->ptrs.icmph->s_icmp_gwaddr.s_addr),
             buf, sizeof(buf));
         TextLog_Print(log, " NEW GW: %s", buf);
 
@@ -1301,7 +919,7 @@ void LogICMPHeader(TextLog* log, Packet* p)
         break;
 
     case ICMP_ROUTER_ADVERTISE:
-        TextLog_Print(log, "ROUTER ADVERTISMENT: "
+        TextLog_Print(log, "ROUTER ADVERTISEMENT: "
             "Num addrs: %d Addr entry size: %d Lifetime: %u",
             p->ptrs.icmph->s_icmp_num_addrs, p->ptrs.icmph->s_icmp_wpa,
             ntohs(p->ptrs.icmph->s_icmp_lifetime));
@@ -1387,14 +1005,13 @@ void LogICMPHeader(TextLog* log, Packet* p)
     case ICMP_ADDRESSREPLY:
         TextLog_Print(log, "ID: %u  Seq: %u  ADDRESS REPLY: 0x%08X",
             ntohs(p->ptrs.icmph->s_icmp_id), ntohs(p->ptrs.icmph->s_icmp_seq),
-            (u_int)ntohl(p->ptrs.icmph->s_icmp_mask));
+            ntohl(p->ptrs.icmph->s_icmp_mask));
         break;
 
     default:
         TextLog_Puts(log, "UNKNOWN");
-
         break;
-    } /* switch */
+    }
 
     TextLog_NewLine(log);
 }
@@ -1403,50 +1020,19 @@ void LogICMPHeader(TextLog* log, Packet* p)
  * reference stuff cloned from signature.c
  *--------------------------------------------------------------------
  */
-/* print a reference node */
-static void LogReference(TextLog* log, ReferenceNode* refNode)
+
+void LogXrefs(TextLog* log, const Event& e)
 {
-    if (refNode)
+    for ( const auto ref : e.sig_info->refs )
     {
-        if (refNode->system)
-        {
-            if (refNode->system->url)
-                TextLog_Print(log, "[Xref => %s%s]", refNode->system->url,
-                    refNode->id);
-            else
-                TextLog_Print(log, "[Xref => %s %s]", refNode->system->name,
-                    refNode->id);
-        }
+        if ( !ref->system )
+            TextLog_Print(log, "[Xref => %s]", ref->id.c_str());
+
+        else if ( !ref->system->url.empty() )
+            TextLog_Print(log, "[Xref => %s%s]", ref->system->url.c_str(), ref->id.c_str());
+
         else
-        {
-            TextLog_Print(log, "[Xref => %s]", refNode->id);
-        }
-    }
-}
-
-/*
- * Function: LogXrefs(TextLog* )
- *
- * Purpose: Prints out cross reference data associated with an alert
- *
- * Arguments: log => pointer to TextLog to write the data to
- *            doNewLine => tack a \n to the end of the line or not (bool)
- *
- * Returns: void function
- */
-void LogXrefs(TextLog* log, const Event* e, bool doNewLine)
-{
-    ReferenceNode* refNode = e->sig_info->refs;
-
-    while ( refNode )
-    {
-        LogReference(log, refNode);
-        refNode = refNode->next;
-
-        /* on the last loop through, print a newline in
-           Full mode */
-        if (doNewLine && (refNode == NULL))
-            TextLog_NewLine(log);
+            TextLog_Print(log, "[Xref => %s %s]", ref->system->name.c_str(), ref->id.c_str());
     }
 }
 
@@ -1455,27 +1041,17 @@ void LogXrefs(TextLog* log, const Event* e, bool doNewLine)
  *--------------------------------------------------------------------
  */
 /*--------------------------------------------------------------------
- * Function: SnortConfig::output_char_data(TextLog*, char*, int)
- *
- * Purpose: Dump the printable ASCII data from a packet
- *
- * Arguments: log => ptr to TextLog to print to
- *            data => pointer to buffer data
- *            len => length of data buffer
- *
- * Returns: void function
+ * dump the printable ASCII data from a packet
  *--------------------------------------------------------------------
  */
-static void LogCharData(TextLog* log, char* data, int len)
+static void LogCharData(TextLog* log, const uint8_t* data, int len)
 {
-    const char* pb = data;
-    const char* end = data + len;
-    int lineCount = 0;
-
     if ( !data )
-    {
         return;
-    }
+
+    const uint8_t* pb = data;
+    const uint8_t* end = data + len;
+    int lineCount = 0;
 
     while ( pb < end )
     {
@@ -1502,206 +1078,174 @@ static void LogCharData(TextLog* log, char* data, int len)
     TextLog_Putc(log, ' ');
 }
 
-/*
- * Function: LogNetData(TextLog*, uint8_t*,int, Packet*)
- *
- * Purpose: Do a side by side dump of a buffer, hex on
- *          the left, decoded ASCII on the right.
- *
- * Arguments: log => ptr to TextLog to print to
- *            data => pointer to buffer data
- *            len => length of data buffer
- *
- * Returns: void function
- */
-static const char SEPARATOR[] =
-          "- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -";
+// do a side by side dump of a buffer with hex on
+// the left and decoded ASCII on the right
 
-// FIXIT-L expecting complaints because this isn't 16  :(
-#define BYTES_PER_FRAME 20
-/* middle:"41 02 43 04 45 06 47 08 49 0A 4B 0C 4D 0E 4F 0F 01 02 03 04  A.C.E.G.I.K.M.O....."
-   at end:"41 02 43 04 45 06 47 08                                      A.C.E.G."*/
-
-static const char PAD3[] =
-          "                                                             ";
-
-void LogNetData(TextLog* log, const uint8_t* data, const int len, Packet* p)
+struct HexAsciiLayout
 {
-    const uint8_t* pb = data;
-    const uint8_t* end = data + len;
+    unsigned bytes_per_frame;
+    unsigned frame_break;
+    bool break_text;
 
-    const uint8_t ipv4_id = PacketManager::proto_id(IPPROTO_ID_IPIP);
-    const uint8_t ipv6_id = PacketManager::proto_id(IPPROTO_ID_IPV6);
+    const char* offset_fmt;
+    const char* offset_hdr;
 
-    int offset = 0;
-    char conv[] = "0123456789ABCDEF";   /* xlation lookup table */
-    int ip_ob_start, ip_ob_end, byte_pos, char_pos;
-    int i;
+    const char* separator;
+    const char* padding;
+};
 
-    byte_pos = char_pos = 0;
+static const HexAsciiLayout hal_std =
+{
+    16, 7, true, "%04.4X  ", "- -   ",
+    "- - - - - - - - - - - -  - - - - - - - - - - - -  - - - - - - - - -",
+//  "41 02 43 04 45 06 47 08  49 0A 4B 0C 4D 0E 4F 0F  A.C.E.G. I.K.M.O."
+    "                                                 "
+};
+
+static const HexAsciiLayout hal_wide =
+{
+    20, 9, false, "%5u  ", "- - -  ",
+    "- - - - - - - - - - - - - - -  - - - - - - - - - - - - - - -  - - - - -  - - - - -",
+//  "41 02 43 04 45 06 47 08 49 0A  4B 0C 4D 0E 4F 0F 01 02 03 04  A.C.E.G.I.K.M.O....."
+    "                                                             "
+};
+
+static void obfuscate(Packet* p, const uint8_t* data, int& ip_ob_start, int& ip_ob_end)
+{
+    assert(p);
     ip_ob_start = ip_ob_end = -1;
 
+    if ( !p->context->conf->obfuscate() )
+        return;
+
+    const ProtocolIndex ipv4_idx = PacketManager::proto_idx(ProtocolId::IPIP);
+    const ProtocolIndex ipv6_idx = PacketManager::proto_idx(ProtocolId::IPV6);
+
+    unsigned num_layers = p->num_layers;
+    ProtocolIndex lyr_idx = 0;
+    unsigned i;
+
+    for ( i = 0; i < num_layers; i++ )
+    {
+        lyr_idx = PacketManager::proto_idx(p->layers[i].prot_id);
+
+        if ( lyr_idx == ipv4_idx || lyr_idx == ipv6_idx)
+        {
+            if (p->layers[i].length && p->layers[i].start)
+                break;
+        }
+    }
+
+    int ip_start = p->layers[i].start - data;
+
+    if (ip_start > 0 )
+    {
+        ip_ob_start = ip_start + 10;
+        if (lyr_idx == ipv4_idx)
+            ip_ob_end = ip_ob_start + 2 + 2*(sizeof(struct in_addr));
+        else
+            ip_ob_end = ip_ob_start + 2 + 2*(sizeof(struct in6_addr));
+    }
+}
+
+void LogNetData(
+        TextLog* log, const uint8_t* data, const int len, Packet* p, const char* buf_name,
+        const char* ins_name)
+{
     if ( !len )
         return;
 
-    if (p && SnortConfig::obfuscate() )
+    int ip_ob_start, ip_ob_end;
+
+    if ( buf_name )
+        ip_ob_start = ip_ob_end = -1;
+    else
     {
-        int num_layers =  p->num_layers;
-        uint8_t lyr_proto = 0;
-
-        for ( i = 0; i < num_layers; i++ )
-        {
-            lyr_proto = PacketManager::proto_id(p->layers[i].prot_id);
-
-            if ( lyr_proto == ipv4_id || lyr_proto == ipv6_id)
-            {
-                if (p->layers[i].length && p->layers[i].start)
-                    break;
-            }
-        }
-
-        int ip_start = p->layers[i].start - data;
-
-        if (ip_start > 0 )
-        {
-            ip_ob_start = ip_start + 10;
-            if (lyr_proto == ipv4_id)
-                ip_ob_end = ip_ob_start + 2 + 2*(sizeof(struct in_addr));
-            else
-                ip_ob_end = ip_ob_start + 2 + 2*(sizeof(struct in6_addr));
-        }
+        obfuscate(p, data, ip_ob_start, ip_ob_end);
+        buf_name = p->get_pseudo_type();
     }
-#if 0
-    TextLog_Print(log, "%s[%d]\n", p->get_pseudo_type(), p->dsize);
-    LogDiv(log);
-#else
-    char div[64];
-    snprintf(div, sizeof(div), "- - - %s[%d]", p->get_pseudo_type(), p->dsize);
-    div[sizeof(div)-1] = '\0';
-    TextLog_Print(log, "%s%s\n", div, SEPARATOR+strlen(div));
-#endif
+
+    const HexAsciiLayout& hal = SnortConfig::get_conf()->output_wide_hex() ? hal_wide : hal_std;
+    const char* hdr_off = p->context->conf->verbose_byte_dump() ? hal.offset_hdr : "";
+
+    if ( !ins_name )
+        ins_name = p->flow and p->flow->gadget ?  p->flow->gadget->get_name() : "snort";
+
+    TextLog_Print(log, "\n%s.%s[%u]:\n", ins_name, buf_name, len);
+    TextLog_Print(log, "%s%s\n", hdr_off, hal.separator);
+
+    const uint8_t* pb = data;
+    const uint8_t* end = data + len;
+
+    int offset = 0;
 
     /* loop thru the whole buffer */
     while ( pb < end )
     {
-        if (SnortConfig::verbose_byte_dump())
+        if (p->context->conf->verbose_byte_dump())
         {
-            TextLog_Print(log, "0x%04X: ", offset);
-            offset += BYTES_PER_FRAME;
+            TextLog_Print(log, hal.offset_fmt, offset);
+            offset += hal.bytes_per_frame;
         }
-        /* process one frame
-           first print the binary as ascii hex */
-        for (i = 0; i < BYTES_PER_FRAME && pb+i < end; i++, byte_pos++)
+        int byte_pos = 0;
+        unsigned i;
+
+        /* process one frame first print the binary as ascii hex */
+        for (i = 0; i < hal.bytes_per_frame && pb+i < end; i++, byte_pos++)
         {
-            if (SnortConfig::obfuscate() && ((byte_pos >= ip_ob_start) && (byte_pos < ip_ob_end)))
-            {
-                TextLog_Putc(log, 'X');
-                TextLog_Putc(log, 'X');
-                TextLog_Putc(log, ' ');
-            }
+            if ((byte_pos >= ip_ob_start) && (byte_pos < ip_ob_end))
+                TextLog_Quote(log, "XX ");
             else
-            {
-                char b = pb[i];
-                TextLog_Putc(log, conv[(b & 0xFF) >> 4]);
-                TextLog_Putc(log, conv[(b & 0xFF) & 0x0F]);
+                TextLog_Print(log, "%2.2X ", pb[i]);
+
+            if ( i == hal.frame_break )
                 TextLog_Putc(log, ' ');
-            }
         }
+        int char_pos = 0;
+
         /* print ' ' past end of packet and before ascii */
-        TextLog_Puts(log, PAD3+(3*i));
+        unsigned fb = (0 < i and i < hal.frame_break) ? 1 : 0;
+        TextLog_Puts(log, hal.padding+(3*i)-fb);
 
-        /* then print the actual ascii chars
-           or a '.' for control chars */
-        for (i = 0; i < BYTES_PER_FRAME && pb+i < end; i++, char_pos++)
+        /* then print the actual ascii chars or a '.' for control chars */
+        for (unsigned j = 0; j < hal.bytes_per_frame && pb+j < end; j++, char_pos++)
         {
-            if (SnortConfig::obfuscate() && ((char_pos >= ip_ob_start) && (char_pos < ip_ob_end)))
-            {
+            if ((char_pos >= ip_ob_start) && (char_pos < ip_ob_end))
                 TextLog_Putc(log, 'X');
-            }
             else
             {
-                char b = pb[i];
-
-                if ( b > 0x1F && b < 0x7F)
-                    TextLog_Putc(log, (char)(b & 0xFF));
+                if ( 0x1F < pb[j] and pb[j] < 0x7F)
+                    TextLog_Putc(log, pb[j]);
                 else
                     TextLog_Putc(log, '.');
             }
+            if ( j == hal.frame_break and hal.break_text )
+                TextLog_Putc(log, ' ');
         }
-        pb += BYTES_PER_FRAME;
+        pb += hal.bytes_per_frame;
         TextLog_NewLine(log);
     }
-    LogDiv(log);
-}
-
-void LogDiv(TextLog* log)
-{
-    TextLog_Print(log, "%s\n", SEPARATOR);
-}
-
-static int LogObfuscatedData(TextLog* log, Packet* p)
-{
-    uint8_t* payload = NULL;
-    uint16_t payload_len = 0;
-
-    if (obApi->getObfuscatedPayload(p, &payload,
-        (uint16_t*)&payload_len) != OB_RET_SUCCESS)
-    {
-        return -1;
-    }
-
-    LogDiv(log);
-
-    /* dump the application layer data */
-    if (SnortConfig::output_app_data() && !SnortConfig::verbose_byte_dump())
-    {
-        if (SnortConfig::output_char_data())
-            LogCharData(log, (char*)payload, payload_len);
-        else
-            LogNetData(log, payload, payload_len, p);
-    }
-    else if (SnortConfig::verbose_byte_dump())
-    {
-        uint8_t buf[UINT16_MAX];
-        uint16_t dlen = p->data - p->pkt;
-
-        SafeMemcpy(buf, p->pkt, dlen, buf, buf + sizeof(buf));
-        SafeMemcpy(buf + dlen, payload, payload_len,
-            buf, buf + sizeof(buf));
-
-        LogNetData(log, buf, dlen + payload_len, p);
-    }
-
-    free(payload);
-    return 0;
+    TextLog_Print(log, "%s%s\n", hdr_off, hal.separator);
 }
 
 /*--------------------------------------------------------------------
- * Function: LogIPPkt(TextLog*, int, Packet *)
- *
- * Purpose: Dump the packet to the given TextLog
- *
- * Arguments: log => pointer to print data to
- *            type => packet protocol
- *            p => pointer to decoded packet struct
- *
- * Returns: void function
+ * dump the packet to the given TextLog
  *--------------------------------------------------------------------
  */
 
 void LogIPPkt(TextLog* log, Packet* p)
 {
-    if ( SnortConfig::output_datalink() )
+    if ( p->context->conf->output_datalink() )
     {
         Log2ndHeader(log, p);
 
         if ( p->proto_bits & PROTO_BIT__MPLS )
             LogMPLSHeader(log, p);
 
-        // FIXIT-L --> log everything in order!!
+        // FIXIT-L log all layers in order
         ip::IpApi tmp_api = p->ptrs.ip_api;
         int8_t num_layer = 0;
-        uint8_t tmp_next = p->get_ip_proto_next();
+        IpProtocol tmp_next = p->get_ip_proto_next();
         bool first = true;
 
         while (layer::set_outer_ip_api(p, p->ptrs.ip_api, p->ip_proto_next, num_layer) &&
@@ -1728,14 +1272,14 @@ void LogIPPkt(TextLog* log, Packet* p)
         switch (p->type())
         {
         case PktType::TCP:
-            if ( p->ptrs.tcph != NULL )
+            if ( p->ptrs.tcph != nullptr )
                 LogTCPHeader(log, p);
             else
                 LogNetData(log, p->ptrs.ip_api.ip_data(), p->ptrs.ip_api.pay_len(), p);
             break;
 
         case PktType::UDP:
-            if ( p->ptrs.udph != NULL )
+            if ( p->ptrs.udph != nullptr )
             {
                 // for consistency, nothing to log (tcp doesn't log paylen)
                 LogUDPHeader(log, p);
@@ -1748,11 +1292,11 @@ void LogIPPkt(TextLog* log, Packet* p)
             break;
 
         case PktType::ICMP:
-            // FIXIT-L   log accurate ICMP6 data.
+            // FIXIT-L log accurate ICMP6 data.
             if (p->is_ip6())
                 break;
 
-            if ( p->ptrs.icmph != NULL )
+            if ( p->ptrs.icmph != nullptr )
                 LogICMPHeader(log, p);
             else
                 LogNetData(log, p->ptrs.ip_api.ip_data(), p->ptrs.ip_api.pay_len(), p);
@@ -1767,301 +1311,51 @@ void LogIPPkt(TextLog* log, Packet* p)
 
 void LogPayload(TextLog* log, Packet* p)
 {
-    if ((p->dsize > 0) && obApi->payloadObfuscationRequired(p)
-        && (LogObfuscatedData(log, p) == 0))
-    {
-        return;
-    }
-
     /* dump the application layer data */
-    if (SnortConfig::output_app_data() && !SnortConfig::verbose_byte_dump())
+    if (p->context->conf->output_app_data() && !p->context->conf->verbose_byte_dump())
     {
-        if (SnortConfig::output_char_data())
+        if (p->context->conf->output_char_data())
         {
-            LogCharData(log, (char*)p->data, p->dsize);
-            if (!IsJSNormData(p->flow))
+            LogCharData(log, p->data, p->dsize);
+
+            DataPointer file_data = DetectionEngine::get_file_data(p->context);
+
+            if ( file_data.len > 0 )
             {
-                TextLog_Print(log, "%s\n", "Normalized JavaScript for this packet");
-                LogCharData(log, (char*)g_file_data.data, g_file_data.len);
-            }
-            else if (!IsGzipData(p->flow))
-            {
-                TextLog_Print(log, "%s\n", "Decompressed Data for this packet");
-                LogCharData(log, (char*)g_file_data.data, g_file_data.len);
+                TextLog_Print(log, "%s\n", "File data");
+                LogCharData(log, file_data.data, file_data.len);
             }
         }
         else
         {
-            LogNetData(log, p->data, p->dsize, p);
-            if (!IsJSNormData(p->flow))
+            if ( p->obfuscator )
             {
-                TextLog_Print(log, "%s\n", "Normalized JavaScript for this packet");
-                LogNetData(log, g_file_data.data, g_file_data.len, p);
+                // FIXIT-P avoid string copy
+                std::string buf((const char*)p->data, p->dsize);
+
+                for ( const auto& b : *p->obfuscator )
+                    buf.replace(b.offset, b.length, b.length, p->obfuscator->get_mask_char());
+
+                LogNetData(log, (const uint8_t*)buf.c_str(), p->dsize, p);
             }
-            else if (!IsGzipData(p->flow))
+            else
             {
-                TextLog_Print(log, "%s\n", "Decompressed Data for this packet");
-                LogNetData(log, g_file_data.data, g_file_data.len, p);
+                LogNetData(log, p->data, p->dsize, p);
+
+                DataPointer file_data = DetectionEngine::get_file_data(p->context);
+
+                if ( file_data.len > 0 )
+                {
+                    TextLog_Print(log, "%s\n", "File data");
+                    LogNetData(log, file_data.data, file_data.len, p);
+                }
             }
         }
     }
-    else if (SnortConfig::verbose_byte_dump())
+    else if (p->context->conf->verbose_byte_dump())
     {
-        LogNetData(log, p->pkt, p->pkth->caplen, p);
+        LogNetData(log, p->pkt, p->pktlen, p);
     }
 }
-
-/*--------------------------------------------------------------------
- * ARP stuff cloned from log.c
- * FIXIT-L these must be converted to use TextLog (or just deleted)
- *--------------------------------------------------------------------
- */
-
-#if 0
-/****************************************************************************
- *
- * Function: PrintEapolKey(FILE *)
- *
- * Purpose: Dump the EAP header to the specified file stream
- *
- * Arguments: fp => file stream
- *
- * Returns: void function
- *
- ***************************************************************************/
-static void PrintEapolKey(FILE* fp,  const eapol::EapolKey* eapolk)
-{
-    uint16_t length;
-
-    if (eapolk == NULL)
-    {
-        fprintf(fp, "Eapol Key truncated\n");
-        return;
-    }
-    fprintf(fp, "KEY type: ");
-    if (eapolk->type == 1)
-    {
-        fprintf(fp, "RC4");
-    }
-
-    memcpy(&length, &eapolk->length, 2);
-    length = ntohs(length);
-    fprintf(fp, " len: %d", length);
-    fprintf(fp, " index: %d ", eapolk->index & 0x7F);
-    fprintf(fp, eapolk->index & 0x80 ? " unicast\n" : " broadcast\n");
-}
-
-/****************************************************************************
- *
- * Function: PrintEapolHeader(FILE *, Packet *)
- *
- * Purpose: Dump the EAPOL header info to the specified stream
- *
- * Arguments: fp => stream to print to
- *
- * Returns: void function
- *
- ***************************************************************************/
-static void PrintEapolHeader(FILE* fp, const eapol::EtherEapol* eplh)
-{
-    fprintf(fp, "EAPOL type: ");
-    switch (eplh->eaptype)
-    {
-    case EAPOL_TYPE_EAP:
-        fprintf(fp, "EAP");
-        break;
-    case EAPOL_TYPE_START:
-        fprintf(fp, "Start");
-        break;
-    case EAPOL_TYPE_LOGOFF:
-        fprintf(fp, "Logoff");
-        break;
-    case EAPOL_TYPE_KEY:
-        fprintf(fp, "Key");
-        break;
-    case EAPOL_TYPE_ASF:
-        fprintf(fp, "ASF Alert");
-        break;
-    default:
-        fprintf(fp, "Unknown");
-    }
-    fprintf(fp, " Len: %d\n", ntohs(eplh->len));
-}
-
-/****************************************************************************
- *
- * Function: PrintEAPHeader(FILE *)
- *
- * Purpose: Dump the EAP header to the specified file stream
- *
- * Arguments: fp => file stream
- *
- * Returns: void function
- *
- ***************************************************************************/
-static void PrintEAPHeader(FILE* fp, const eapol::EAPHdr* eaph)
-{
-    uint8_t* eaptype = 0;
-
-    if (eaph == NULL)
-    {
-        fprintf(fp, "EAP header truncated\n");
-        return;
-    }
-    fprintf(fp, "code: ");
-    switch (eaph->code)
-    {
-    case EAP_CODE_REQUEST:
-        fprintf(fp, "Req ");
-        eaptype = (uint8_t*)(eaph + sizeof(*eaph));
-        break;
-    case EAP_CODE_RESPONSE:
-        fprintf(fp, "Resp");
-        eaptype = (uint8_t*)(eaph + sizeof(*eaph));
-        break;
-    case EAP_CODE_SUCCESS:
-        fprintf(fp, "Succ");
-        break;
-    case EAP_CODE_FAILURE:
-        fprintf(fp, "Fail");
-        break;
-    }
-    fprintf(fp, " id: 0x%x len: %d", eaph->id, ntohs(eaph->len));
-    if (eaptype != NULL)
-    {
-        fprintf(fp, " type: ");
-        switch (*(eaptype))
-        {
-        case EAP_TYPE_IDENTITY:
-            fprintf(fp, "id");
-            break;
-        case EAP_TYPE_NOTIFY:
-            fprintf(fp, "notify");
-            break;
-        case EAP_TYPE_NAK:
-            fprintf(fp, "nak");
-            break;
-        case EAP_TYPE_MD5:
-            fprintf(fp, "md5");
-            break;
-        case EAP_TYPE_OTP:
-            fprintf(fp, "otp");
-            break;
-        case EAP_TYPE_GTC:
-            fprintf(fp, "token");
-            break;
-        case EAP_TYPE_TLS:
-            fprintf(fp, "tls");
-            break;
-        default:
-            fprintf(fp, "undef");
-            break;
-        }
-    }
-    fprintf(fp, "\n");
-}
-
-/*
- * Function: PrintEapolPkt(FILE *, Packet *)
- *
- * Purpose: Dump the packet to the stream pointer
- *
- * Arguments: fp => pointer to print data to
- *            type => packet protocol
- *            p => pointer to decoded packet struct
- *
- * Returns: void function
- */
-void PrintEapolPkt(FILE* fp, Packet* p)
-{
-    char timestamp[TIMEBUF_SIZE];
-
-    memset((char*)timestamp, 0, TIMEBUF_SIZE);
-    ts_print((struct timeval*)&p->pkth->ts, timestamp);
-
-    /* dump the timestamp */
-    fwrite(timestamp, strlen(timestamp), 1, fp);
-
-    /* dump the ethernet header if we're doing that sort of thing */
-    if (SnortConfig::output_datalink())
-    {
-        Print2ndHeader(fp, p);
-    }
-
-    const eapol::EtherEapol* eplh = layer::get_eapol_layer(p);
-
-    if (eplh)
-    {
-        PrintEapolHeader(fp, eplh);
-        if (eplh->eaptype == EAPOL_TYPE_EAP)
-        {
-            PrintEAPHeader(fp, (const eapol::EAPHdr*)eplh + sizeof(*eplh));
-        }
-        else if (eplh->eaptype == EAPOL_TYPE_KEY)
-        {
-            PrintEapolKey(fp, (const eapol::EapolKey*)eplh + sizeof(*eplh));
-        }
-    }
-    else
-    {
-        fprintf(fp, "EAP header truncated\n");
-    }
-
-    /* dump the application layer data */
-    if (SnortConfig::output_app_data() && !SnortConfig::verbose_byte_dump())
-    {
-        if (SnortConfig::output_char_data())
-            PrintCharData(fp, (char*)p->data, p->dsize);
-        else
-            PrintNetData(fp, p->data, p->dsize, NULL);
-    }
-    else if (SnortConfig::verbose_byte_dump())
-    {
-        PrintNetData(fp, p->pkt, p->pkth->caplen, p);
-    }
-
-    fprintf(fp, "%s\n", SEPARATOR);
-}
-
-/*
- * Function: PrintWifiPkt(FILE *, Packet *)
- *
- * Purpose: Dump the packet to the stream pointer
- *
- * Arguments: fp => pointer to print data to
- *            p => pointer to decoded packet struct
- *
- * Returns: void function
- */
-void PrintWifiPkt(FILE* fp, Packet* p)
-{
-    char timestamp[TIMEBUF_SIZE];
-
-    memset((char*)timestamp, 0, TIMEBUF_SIZE);
-    ts_print((struct timeval*)&p->pkth->ts, timestamp);
-
-    /* dump the timestamp */
-    fwrite(timestamp, strlen(timestamp), 1, fp);
-
-    /* dump the ethernet header if we're doing that sort of thing */
-    Print2ndHeader(fp, p);
-
-    /* dump the application layer data */
-    if (SnortConfig::output_app_data() && !SnortConfig::verbose_byte_dump())
-    {
-        if (SnortConfig::output_char_data())
-            PrintCharData(fp, (char*)p->data, p->dsize);
-        else
-            PrintNetData(fp, p->data, p->dsize, NULL);
-    }
-    else if (SnortConfig::verbose_byte_dump())
-    {
-        PrintNetData(fp, p->pkt, p->pkth->caplen, p);
-    }
-
-    fprintf(fp, "=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+"
-        "=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+\n\n");
-}
-
-#endif
+} // namespace snort
 

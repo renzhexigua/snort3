@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,36 +20,45 @@
 #ifndef SO_MANAGER_H
 #define SO_MANAGER_H
 
-#ifdef HAVE_CONFIG_H
-# include "config.h"
-#endif
-
-#include "snort_types.h"
-#include "framework/base_api.h"
+// Factory for shared object rules.
+// Runtime is same as for text rules.
+#include <list>
 #include "framework/so_rule.h"
+#include "managers/plugin_manager.h"
 
+namespace snort
+{
 struct SnortConfig;
-struct SoApi;
+class Inspector;
+}
 
 //-------------------------------------------------------------------------
+struct SoRules
+{
+    std::list<const SoApi*> api;
+    std::list<SoHandlePtr> handles;
+    snort::Inspector* proxy = nullptr;
+    ~SoRules();
+};
 
 class SoManager
 {
 public:
-    static void add_plugin(const SoApi*);
+    static void add_plugin(const SoApi*, snort::SnortConfig*, SoHandlePtr);
     static void dump_plugins();
-    static void release_plugins();
 
     static void instantiate(const SoApi*);
 
     // soid is arg to soid option, so is arg to so option
-    static const char* get_so_options(const char* soid);
-    static SoEvalFunc get_so_eval(const char* soid, const char* so, void** data);
-    static void delete_so_data(const char* soid, void*);
+    static const char* get_so_rule(const char* soid, snort::SnortConfig* sc = nullptr);
+    static SoEvalFunc get_so_eval(const char* soid, const char* so,
+        void** data, snort::SnortConfig* sc = nullptr);
+    static void delete_so_data(const char* soid, void*, SoRules*);
 
     static void rule_to_hex(const char* file);
     static void rule_to_text(const char* file);
-    static void dump_rule_stubs(const char*);
+    static void dump_rule_stubs(const char*, snort::SnortConfig*);
+    static void load_so_proxy();
 };
 
 #endif

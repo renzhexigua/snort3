@@ -6,11 +6,11 @@ set(FILE_LIST
 )
 
 if (STATIC_INSPECTORS)
-    add_library(arp_spoof STATIC
+    add_library(arp_spoof OBJECT
         ${FILE_LIST}
     )
 
 else (STATIC_INSPECTORS)
-    add_shared_library(arpspoof inspectors ${FILE_LIST})
-    
+    add_dynamic_module(arp_spoof inspectors ${FILE_LIST})
+
 endif (STATIC_INSPECTORS)

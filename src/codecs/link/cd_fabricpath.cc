@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,11 +17,14 @@
 //--------------------------------------------------------------------------
 // cd_fabricpath.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
-#include "framework/codec.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "codecs/codec_module.h"
-//#include "codecs/codec_events.h"
-#include "protocols/protocol_ids.h"
-#include "protocols/packet.h"
+#include "framework/codec.h"
+
+using namespace snort;
 
 #define CD_FABRICPATH_NAME "fabricpath"
 #define CD_FABRICPATH_HELP "support for fabricpath"
@@ -34,12 +37,12 @@ static const RuleMap fabricpath_rules[] =
     { 0, nullptr }
 };
 
-class FabricPathModule : public CodecModule
+class FabricPathModule : public BaseCodecModule
 {
 public:
-    FabricPathModule() : CodecModule(CD_FABRICPATH_NAME, CD_FABRICPATH_HELP) { }
+    FabricPathModule() : BaseCodecModule(CD_FABRICPATH_NAME, CD_FABRICPATH_HELP) { }
 
-    const RuleMap* get_rules() const
+    const RuleMap* get_rules() const override
     { return fabricpath_rules; }
 };
 
@@ -47,12 +50,11 @@ class FabricPathCodec : public Codec
 {
 public:
     FabricPathCodec() : Codec(CD_FABRICPATH_NAME) { }
-    ~FabricPathCodec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
     bool encode(const uint8_t* const raw_in, const uint16_t raw_len,
-        EncState&, Buffer&) override;
+        EncState&, Buffer&, Flow*) override;
     void format(bool reverse, uint8_t* raw_pkt, DecodeData& snort) override;
 };
 
@@ -67,8 +69,8 @@ struct FPathHdr
 constexpr uint8_t FABRICPATH_HEADER_LEN = 16;
 } // anonymous namespace
 
-void FabricPathCodec::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(ETHERTYPE_FPATH); }
+void FabricPathCodec::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::ETHERTYPE_FPATH); }
 
 bool FabricPathCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
 {
@@ -78,25 +80,24 @@ bool FabricPathCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
         return false;
     }
 
-    codec.next_prot_id = PROTO_ETHERNET_802_3;
+    codec.next_prot_id = ProtocolId::ETHERNET_802_3;
     codec.lyr_len = FABRICPATH_HEADER_LEN;
     return true;
 }
 
 bool FabricPathCodec::encode(const uint8_t* const raw_in, const uint16_t /*raw_len*/,
-    EncState& enc, Buffer& buf)
+    EncState& enc, Buffer& buf, Flow*)
 {
     // not raw ip -> encode layer 2
     bool raw = ( enc.flags & ENC_FLAG_RAW );
 
     if ( !raw )
     {
-        // if not raw ip AND out buf is empty
         if ( buf.size() == 0)
         {
             buf.off = 0;  // for alignment
         }
-        else // if not raw ip AND buf is not empty
+        else
         {
             // we get here for outer-most layer when not raw ip
             // we also get here for any encapsulated ethernet layer.
@@ -175,11 +176,11 @@ static const CodecApi fabricpath_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_fabricpath[] =
+#endif
 {
     &fabricpath_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_fabricpath = &fabricpath_api.base;
-#endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,23 +17,27 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "detection_filter.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-#include "utils/util.h"
-#include "parser/parser.h"
-#include "filters/sfthd.h"
+#include "hash/xhash.h"
+#include "log/messages.h"
 #include "main/thread.h"
+#include "utils/util.h"
 
-static THREAD_LOCAL SFXHASH* detection_filter_hash = NULL;
+#include "sfthd.h"
 
-DetectionFilterConfig* DetectionFilterConfigNew(void)
+using namespace snort;
+
+static THREAD_LOCAL XHash* detection_filter_hash = nullptr;
+
+DetectionFilterConfig* DetectionFilterConfigNew()
 {
     DetectionFilterConfig* df =
-        (DetectionFilterConfig*)SnortAlloc(sizeof(DetectionFilterConfig));
+        (DetectionFilterConfig*)snort_calloc(sizeof(DetectionFilterConfig));
 
     df->memcap = 1024 * 1024;
     df->enabled = 1;
@@ -43,43 +47,28 @@ DetectionFilterConfig* DetectionFilterConfigNew(void)
 
 void DetectionFilterConfigFree(DetectionFilterConfig* config)
 {
-    if (config == NULL)
+    if (config == nullptr)
         return;
 
-    free(config);
+    snort_free(config);
 }
 
-void detection_filter_print_config(DetectionFilterConfig*)
-{ }
-
-int detection_filter_test(
-    void* pv,
-    const sfip_t* sip, const sfip_t* dip,
-    long curtime)
+int detection_filter_test(void* pv, const SfIp* sip, const SfIp* dip, long curtime)
 {
-    if (pv == NULL)
+    if (pv == nullptr)
         return 0;
 
     return sfthd_test_rule(detection_filter_hash, (THD_NODE*)pv,
-        sip, dip, curtime);
+        sip, dip, curtime, get_ips_policy()->policy_id);
 }
 
-/* empty out active entries */
-void detection_filter_reset_active(void)
+THD_NODE* detection_filter_create(DetectionFilterConfig* df_config, THDX_STRUCT* thdx)
 {
-    if (detection_filter_hash == NULL)
-        return;
-
-    sfxhash_make_empty(detection_filter_hash);
-}
-
-void* detection_filter_create(DetectionFilterConfig* df_config, THDX_STRUCT* thdx)
-{
-    if (df_config == NULL)
-        return NULL;
+    if (df_config == nullptr)
+        return nullptr;
 
     if (!df_config->enabled)
-        return NULL;
+        return nullptr;
 
     df_config->count++;
 
@@ -93,15 +82,7 @@ void detection_filter_init(DetectionFilterConfig* df_config)
         return;
 
     if ( !detection_filter_hash )
-    {
         detection_filter_hash = sfthd_local_new(df_config->memcap);
-
-        if ( !detection_filter_hash )
-        {
-            FatalError("can't allocate detection filter cache\n");
-            return;
-        }
-    }
 }
 
 void detection_filter_term()
@@ -109,7 +90,7 @@ void detection_filter_term()
     if ( !detection_filter_hash )
         return;
 
-    sfxhash_delete(detection_filter_hash);
-    detection_filter_hash = NULL;
+    delete detection_filter_hash;
+    detection_filter_hash = nullptr;
 }
 

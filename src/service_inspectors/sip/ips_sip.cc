@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2011-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,30 +20,30 @@
 // Authors:
 // Hui Cao <huica@cisco.com>
 // Bhagyashree Bantwal <bbantwal@cisco.com>
-//
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include "snort_types.h"
-#include "protocols/packet.h"
-#include "snort_debug.h"
-#include "profiler.h"
-#include "flow/flow.h"
-#include "detection/detection_defines.h"
-#include "framework/ips_option.h"
+#include <array>
+
 #include "framework/cursor.h"
-#include "framework/inspector.h"
+#include "framework/ips_option.h"
 #include "framework/module.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+
 #include "sip.h"
+
+using namespace snort;
 
 enum SipIdx
 {
     SIP_HEADER, SIP_BODY, SIP_MAX
 };
 
-static THREAD_LOCAL ProfileStats sip_ps[SIP_MAX];
+static THREAD_LOCAL std::array<ProfileStats, SIP_MAX> sip_ps;
+// static THREAD_LOCAL ProfileStats sip_ps[SIP_MAX];
 
 //-------------------------------------------------------------------------
 // module
@@ -56,7 +56,10 @@ public:
         Module(s, h) { idx = psi; }
 
     ProfileStats* get_profile() const override
-    { return sip_ps + idx; }
+    { return &sip_ps[idx]; }
+
+    Usage get_usage() const override
+    { return DETECT; }
 
 private:
     SipIdx idx;
@@ -80,14 +83,14 @@ class SipIpsOption : public IpsOption
 {
 public:
     SipIpsOption(
-        const char* s, SipIdx psi, CursorActionType c = CAT_SET_OTHER) :
-        IpsOption(s)
+        const char* s, SipIdx psi, CursorActionType c) :
+        IpsOption(s, RULE_OPTION_TYPE_BUFFER_SET)
     { key = s; cat = c; idx = psi; }
 
     CursorActionType get_cursor_type() const override
     { return cat; }
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     const char* key;
@@ -95,33 +98,22 @@ private:
     SipIdx idx;
 };
 
-int SipIpsOption::eval(Cursor& c, Packet* p)
+IpsOption::EvalStatus SipIpsOption::eval(Cursor& c, Packet* p)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(sip_ps[idx]);
+    RuleProfile profile(sip_ps[idx]);
 
-    int rval;
-    SIPData* sd;
-    SIP_Roptions* ropts;
-    const uint8_t* data = NULL;
-    unsigned len = 0;
-
-    if ((!p->is_tcp() && !p->is_udp()) || !p->flow || !p->dsize)
-    {
-        MODULE_PROFILE_END(sip_ps[idx]);
-        return DETECTION_OPTION_NO_MATCH;
-    }
+    if ((!p->has_tcp_data() && !p->is_udp()) || !p->flow || !p->dsize)
+        return NO_MATCH;
 
     // FIXIT-P cache id at parse time for runtime use
+    SIPData* sd = get_sip_session_data(p->flow);
 
-    sd = get_sip_session_data(p->flow);
     if (!sd)
-    {
-        MODULE_PROFILE_END(sip_ps[idx]);
-        return DETECTION_OPTION_NO_MATCH;
-    }
+        return NO_MATCH;
 
-    ropts = &sd->ropts;
+    SIP_Roptions* ropts = &sd->ropts;
+    const uint8_t* data = nullptr;
+    unsigned len = 0;
 
     switch (idx)
     {
@@ -137,18 +129,13 @@ int SipIpsOption::eval(Cursor& c, Packet* p)
         break;
     }
 
-    if (data != NULL)
+    if (data != nullptr)
     {
         c.set(key, data, len);
-        rval = DETECTION_OPTION_MATCH;
-    }
-    else
-    {
-        rval = DETECTION_OPTION_NO_MATCH;
+        return MATCH;
     }
 
-    MODULE_PROFILE_END(sip_ps[idx]);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -245,15 +232,7 @@ static const IpsApi body_api =
 // plugins
 //-------------------------------------------------------------------------
 
-#ifdef BUILDING_SO
-SO_PUBLIC const BaseApi* snort_plugins[] =
-{
-    &header_api.base,
-    &body_api.base,
-    nullptr
-};
-#else
+// added to snort_plugins in sip.cc
 const BaseApi* ips_sip_header = &header_api.base;
 const BaseApi* ips_sip_body = &body_api.base;
-#endif
 

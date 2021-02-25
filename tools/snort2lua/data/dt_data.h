@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -28,38 +28,38 @@
 #include "data/dt_table_api.h"
 #include "data/dt_rule_api.h"
 
-// TODO-1 - J:  Change name to data_api
-// TODO-1 - J:  Remove all unecessary includes
-// TODO-1 - J:  set_default_print name should be change to print_all
+// FIXIT-L change name to data_api
+// FIXIT-L remove all unnecessary includes
+// FIXIT-L set_default_print name should be change to print_all
 
-/*
- *
- * As a heads up to whoever reads this file.  This one API is
- * really three distinct API's rolled into one.  One API for rules,
- * one api for misc data (variables, includes, etcs), one api
- * for creating tables. Hoever, the reason they are
- * together is becasue this class is not static, and I did not
- * want to be pass three pointers to the three API's when
- * creating new convesion states.  There are comments in
- * in all caps which show the seperate the sections.
- *
- * The first section of this file is really DataApi creation
- * and initialization, and adding miscelaneous objects
- * to the DataApi data.  The second section is for creating
- * tables and their options.  The third section is for
- * creating rules.
- */
+// As a heads up to whoever reads this file.  This one API is really three
+// distinct API's rolled into one.  One API for rules, one api for misc
+// data (variables, includes, etcs), one api for creating tables. Hoever,
+// the reason they are together is because this class is not static, and I
+// did not want to be pass three pointers to the three API's when creating
+// new conversion states.  There are comments in in all caps which show the
+// separate the sections.
+
+// The first section of this file is really DataApi creation and
+// initialization, and adding miscellaneous objects to the DataApi data.
+// The second section is for creating tables and their options.  The third
+// section is for creating rules.
 
 class Include;
 class Variable;
 class Comments;
 class DataApi;
 
+using var_it = std::vector<Variable*>::const_iterator;
+
 class DataApi
 {
 public:
     DataApi();
     virtual ~DataApi();
+
+    DataApi(const DataApi&) = delete;
+    DataApi& operator=(const DataApi&) = delete;
 
     // set and retrieve various pieces of information from this Data object
     // getters are for other data classes.
@@ -71,7 +71,7 @@ public:
     inline static bool is_difference_mode() { return mode == PrintMode::DIFFERENCES; }
 
     // For problems with the Snort2Lua code, NOT with the snort configuration
-    static void developer_error(std::string comment);
+    static void developer_error(const std::string& comment);
 
     // given a Snort-style string, replace all of the variables with their values.
     std::string expand_vars(const std::string&);
@@ -83,9 +83,11 @@ public:
     void reset_state();
 
     // Output Functions
-    void print_errors(std::ostream&);
-    void print_data(std::ostream&);
-    void print_comments(std::ostream& out);
+    void print_errors(std::ostream&) const;
+    void print_data(std::ostream&) const;
+    void print_comments(std::ostream& out) const;
+    void print_unsupported(std::ostream& out) const;
+    void print_local_variables(std::ostream&) const;
 
     // have there been any failed conversion?
     bool failed_conversions() const;
@@ -94,32 +96,49 @@ public:
     bool empty() const
     { return vars.empty() && includes.empty(); }
 
-    // functions specifically usefull when parsing includes.
+    bool has_local_vars() const
+    { return !net_vars.empty() or !path_vars.empty() or !port_vars.empty(); }
+
+    // functions specifically useful when parsing includes.
     // allows for easy swapping of data.  These two functions
     // swap data which will be printed in 'print_rules()' and
     // 'print_conf_options()'
     void swap_conf_data(std::vector<Variable*>&,
         std::vector<Include*>&,
-        Comments*&);
+        Comments*& comments, Comments*& unsupported);
 
     // FILE CREATION AND ADDITIONS
 
     // add a variable to this file
-    bool add_variable(std::string name, std::string value);
+    void set_variable(const std::string& name, const std::string& value, bool quoted);
+    bool add_net_variable(const std::string& name, const std::string& value);
+    bool add_path_variable(const std::string& name, const std::string& value);
+    bool add_port_variable(const std::string& name, const std::string& value);
     // add a Snort style include file
-    bool add_include_file(std::string name);
-    // add a 'comment' to the Lua file. shoudl ONLY be used when
+    bool add_include_file(const std::string& name);
+    // add a 'comment' to the Lua file. should ONLY be used when
     // adding a comment from the original Snort file.
-    void add_comment(std::string);
+    void add_comment(const std::string&);
+    // add a lua comment stating that the top-level item does not
+    // exist yet (i.e. preprocessor X, where X doesn't exist)
+    void add_unsupported_comment(const std::string&);
     // Call when failed to convert a line.
     // stream == the stringstream object which failed to convert
-    void failed_conversion(const std::istringstream& stream);
-    // same as above. unknown_option is the specific option which
-    // caused the failure.
-    void failed_conversion(const std::istringstream& stream, const std::string unkown_option);
+    // unknown_option is the specific option which caused the failure.
+    void failed_conversion(const std::istringstream& stream, const std::string& unkown_option = "");
+    void error(const std::string&);
+
+    void set_current_file(const std::string& file)
+    { current_file = &file; }
+
+    void set_current_line(unsigned line)
+    { current_line = line; }
 
 private:
+    std::string get_file_line();
+    var_it find_var(const std::string& name) const;
 
+private:
     enum class PrintMode
     {
         DEFAULT,
@@ -134,10 +153,16 @@ private:
 
     std::vector<Variable*> vars;
     std::vector<Include*> includes;
+    std::vector<std::string> net_vars;
+    std::vector<std::string> path_vars;
+    std::vector<std::string> port_vars;
     Comments* comments;
     Comments* errors;
+    Comments* unsupported;
 
-    bool curr_data_bad;  // keep track whether current 'conversion' is already bad
+    bool curr_data_bad = false;  // keep track whether current 'conversion' is already bad
+    const std::string* current_file = nullptr;
+    unsigned current_line = 0;
 };
 
 #endif

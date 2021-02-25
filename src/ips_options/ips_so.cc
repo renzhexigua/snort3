@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,21 +17,22 @@
 //--------------------------------------------------------------------------
 // ips_so.cc author Russ Combs <rucombs@cisco.com>
 
-#include "framework/so_rule.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <string>
-using namespace std;
-
-#include "framework/parameter.h"
+#include "detection/treenodes.h"
+#include "framework/ips_option.h"
 #include "framework/module.h"
+#include "framework/so_rule.h"
+#include "hash/hash_key_operations.h"
+#include "log/messages.h"
+#include "main/snort_config.h"
 #include "managers/so_manager.h"
-#include "hash/sfhashfcn.h"
-#include "parser/parser.h"
-#include "time/profiler.h"
+#include "profiler/profiler.h"
+
+using namespace snort;
+using namespace std;
 
 #define s_name "so"
 
@@ -40,49 +41,58 @@ static THREAD_LOCAL ProfileStats soPerfStats;
 class SoOption : public IpsOption
 {
 public:
-    SoOption(const char*, const char*, SoEvalFunc f, void* v);
-    ~SoOption();
+    SoOption(const char*, const char*, bool, SoEvalFunc f, void* v, SnortConfig*);
+    ~SoOption() override;
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    bool is_relative() override
+    { return relative_flag; }
+
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     const char* soid;
     const char* so;
+    bool relative_flag;
     SoEvalFunc func;
     void* data;
+    SoRules* so_rules;
 };
 
 SoOption::SoOption(
-    const char* id, const char* s, SoEvalFunc f, void* v)
+    const char* id, const char* s, bool r, SoEvalFunc f, void* v, SnortConfig* sc)
     : IpsOption(s_name)
 {
     soid = id;
     so = s;
+    relative_flag = r;
     func = f;
     data = v;
+    so_rules = sc->so_rules;
 }
 
 SoOption::~SoOption()
 {
-    if ( data )
-        SoManager::delete_so_data(soid, data);
+    SoManager::delete_so_data(soid, data, so_rules);
 }
 
 uint32_t SoOption::hash() const
 {
-    uint32_t a = 0, b = 0, c = 0;
+    uint32_t a = relative_flag, b = IpsOption::hash(), c = 0;
     mix_str(a,b,c,soid);
     mix_str(a,b,c,so);
-    final(a,b,c);
+    finalize(a,b,c);
     return c;
 }
 
 bool SoOption::operator==(const IpsOption& ips) const
 {
-    SoOption& rhs = (SoOption&)ips;
+    if ( !IpsOption::operator==(ips) )
+        return false;
+
+    const SoOption& rhs = (const SoOption&)ips;
 
     if ( strcmp(soid, rhs.soid) )
         return false;
@@ -90,18 +100,16 @@ bool SoOption::operator==(const IpsOption& ips) const
     if ( strcmp(so, rhs.so) )
         return false;
 
+    if ( relative_flag != rhs.relative_flag )
+        return false;
+
     return true;
 }
 
-int SoOption::eval(Cursor& c, Packet* p)
+IpsOption::EvalStatus SoOption::eval(Cursor& c, Packet* p)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(soPerfStats);
-
-    int ret = func(data, c, p);
-
-    MODULE_PROFILE_END(soPerfStats);
-    return ret;
+    RuleProfile profile(soPerfStats);
+    return func(data, c, p);
 }
 
 //-------------------------------------------------------------------------
@@ -112,6 +120,9 @@ static const Parameter s_params[] =
 {
     { "~func", Parameter::PT_STRING, nullptr, nullptr,
       "name of eval function" },
+
+    { "relative", Parameter::PT_IMPLIED, nullptr, nullptr,
+      "offset from cursor instead of start of buffer" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -130,12 +141,20 @@ public:
     ProfileStats* get_profile() const override
     { return &soPerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     string name;
+    bool relative_flag = false;
+    SnortConfig* cfg = nullptr;
 };
 
-bool SoModule::begin(const char*, int, SnortConfig*)
+bool SoModule::begin(const char*, int, SnortConfig* sc)
 {
     name.clear();
+    relative_flag = false;
+    cfg = sc;
     return true;
 }
 
@@ -143,6 +162,9 @@ bool SoModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("~func") )
         name = v.get_string();
+
+    else if ( v.is("relative") )
+        relative_flag = true;
 
     else
         return false;
@@ -169,15 +191,21 @@ static IpsOption* so_ctor(Module* p, OptTreeNode* otn)
     void* data = nullptr;
     SoModule* m = (SoModule*)p;
     const char* name = m->name.c_str();
+    bool relative_flag = m->relative_flag;
 
-    SoEvalFunc func = SoManager::get_so_eval(otn->soid, name, &data);
+    if ( !otn->soid )
+    {
+        ParseError("no soid before so:%s", name);
+        return nullptr;
+    }
+    SoEvalFunc func = SoManager::get_so_eval(otn->soid, name, &data, m->cfg);
 
     if ( !func )
     {
         ParseError("can't link so:%s", name);
         return nullptr;
     }
-    return new SoOption(otn->soid, name, func, data);
+    return new SoOption(otn->soid, name, relative_flag, func, data, m->cfg);
 }
 
 static void so_dtor(IpsOption* p)

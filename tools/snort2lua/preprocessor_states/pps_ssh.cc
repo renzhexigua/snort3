@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class Ssh : public ConversionState
 {
 public:
     Ssh(Converter& c) : ConversionState(c) { }
-    virtual ~Ssh() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 
 };
 } // namespace
@@ -42,10 +41,9 @@ bool Ssh::convert(std::istringstream& data_stream)
 {
     std::string keyword;
     bool retval = true;
-    bool ports_set = false;
-    Binder bind(table_api);
+    bool default_binding = true;
+    auto& bind = cv.make_binder();
 
-    bind.set_when_proto("tcp");
     bind.set_use_type("ssh");
 
     table_api.open_table("ssh");
@@ -56,62 +54,67 @@ bool Ssh::convert(std::istringstream& data_stream)
     {
         bool tmpval = true;
 
-        if (!keyword.compare("autodetect"))
+        if (keyword == "autodetect")
             table_api.add_deleted_comment("autodetect");
 
-        else if (!keyword.compare("enable_respoverflow"))
+        else if (keyword == "enable_respoverflow")
             table_api.add_deleted_comment("enable_respoverflow");
 
-        else if (!keyword.compare("enable_ssh1crc32"))
+        else if (keyword == "enable_ssh1crc32")
             table_api.add_deleted_comment("enable_ssh1crc32");
 
-        else if (!keyword.compare("enable_srvoverflow"))
+        else if (keyword == "enable_srvoverflow")
             table_api.add_deleted_comment("enable_srvoverflow");
 
-        else if (!keyword.compare("enable_protomismatch"))
+        else if (keyword == "enable_protomismatch")
             table_api.add_deleted_comment("enable_protomismatch");
 
-        else if (!keyword.compare("enable_badmsgdir"))
+        else if (keyword == "enable_badmsgdir")
             table_api.add_deleted_comment("enable_badmsgdir");
 
-        else if (!keyword.compare("enable_paysize"))
+        else if (keyword == "enable_paysize")
             table_api.add_deleted_comment("enable_paysize");
 
-        else if (!keyword.compare("enable_recognition"))
+        else if (keyword == "enable_recognition")
             table_api.add_deleted_comment("enable_recognition");
 
-        else if (!keyword.compare("max_client_bytes"))
+        else if (keyword == "max_client_bytes")
         {
             tmpval = parse_int_option("max_client_bytes", data_stream, false);
         }
 
-        else if (!keyword.compare("max_encrypted_packets"))
+        else if (keyword == "max_encrypted_packets")
         {
             tmpval = parse_int_option("max_encrypted_packets", data_stream, false);
         }
 
-        else if (!keyword.compare("max_server_version_len"))
+        else if (keyword == "max_server_version_len")
         {
             tmpval = parse_int_option("max_server_version_len", data_stream, false);
         }
 
-        else if (!keyword.compare("server_ports"))
+        else if (keyword == "server_ports")
         {
-            std::string tmp = "";
-            table_api.add_diff_option_comment("server_ports", "bindings");
-
-            if ((data_stream >> keyword) && !keyword.compare("{"))
-            {
-                while (data_stream >> keyword && keyword.compare("}"))
-                {
-                    ports_set = true;
-                    bind.add_when_port(keyword);
-                }
-            }
+            if (!cv.get_bind_port())
+                default_binding = parse_bracketed_unsupported_list("server_ports", data_stream);
             else
             {
-                data_api.failed_conversion(data_stream, "server_ports <bracketed_port_list>");
-                retval = false;
+                table_api.add_diff_option_comment("server_ports", "bindings");
+
+                if ((data_stream >> keyword) && keyword == "{")
+                {
+                    bind.set_when_proto("tcp");
+                    while (data_stream >> keyword && keyword != "}")
+                    {
+                        default_binding = false;
+                        bind.add_when_port(keyword);
+                    }
+                }
+                else
+                {
+                    data_api.failed_conversion(data_stream, "server_ports <bracketed_port_list>");
+                    retval = false;
+                }
             }
         }
 
@@ -127,8 +130,8 @@ bool Ssh::convert(std::istringstream& data_stream)
         }
     }
 
-    if (!ports_set)
-        bind.add_when_port("22");
+    if (default_binding)
+        bind.set_when_service("ssh");
 
     return retval;
 }

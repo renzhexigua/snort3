@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,6 +20,10 @@
 #include "data/data_types/dt_comment.h"
 #include "helpers/s2l_util.h"
 
+static const std::size_t real_max_line_length = 80;
+static const std::string start_multi_com = "--[[";
+static const std::string end_multi_com = "--]]";
+
 Comments::Comments(CommentType t)
 {
     this->depth = 0;
@@ -36,7 +40,7 @@ Comments::Comments(int d, CommentType t)
     this->header = false;
 }
 
-Comments::Comments(std::string c, int d, CommentType t)
+Comments::Comments(const std::string& c, int d, CommentType t)
 {
     this->comment.push_back(std::string(c));
     this->depth = d;
@@ -45,11 +49,7 @@ Comments::Comments(std::string c, int d, CommentType t)
     this->header = true;
 }
 
-Comments::~Comments()
-{
-}
-
-void Comments::add_text(std::string text)
+void Comments::add_text(const std::string& text)
 {
     if ( !(text.empty() && prev_empty) )
     {
@@ -58,7 +58,7 @@ void Comments::add_text(std::string text)
     }
 }
 
-void Comments::add_sorted_text(std::string new_text)
+void Comments::add_sorted_text(const std::string& new_text)
 {
     for (auto it = comment.begin(); it != comment.end(); ++it)
     {
@@ -68,7 +68,7 @@ void Comments::add_sorted_text(std::string new_text)
             return;
         }
         // no duplicates
-        else if ((*it).compare(new_text) == 0)
+        else if ((*it) == new_text)
             return;
     }
 
@@ -86,11 +86,11 @@ bool Comments::size() const
 
 std::ostream& operator<<(std::ostream& out, const Comments& c)
 {
-    std::string whitespace = "";
+    std::string whitespace;
     std::string pre_str;
     bool first_str = true;
 
-    if (c.comment.size() == 0)
+    if (c.comment.empty())
         return out;
 
     for (int i = 0; i < c.depth; i++)
@@ -103,7 +103,7 @@ std::ostream& operator<<(std::ostream& out, const Comments& c)
     }
     else
     {
-        out << c.start_multi_com;
+        out << start_multi_com;
         pre_str = whitespace + "    ";
     }
 
@@ -113,16 +113,16 @@ std::ostream& operator<<(std::ostream& out, const Comments& c)
     {
         bool first_line = true;
         std::string curr_pre_str = pre_str;
-        std::size_t max_line_length = c.max_line_length - pre_str_length - 1;
+        std::size_t max_line_length = real_max_line_length - pre_str_length - 1;
 
-        // print a newline betweens strings, but not before the first line.
+        // print a newline between strings, but not before the first line.
         if (first_str)
             first_str = false;
         else
             out << "\n";
 
-        // if the line is emptry, we need a newline. the loop won't print it.
-        if (str.size() == 0)
+        // if the line is empty, we need a newline. the loop won't print it.
+        if (str.empty())
             out << "\n";
 
         else if (c.type == Comments::CommentType::MULTI_LINE)
@@ -132,15 +132,15 @@ std::ostream& operator<<(std::ostream& out, const Comments& c)
         {
             std::size_t substr_len = max_line_length;
 
-            // determine the first space before 80 charachters
+            // determine the first space before 80 characters
             // if there are no spaces, print the entire string
             if (substr_len < str.size())
             {
-                substr_len = str.rfind(" ", max_line_length);
+                substr_len = str.rfind(' ', max_line_length);
 
                 if (substr_len == std::string::npos)
                 {
-                    substr_len = str.find(" ");
+                    substr_len = str.find(' ');
 
                     if (substr_len == std::string::npos)
                         substr_len = str.size();
@@ -165,7 +165,7 @@ std::ostream& operator<<(std::ostream& out, const Comments& c)
     }
 
     if (c.type == Comments::CommentType::MULTI_LINE)
-        out << '\n' << whitespace << c.end_multi_com;
+        out << '\n' << whitespace << end_multi_com;
 
     return out;
 }

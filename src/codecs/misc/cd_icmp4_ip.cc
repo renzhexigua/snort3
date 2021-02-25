@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,17 +21,16 @@
 #include "config.h"
 #endif
 
+#include "codecs/codec_module.h"
 #include "framework/codec.h"
-#include "protocols/ipv4.h"
-#include "protocols/packet.h"
-#include "protocols/tcp.h"
 #include "log/text_log.h"
 #include "main/snort_config.h"
-#include "log/messages.h"
-#include "protocols/packet_manager.h"
 #include "protocols/icmp4.h"
+#include "protocols/packet_manager.h"
+#include "protocols/tcp.h"
 #include "protocols/udp.h"
-#include "codecs/codec_module.h"
+
+using namespace snort;
 
 namespace
 {
@@ -42,20 +41,18 @@ class Icmp4IpCodec : public Codec
 {
 public:
     Icmp4IpCodec() : Codec(ICMP4_IP_NAME) { }
-    ~Icmp4IpCodec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>&) override;
+    void get_protocol_ids(std::vector<ProtocolId>&) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
     void log(TextLog* const, const uint8_t* pkt, const uint16_t len) override;
 };
 } // namespace
 
-void Icmp4IpCodec::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(PROTO_IP_EMBEDDED_IN_ICMP4); }
+void Icmp4IpCodec::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::IP_EMBEDDED_IN_ICMP4); }
 
 bool Icmp4IpCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
 {
-    /* do a little validation */
     if (raw.len < ip::IP4_HEADER_LEN)
     {
         codec_event(codec, DECODE_ICMP_ORIG_IP_TRUNCATED);
@@ -63,7 +60,7 @@ bool Icmp4IpCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snor
     }
 
     /* lay the IP struct over the raw data */
-    const IP4Hdr* const ip4h = reinterpret_cast<const IP4Hdr*>(raw.data);
+    const ip::IP4Hdr* const ip4h = reinterpret_cast<const ip::IP4Hdr*>(raw.data);
 
     /*
      * with datalink DLT_RAW it's impossible to differ ARP datagrams from IP.
@@ -75,7 +72,7 @@ bool Icmp4IpCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snor
         return false;
     }
 
-    const uint16_t hlen = ip4h->hlen();    /* set the IP header length */
+    const uint16_t hlen = ip4h->hlen();
 
     if (raw.len < hlen)
     {
@@ -111,15 +108,15 @@ bool Icmp4IpCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snor
 
     switch (ip4h->proto())
     {
-    case IPPROTO_TCP:     /* decode the interesting part of the header */
+    case IpProtocol::TCP:     /* decode the interesting part of the header */
         codec.proto_bits |= PROTO_BIT__TCP_EMBED_ICMP;
         break;
 
-    case IPPROTO_UDP:
+    case IpProtocol::UDP:
         codec.proto_bits |= PROTO_BIT__UDP_EMBED_ICMP;
         break;
 
-    case IPPROTO_ICMP:
+    case IpProtocol::ICMPV4:
         codec.proto_bits |= PROTO_BIT__ICMP_EMBED_ICMP;
         break;
     default:
@@ -145,16 +142,16 @@ struct ip4_addr
 void Icmp4IpCodec::log(TextLog* const text_log, const uint8_t* raw_pkt,
     const uint16_t /*lyr_len*/)
 {
-    const IP4Hdr* const ip4h = reinterpret_cast<const IP4Hdr*>(raw_pkt);
+    const ip::IP4Hdr* const ip4h = reinterpret_cast<const ip::IP4Hdr*>(raw_pkt);
     TextLog_Puts(text_log, "\n\t**** ORIGINAL DATAGRAM DUMP: ****");
     TextLog_NewLine(text_log);
     TextLog_Puts(text_log, "\tIPv4\n\t\t");
 
-    // COPIED DIRECTLY FROM ipv4 CODEC.  This is specificially replicated since
+    // COPIED DIRECTLY FROM ipv4 CODEC.  This is specifically replicated since
     //      the two are not necessarily the same.
 
-    // FIXIT-L  -->  This does NOT obfuscate correctly
-    if (SnortConfig::obfuscate())
+    // FIXIT-RC this does NOT obfuscate correctly
+    if (SnortConfig::get_conf()->obfuscate())
     {
         TextLog_Print(text_log, "xxx.xxx.xxx.xxx -> xxx.xxx.xxx.xxx");
     }
@@ -199,7 +196,7 @@ void Icmp4IpCodec::log(TextLog* const text_log, const uint8_t* raw_pkt,
     }
 
 #if 0
-    // FIXIT-L - J  more ip options fixits
+    // FIXIT-L more ip options fixits
     /* print IP options */
     if (p->ip_option_count > 0)
     {
@@ -221,7 +218,7 @@ void Icmp4IpCodec::log(TextLog* const text_log, const uint8_t* raw_pkt,
     /*  EMBEDDED PROTOCOL */
     switch (ip4h->proto())
     {
-    case IPPROTO_TCP:     /* decode the interesting part of the header */
+    case IpProtocol::TCP:     /* decode the interesting part of the header */
     {
         const tcp::TCPHdr* tcph = reinterpret_cast<const tcp::TCPHdr*>
             (raw_pkt + hlen);
@@ -235,7 +232,7 @@ void Icmp4IpCodec::log(TextLog* const text_log, const uint8_t* raw_pkt,
         break;
     }
 
-    case IPPROTO_UDP:
+    case IpProtocol::UDP:
     {
         const udp::UDPHdr* udph = reinterpret_cast<const udp::UDPHdr*>
             (raw_pkt + hlen);
@@ -246,7 +243,7 @@ void Icmp4IpCodec::log(TextLog* const text_log, const uint8_t* raw_pkt,
         break;
     }
 
-    case IPPROTO_ICMP:
+    case IpProtocol::ICMPV4:
     {
         const icmp::ICMPHdr* icmph = reinterpret_cast<const icmp::ICMPHdr*>
             (raw_pkt + hlen);
@@ -268,7 +265,7 @@ void Icmp4IpCodec::log(TextLog* const text_log, const uint8_t* raw_pkt,
             break;
 
         case ICMP_REDIRECT:
-            // XXX-IPv6 "NOT YET IMPLEMENTED - ICMP printing"
+            // FIXIT-L -IPv6 "NOT YET IMPLEMENTED - ICMP printing"
             break;
 
         case icmp::IcmpType::ECHO_4:
@@ -338,11 +335,11 @@ static const CodecApi icmp4_ip_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_icmp4_ip[] =
+#endif
 {
     &icmp4_ip_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_icmp4_ip = &icmp4_ip_api.base;
-#endif
 

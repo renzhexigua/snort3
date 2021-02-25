@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -49,51 +49,22 @@
 **  the file doc/README.asn1.
 */
 
-#include "asn1_detect.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <sys/types.h>
-#include <stdlib.h>
-#include <ctype.h>
+#include "asn1_detect.h"
 
-#include "snort_types.h"
+#include "utils/snort_bounds.h"
 
-#ifndef SF_SNORT_ENGINE_DLL
-#include "snort_debug.h"
-#else
-/* Ignore debug statements */
-#include <stdint.h>
-#define DEBUG_WRAP(x)
-#endif
-
-#include "ips_options/asn1_util.h"
-
-/*
- * Check to make sure that p is less than or equal to the ptr range
- * pointers
- *
- * 1 means it's in bounds, 0 means it's not
- */
-static inline int inBounds(
-    const uint8_t* start, const uint8_t* end, const uint8_t* p)
-{
-    if (p >= start && p < end)
-    {
-        return 1;
-    }
-
-    return 0;
-}
+#include "asn1_util.h"
 
 /*
 **  NAME
 **    BitStringOverflow::
 */
 /**
-**  The neccessary info to detect possible bitstring overflows.  Thanks
+**  The necessary info to detect possible bitstring overflows.  Thanks
 **  once again to microsoft for keeping us in business.
 **
 **  @return integer
@@ -142,7 +113,7 @@ static int BitStringOverflow(ASN1_TYPE* asn1, void*)
 */
 static int DetectBitStringOverflow(ASN1_TYPE* asn1)
 {
-    return asn1_traverse(asn1, NULL, BitStringOverflow);
+    return asn1_traverse(asn1, nullptr, BitStringOverflow);
 }
 
 /*
@@ -167,7 +138,7 @@ static int DoubleOverflow(ASN1_TYPE* asn1, void*)
     /*
     **  Here's what this does.
     **
-    **  There is a vulnerablity in the MSASN1 library when decoding
+    **  There is a vulnerability in the MSASN1 library when decoding
     **  a double (real) type.  If the encoding is ASCII (specified by
     **  not setting bit 7 or 8), and the buffer is greater than 256,
     **  then you overflow the array in the function.
@@ -200,7 +171,7 @@ static int DoubleOverflow(ASN1_TYPE* asn1, void*)
 */
 static int DetectDoubleOverflow(ASN1_TYPE* asn1)
 {
-    return asn1_traverse(asn1, NULL, DoubleOverflow);
+    return asn1_traverse(asn1, nullptr, DoubleOverflow);
 }
 
 /*
@@ -273,7 +244,7 @@ static int Asn1DetectFuncs(ASN1_TYPE* asn1, ASN1_CTXT* ctxt, int dec_ret_val)
     */
     if (ctxt->print)
     {
-        asn1_traverse(asn1, NULL, asn1_print_types);
+        asn1_traverse(asn1, nullptr, asn1_print_types);
         iRet = 1;
     }
 
@@ -339,12 +310,12 @@ int Asn1DoDetect(const uint8_t* data, uint16_t dsize, ASN1_CTXT* ctxt, const uin
     unsigned int size;
     const uint8_t* start;
     const uint8_t* end;
-    const uint8_t* offset = NULL;
+    const uint8_t* offset = nullptr;
 
     /*
     **  Failed if there is no data to decode.
     */
-    if (data == NULL)
+    if (data == nullptr)
         return 0;
 
     start = data;
@@ -354,11 +325,7 @@ int Asn1DoDetect(const uint8_t* data, uint16_t dsize, ASN1_CTXT* ctxt, const uin
     {
     case REL_OFFSET:
         if (!rel_ptr)
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_ASN1, "[*] No rel_ptr for "
-                "relative offset, so we are bailing.\n"); );
             return 0;
-        }
 
         /*
         **  Check that it is in bounds first.
@@ -367,20 +334,12 @@ int Asn1DoDetect(const uint8_t* data, uint16_t dsize, ASN1_CTXT* ctxt, const uin
         **  Bound checked also after offset is applied
         */
         if (!inBounds(start, end + 1, rel_ptr))
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_ASN1, "[*] ASN.1 bounds "
-                "check failed for rel_ptr.\n"); );
             return 0;
-        }
 
         offset = rel_ptr+ctxt->offset;
 
         if (!inBounds(start, end, offset))
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_ASN1, "[*] ASN.1 bounds "
-                "check failed rel_ptr+offset.\n"); );
             return 0;
-        }
 
         break;
 
@@ -389,11 +348,7 @@ int Asn1DoDetect(const uint8_t* data, uint16_t dsize, ASN1_CTXT* ctxt, const uin
         offset = start+ctxt->offset;
 
         if (!inBounds(start, end, offset))
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_ASN1, "[*] ASN.1 bounds "
-                "check failed.\n"); );
             return 0;
-        }
 
         break;
     }
@@ -406,11 +361,7 @@ int Asn1DoDetect(const uint8_t* data, uint16_t dsize, ASN1_CTXT* ctxt, const uin
 
     iRet = asn1_decode(offset, size, &asn1);
     if (iRet && !asn1)
-    {
-        DEBUG_WRAP(DebugMessage(DEBUG_ASN1, "[*] ASN.1 decode failed "
-            "miserably.\n"); );
         return 0;
-    }
 
     /*
     **  Let's do detection now.

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -33,125 +33,143 @@ class PerfMonitor : public ConversionState
 {
 public:
     PerfMonitor(Converter& c) : ConversionState(c) { }
-    virtual ~PerfMonitor() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 
 private:
-    bool parse_file_option(std::istringstream& data_stream,
-        std::string orig_name,
-        std::string option_name,
-        std::string new_file_name);
+    bool output_set = false;
 };
 } // namespace
 
-bool PerfMonitor::parse_file_option(std::istringstream& data_stream,
-    std::string orig_name,
-    std::string option_name,
-    std::string new_file_name)
-{
-    bool tmpval;
-
-    table_api.add_comment(orig_name + " deprecated. If '" + option_name +
-        " = true', Snort++ automatically prints to '" + new_file_name + "'");
-    tmpval = table_api.add_option(option_name, true);
-
-    if (eat_option(data_stream)) // we no longer care about the file name.
-        return tmpval;
-    return false;
-}
-
 bool PerfMonitor::convert(std::istringstream& data_stream)
 {
-    std::string keyword;
-    bool retval = true;
-
     table_api.open_table("perf_monitor");
+
+    bool retval =
+        table_api.add_option("base", true) and
+        table_api.add_option("cpu", true);
+
+    std::string keyword;
 
     while (data_stream >> keyword)
     {
         bool tmpval = true;
 
-        if (!keyword.compare("flow"))
+        if (keyword == "flow")
             tmpval = table_api.add_option("flow", true);
 
-        else if (!keyword.compare("max"))
-            tmpval = table_api.add_option("max", true);
+        else if (keyword == "max")
+            table_api.add_deleted_comment("max");
 
-        else if (!keyword.compare("events"))
-            tmpval = table_api.add_option("events", true);
+        else if (keyword == "events")
+            table_api.add_deleted_comment("events");
 
-        else if (!keyword.compare("console"))
-            tmpval = table_api.add_option("console", true);
+        else if (keyword == "console")
+        {
+            table_api.add_diff_option_comment("console", "output = 'console'");
+            table_api.add_diff_option_comment("console", "format = 'text'");
+            if (!output_set)
+            {
+                tmpval = table_api.add_option("output", "console");
+                tmpval &= table_api.add_option("format", "text");
+                output_set = true;
+            }
+        }
 
-        else if (!keyword.compare("reset"))
-            tmpval = table_api.add_option("reset", true);
+        else if (keyword == "reset")
+            table_api.add_deleted_comment("atexitonly: reset");
 
-        else if (!keyword.compare("atexitonly"))
+        else if (keyword == "atexitonly")
             table_api.add_deleted_comment("atexitonly");
 
-        else if (!keyword.compare("base-stats"))
+        else if (keyword == "base-stats")
             table_api.add_deleted_comment("atexitonly: base-stats");
 
-        else if (!keyword.compare("flow-stats"))
+        else if (keyword == "flow-stats")
             table_api.add_deleted_comment("atexitonly: flow-stats");
 
-        else if (!keyword.compare("flow-ip-stats"))
+        else if (keyword == "flow-ip-stats")
             table_api.add_deleted_comment("atexitonly: flow-ip-stats");
 
-        else if (!keyword.compare("events-stats"))
+        else if (keyword == "events-stats")
             table_api.add_deleted_comment("atexitonly: events-stats");
 
-        else if (!keyword.compare("max_file_size"))
+        else if (keyword == "max_file_size")
             tmpval = parse_int_option("max_file_size", data_stream, false);
 
-        else if (!keyword.compare("file"))
-            parse_file_option(data_stream, "file",
-                "file", "perf_monitor.csv");
+        else if (keyword == "file")
+        {
+            table_api.add_diff_option_comment("file", "output = 'file'");
+            table_api.add_diff_option_comment("file", "format = 'csv'");
+            if (!output_set)
+            {
+                tmpval = table_api.add_option("output", "file");
+                tmpval &= table_api.add_option("format", "csv");
+                output_set = true;
+            }
+            eat_option(data_stream);
+        }
 
-        else if (!keyword.compare("snortfile"))
+        else if (keyword == "snortfile")
         {
-            table_api.add_diff_option_comment("snortfile", "file = true");
-            parse_file_option(data_stream, "snortfile",
-                "file", "perf_monitor.csv");
+            table_api.add_diff_option_comment("snortfile", "output = 'file'");
+            table_api.add_diff_option_comment("snortfile", "format = 'csv'");
+            if (!output_set)
+            {
+                tmpval = table_api.add_option("output", "file");
+                tmpval &= table_api.add_option("format", "csv");
+                output_set = true;
+            }
+            eat_option(data_stream);
         }
-        else if (!keyword.compare("flow-file"))
+        else if (keyword == "flow-file")
         {
-            table_api.add_diff_option_comment("flow-file", "flow_file = true");
-            parse_file_option(data_stream, "flow-file",
-                "flow_file", "perf_monitor_flow.csv");
+            table_api.add_diff_option_comment("flow-file", "output = 'file'");
+            table_api.add_diff_option_comment("flow-file", "format = 'csv'");
+            if (!output_set)
+            {
+                tmpval = table_api.add_option("output", "file");
+                tmpval &= table_api.add_option("format", "csv");
+                output_set = true;
+            }
+            eat_option(data_stream);
         }
-        else if (!keyword.compare("flow-ip-file"))
+        else if (keyword == "flow-ip-file")
         {
-            table_api.add_diff_option_comment("flow-ip-file", "flow_ip_file = true");
-            parse_file_option(data_stream, "flow-ip-file",
-                "flow_ip_file", "perf_monitor_flow_ip.csv");
+            table_api.add_diff_option_comment("flow-ip-file", "output = 'file'");
+            table_api.add_diff_option_comment("flow-ip-file", "format = 'csv'");
+            if (!output_set)
+            {
+                tmpval = table_api.add_option("output", "file");
+                tmpval &= table_api.add_option("format", "csv");
+                output_set = true;
+            }
+            eat_option(data_stream);
         }
-        else if (!keyword.compare("accumulate"))
+        else if (keyword == "accumulate")
         {
-            table_api.add_diff_option_comment("accumulate", "reset = false");
-            tmpval = table_api.add_option("reset", false);
+            table_api.add_deleted_comment("accumulate");
         }
-        else if (!keyword.compare("flow-ip"))
+        else if (keyword == "flow-ip")
         {
             table_api.add_diff_option_comment("flow-ip", "flow_ip");
             tmpval = table_api.add_option("flow_ip", true);
         }
-        else if (!keyword.compare("flow-ports"))
+        else if (keyword == "flow-ports")
         {
             table_api.add_diff_option_comment("flow-ports", "flow_ports");
             tmpval = parse_int_option("flow_ports", data_stream, false);
         }
-        else if (!keyword.compare("time"))
+        else if (keyword == "time")
         {
             table_api.add_diff_option_comment("time", "seconds");
             tmpval = parse_int_option("seconds", data_stream, false);
         }
-        else if (!keyword.compare("flow-ip-memcap"))
+        else if (keyword == "flow-ip-memcap")
         {
             table_api.add_diff_option_comment("flow-ip-memcap", "flow_ip_memcap");
             tmpval = parse_string_option("flow_ip_memcap", data_stream);
         }
-        else if (!keyword.compare("pktcnt"))
+        else if (keyword == "pktcnt")
         {
             table_api.add_diff_option_comment("pktcnt", "packets");
             tmpval = parse_int_option("packets", data_stream, false);

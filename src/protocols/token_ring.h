@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,7 +20,9 @@
 #ifndef PROTOCOLS_TOKEN_RING_H
 #define PROTOCOLS_TOKEN_RING_H
 
-#include <cstdint>
+#include <arpa/inet.h>
+
+#include "protocols/protocol_ids.h"
 
 namespace token_ring
 {
@@ -30,7 +32,16 @@ struct Trh_llc
     uint8_t dsap;
     uint8_t ssap;
     uint8_t protid[3];
-    uint16_t ethertype;
+    uint16_t ether_type;
+
+    /* return data in byte order */
+    inline ProtocolId ethertype() const
+    { return (ProtocolId)ntohs(ether_type); }
+
+    /* return data in network order */
+    inline uint16_t raw_ethertype() const
+    { return ether_type; }
+
 };
 
 /* RIF structure
@@ -79,7 +90,7 @@ struct Trh_hdr
 };
 /* End Token Ring Data Structures */
 
-static inline const Trh_mr* get_trhmr(const Trh_llc* llc)
+inline const Trh_mr* get_trhmr(const Trh_llc* llc)
 {
     if (llc->dsap != IPARP_SAP && llc->ssap != IPARP_SAP)
         return reinterpret_cast<const Trh_mr*>(llc);

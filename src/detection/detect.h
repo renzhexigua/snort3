@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -18,76 +18,32 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-/*  I N C L U D E S  ************************************************/
 #ifndef DETECT_H
 #define DETECT_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
-#include "snort_debug.h"
-#include "protocols/packet.h"
-#include "rules.h"
-#include "treenodes.h"
-#include "parser.h"
-#include "profiler.h"
-#include "log.h"
-#include "event.h"
+#include "detection/rules.h"
 #include "main/snort_types.h"
+#include "main/thread.h"
 
-/*  P R O T O T Y P E S  ******************************************************/
-extern SO_PUBLIC THREAD_LOCAL int do_detect;
-extern SO_PUBLIC THREAD_LOCAL int do_detect_content;
+namespace snort
+{
+struct Packet;
+struct ProfileStats;
+}
 
-#ifdef PERF_PROFILING
-extern THREAD_LOCAL ProfileStats eventqPerfStats;
-extern THREAD_LOCAL ProfileStats detectPerfStats;
-#endif
+extern THREAD_LOCAL snort::ProfileStats eventqPerfStats;
 
 // main loop hooks
-void snort_ignore(Packet*);
-void snort_inspect(Packet*);
-void snort_log(Packet*);
-
-// detection only (no decode or inspection)
-bool snort_detect(Packet*);
-
-// parsing
-int RuleListEnd(Packet*, RuleTreeNode*, RuleFpList*, int);
-int OptListEnd(void* option_data, class Cursor&, Packet*);
-
-// detection
-int CheckBidirectional(Packet*, RuleTreeNode*, RuleFpList*, int);
-int CheckSrcIP(Packet*, RuleTreeNode*, RuleFpList*, int);
-int CheckDstIP(Packet*, RuleTreeNode*, RuleFpList*, int);
-int CheckSrcPortEqual(Packet*, RuleTreeNode*, RuleFpList*, int);
-int CheckDstPortEqual(Packet*, RuleTreeNode*, RuleFpList*, int);
-int CheckSrcPortNotEq(Packet*, RuleTreeNode*, RuleFpList*, int);
-int CheckDstPortNotEq(Packet*, RuleTreeNode*, RuleFpList*, int);
+bool snort_ignore(snort::Packet*);
+bool snort_log(snort::Packet*);
 
 // alerts
-void CallLogFuncs(Packet*, ListHead*, Event*, const char*);
-void CallLogFuncs(Packet*, const OptTreeNode*, ListHead*);
-void CallAlertFuncs(Packet*, const OptTreeNode*, ListHead*);
+void CallLogFuncs(snort::Packet*, ListHead*, struct Event*, const char*);
+void CallLogFuncs(snort::Packet*, const OptTreeNode*, ListHead*);
+void CallAlertFuncs(snort::Packet*, const OptTreeNode*, ListHead*);
 
-// don't eval content rules
-// non-content rules are still evaluated
-static inline void DisableDetect(Packet*)
-{
-    do_detect_content = 0;
-}
-
-// don't want to do any detection with rules
-// (no content and no non-content)
-static inline void DisableInspection(Packet*)
-{
-    do_detect = do_detect_content = 0;
-}
-
-/* counter for number of times we evaluate rules.  Used to
- * cache result of check for rule option tree nodes. */
-extern THREAD_LOCAL uint64_t rule_eval_pkt_count;
+void enable_tags();
+void check_tags(snort::Packet*);
 
 #endif
 

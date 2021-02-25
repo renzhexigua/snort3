@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,12 +17,15 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "stream_inspectors.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "framework/inspector.h"
+
+#include "stream_inspectors.h"
+
+#include "managers/plugin_manager.h"
+
+using namespace snort;
 
 extern const BaseApi* nin_stream_base;
 extern const BaseApi* nin_stream_ip;
@@ -35,7 +38,7 @@ extern const BaseApi* nin_stream_file;
 extern const BaseApi* ips_stream_reassemble;
 extern const BaseApi* ips_stream_size;
 
-const BaseApi* stream_inspectors[] =
+static const BaseApi* stream_inspectors[] =
 {
     nin_stream_base,
     nin_stream_ip,
@@ -50,4 +53,9 @@ const BaseApi* stream_inspectors[] =
 
     nullptr
 };
+
+void load_stream_inspectors()
+{
+    PluginManager::load_plugins(stream_inspectors);
+}
 

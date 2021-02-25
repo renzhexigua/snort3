@@ -1,51 +1,86 @@
 
 set (FILE_LIST
+    ips_http.cc
+    ips_http.h
+    http_buffer_info.h
+    http_buffer_info.cc
     http_inspect.cc
-    hi_main.cc
-    hi_main.h
-    hi_ad.cc 
-    hi_ad.h
-    hi_client.cc 
-    hi_client.h
-    hi_client_norm.cc 
-    hi_client_norm.h
-    hi_cmd_lookup.cc 
-    hi_cmd_lookup.h
-    hi_include.h
-    hi_mi.cc 
-    hi_mi.h
-    hi_norm.cc 
-    hi_norm.h
-    hi_paf.cc 
-    hi_paf.h
-    hi_events.cc
-    hi_events.h
-    hi_module.cc
-    hi_module.h
-    hi_reqmethod_check.h
-    hi_return_codes.h
-    hi_server.cc 
-    hi_server.h
-    hi_server_norm.cc 
-    hi_server_norm.h
-    hi_si.cc hi_si.h
-    hi_stateful_inspect.h
-    hi_ui_config.cc 
-    hi_ui_config.h
-    hi_ui_iis_unicode_map.cc 
-    hi_ui_iis_unicode_map.h
-    hi_util.h
-    hi_util_kmap.cc 
-    hi_util_kmap.h
-    hi_util_xmalloc.cc 
-    hi_util_xmalloc.h
+    http_inspect.h
+    http_msg_section.cc
+    http_msg_section.h
+    http_msg_start.cc
+    http_msg_start.h
+    http_msg_request.cc
+    http_msg_request.h
+    http_msg_status.cc
+    http_msg_status.h
+    http_msg_head_shared.cc
+    http_msg_head_shared_util.cc
+    http_msg_head_shared.h
+    http_msg_header.cc
+    http_msg_header.h
+    http_msg_body.cc
+    http_msg_body.h
+    http_msg_body_chunk.cc
+    http_msg_body_chunk.h
+    http_msg_body_cl.cc
+    http_msg_body_cl.h
+    http_msg_body_h2.cc
+    http_msg_body_h2.h
+    http_msg_body_old.cc
+    http_msg_body_old.h
+    http_msg_trailer.cc
+    http_msg_trailer.h
+    http_param.h
+    http_query_parser.cc
+    http_query_parser.h
+    http_header_normalizer.cc
+    http_header_normalizer.h
+    http_uri.cc
+    http_uri.h
+    http_uri_norm.cc
+    http_uri_norm.h
+    http_normalizers.cc
+    http_normalizers.h
+    http_str_to_code.cc
+    http_str_to_code.h
+    http_api.cc
+    http_api.h
+    http_tables.cc
+    http_module.cc
+    http_module.h
+    http_test_input.cc
+    http_test_input.h
+    http_flow_data.cc
+    http_flow_data.h
+    http_context_data.cc
+    http_context_data.h
+    http_cursor_data.h
+    http_transaction.cc
+    http_transaction.h
+    http_test_manager.cc
+    http_test_manager.h
+    http_enum.h
+    http_field.cc
+    http_field.h
+    http_stream_splitter_finish.cc
+    http_stream_splitter_reassemble.cc
+    http_stream_splitter_scan.cc
+    http_stream_splitter.h
+    http_cutter.cc
+    http_cutter.h
+    http_event.h
+    http_js_norm.cc
+    http_js_norm.h
 )
 
-# Can'be be dynamic yet
 #if (STATIC_INSPECTORS)
-    add_library(http_inspect STATIC ${FILE_LIST})
+    add_library(http_inspect OBJECT ${FILE_LIST})
 
-#else (STATIC_INSPECTORS)
-#    add_shared_library(http_inspect inspectors ${FILE_LIST})
+#else(STATIC_INSPECTORS)
+    #add_dynamic_module(http_inspect inspectors ${FILE_LIST})
 
-#endif (STATIC_INSPECTORS)
+#endif(STATIC_INSPECTORS)
+
+add_subdirectory ( test )
+

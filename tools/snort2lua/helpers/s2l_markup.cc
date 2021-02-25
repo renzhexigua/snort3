@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -15,10 +15,15 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-// markup.cc author Russ Combs <rucombs@cisco.com>
+// s2l_markup.cc author Russ Combs <rucombs@cisco.com>
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include "s2l_markup.h"
-#include <string.h>
+
+#include <cstring>
 
 using namespace std;
 
@@ -64,28 +69,18 @@ const string& Markup::emphasis(const string& s)
 const string& Markup::escape(const char* const c)
 { return escape(string(c)); }
 
-// TODO:  some asciidoc charachters need to be escaped.
-//        This function should escape all of those characters
 const string& Markup::escape(const string& s)
 {
     static string m;
     m = s;
 
-#if 0
+    const char* const asciidoc_chars = "+*<>[]^'";
 
-    const char* const asciidoc_chars = "*<>^'";
-
-    if (enabled)
+    if ( enabled and (m.find_first_of(asciidoc_chars, 0) != string::npos) )
     {
-        for (size_t found = m.find_first_of(asciidoc_chars, 0);
-            found != string::npos;
-            found = m.find_first_of(asciidoc_chars, found))
-        {
-            m.insert(found, "\\");
-            found +=2;
-        }
+        m.insert(0, "`");
+        m += "`";
     }
-#endif
     return m;
 }
 

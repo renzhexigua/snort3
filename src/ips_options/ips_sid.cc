@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,14 +21,12 @@
 #include "config.h"
 #endif
 
-#include "main/snort_types.h"
-#include "main/snort_debug.h"
 #include "detection/treenodes.h"
-#include "detection/detection_defines.h"
+#include "framework/decode_data.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
-#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "sid"
 
@@ -38,7 +36,7 @@
 
 static const Parameter s_params[] =
 {
-    { "~", Parameter::PT_INT, "1:", nullptr,
+    { "~", Parameter::PT_INT, "1:max32", nullptr,
       "signature id" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
@@ -52,7 +50,12 @@ class SidModule : public Module
 public:
     SidModule() : Module(s_name, s_help, s_params) { }
     bool set(const char*, Value&, SnortConfig*) override;
-    int sid;
+
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    uint32_t sid = 0;
 };
 
 bool SidModule::set(const char*, Value& v, SnortConfig*)
@@ -60,7 +63,7 @@ bool SidModule::set(const char*, Value& v, SnortConfig*)
     if ( !v.is("~") )
         return false;
 
-    sid = v.get_long();
+    sid = v.get_uint32();
     return true;
 }
 
@@ -81,7 +84,7 @@ static void mod_dtor(Module* m)
 static IpsOption* sid_ctor(Module* p, OptTreeNode* otn)
 {
     SidModule* m = (SidModule*)p;
-    otn->sigInfo.id = m->sid;
+    otn->sigInfo.sid = m->sid;
     return nullptr;
 }
 
@@ -112,11 +115,11 @@ static const IpsApi sid_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_sid[] =
+#endif
 {
     &sid_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_sid = &sid_api.base;
-#endif
 

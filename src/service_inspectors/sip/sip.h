@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,18 +17,11 @@
 //--------------------------------------------------------------------------
 //
 
-/*
- * sip.h: Definitions, structs, function prototype(s) for
- *		the SIP service inspectors.
- */
-
 #ifndef SIP_H
 #define SIP_H
+// Implementation header with definitions, datatypes and flowdata class for SIP service inspector.
 
-#include "protocols/packet.h"
-#include "stream/stream_api.h"
-#include "profiler.h"
-#include "sip_config.h"
+#include "flow/flow.h"
 #include "sip_dialog.h"
 #include "sip_parser.h"
 #include "sip_roptions.h"
@@ -43,24 +36,24 @@ struct SIPData
     SIP_PROTO_CONF *sip_config;
 };
 
-class SipFlowData : public FlowData
+class SipFlowData : public snort::FlowData
 {
 public:
-    SipFlowData() : FlowData(flow_id)
-    { memset(&session, 0, sizeof(session)); }
-
-    ~SipFlowData();
+    SipFlowData();
+    ~SipFlowData() override;
 
     static void init()
-    { flow_id = FlowData::get_flow_id(); }
+    { inspector_id = snort::FlowData::create_flow_data_id(); }
+
+    size_t size_of() override
+    { return sizeof(*this); }
 
 public:
-    static unsigned flow_id;
+    static unsigned inspector_id;
     SIPData session;
 };
 
-SIPData* get_sip_session_data(Flow* flow);
-SIPMethodNode *add_sip_method(char *tok);
+SIPData* get_sip_session_data(const snort::Flow*);
+SIPMethodNode* add_sip_method(const char*);
 
-#endif /* SIP_H */
-
+#endif

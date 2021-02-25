@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,14 +20,17 @@
 #include "config.h"
 #endif
 
-#include <assert.h>
-
 #include "stream_tcp.h"
+
+#include "main/snort_config.h"
+
+#include "tcp_ha.h"
 #include "tcp_module.h"
 #include "tcp_session.h"
+#include "tcp_reassemblers.h"
+#include "tcp_state_machine.h"
 
-#include "stream/flush_bucket.h"
-#include "stream/stream_splitter.h"
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // inspector stuff
@@ -36,60 +39,58 @@
 class StreamTcp : public Inspector
 {
 public:
-    StreamTcp(StreamTcpConfig*);
-    ~StreamTcp();
+    StreamTcp(TcpStreamConfig*);
+    ~StreamTcp() override;
 
-    void show(SnortConfig*) override;
+    void show(const SnortConfig*) const override;
     bool configure(SnortConfig*) override;
-
     void tinit() override;
     void tterm() override;
 
-    void eval(Packet*) override;
+    NORETURN_ASSERT void eval(Packet*) override;
 
 public:
-    StreamTcpConfig* config;
+    TcpStreamConfig* const config;
 };
 
-StreamTcp::StreamTcp (StreamTcpConfig* c)
-{
-    config = c;
-}
+StreamTcp::StreamTcp (TcpStreamConfig* c)
+    : config(c)
+{ }
 
 StreamTcp::~StreamTcp()
+{ delete config; }
+
+void StreamTcp::show(const SnortConfig*) const
 {
-    delete config;
+    assert( config );
+    config->show();
 }
 
-void StreamTcp::show(SnortConfig*)
+bool StreamTcp::configure(SnortConfig* sc)
 {
-    TcpSession::show(config);
-}
-
-bool StreamTcp::configure(SnortConfig*)
-{
-    StreamSplitter::set_max(config->paf_max);
+    sc->max_pdu = config->paf_max;
     return true;
 }
 
 void StreamTcp::tinit()
 {
-    FlushBucket::set(config->footprint);
+    TcpHAManager::tinit();
+    TcpSession::sinit();
 }
 
 void StreamTcp::tterm()
 {
-    // must be done after StreamBase::tterm(); see tcp_tterm()
-    //FlushBucket::clear();
+    TcpHAManager::tterm();
+    TcpSession::sterm();
 }
 
-void StreamTcp::eval(Packet*)
+NORETURN_ASSERT void StreamTcp::eval(Packet*)
 {
     // uses session::process() instead
     assert(false);
 }
 
-StreamTcpConfig* get_tcp_cfg(Inspector* ins)
+TcpStreamConfig* get_tcp_cfg(Inspector* ins)
 {
     assert(ins);
     return ((StreamTcp*)ins)->config;
@@ -112,25 +113,24 @@ static Inspector* tcp_ctor(Module* m)
 }
 
 static void tcp_dtor(Inspector* p)
+{ delete p; }
+
+static void stream_tcp_pinit()
 {
-    delete p;
+    TcpStateMachine::initialize();
+    TcpReassemblerFactory::initialize();
+    TcpNormalizerFactory::initialize();
 }
 
-Session* tcp_ssn(Flow* lws)
+static void stream_tcp_pterm()
 {
-    return new TcpSession(lws);
+    TcpStateMachine::term();
+    TcpReassemblerFactory::term();
+    TcpNormalizerFactory::term();
 }
 
-void tcp_tinit()
-{
-    TcpSession::sinit();
-}
-
-void tcp_tterm()
-{
-    TcpSession::sterm();
-    FlushBucket::clear();
-}
+static Session* tcp_ssn(Flow* lws)
+{ return new TcpSession(lws); }
 
 static const InspectApi tcp_api =
 {
@@ -141,19 +141,19 @@ static const InspectApi tcp_api =
         0,
         API_RESERVED,
         API_OPTIONS,
-        MOD_NAME,
-        MOD_HELP,
+        STREAM_TCP_MOD_NAME,
+        STREAM_TCP_MOD_HELP,
         mod_ctor,
         mod_dtor
     },
     IT_STREAM,
-    (unsigned)PktType::TCP,
+    PROTO_BIT__TCP,
     nullptr,  // buffers
     nullptr,  // service
-    nullptr,  // init
-    nullptr,  // term
-    tcp_tinit,
-    tcp_tterm,
+    stream_tcp_pinit,  // pinit
+    stream_tcp_pterm,  // pterm
+    nullptr,  // tinit,
+    nullptr,  // tterm,
     tcp_ctor,
     tcp_dtor,
     tcp_ssn,

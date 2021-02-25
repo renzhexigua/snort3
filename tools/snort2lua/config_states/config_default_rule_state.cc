@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class DefaultRuleState : public ConversionState
 {
 public:
     DefaultRuleState(Converter& c) : ConversionState(c) { }
-    virtual ~DefaultRuleState() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -42,16 +41,16 @@ bool DefaultRuleState::convert(std::istringstream& data_stream)
     bool retval = true;
     std::string val;
 
-    table_api.open_table("alerts");
+    table_api.open_table("detection");
 
     if (data_stream >> val &&
-        util::case_compare(val, "disableD"))
+        util::case_compare(val, "disabled"))
     {
-        table_api.add_option("default_rule_state", false);
+        table_api.add_option("global_default_rule_state", false);
     }
     else
     {
-        table_api.add_option("default_rule_state", true);
+        table_api.add_option("global_default_rule_state", true);
     }
 
     table_api.close_table();

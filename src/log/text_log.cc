@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2007-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -25,22 +25,26 @@
  * @brief  implements buffered text stream for logging
  */
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "text_log.h"
 
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
 
-#include "snort_types.h"
+#include <algorithm>
+#include <cstdarg>
+
+#include "utils/util.h"
 
 #include "log.h"
-#include "util.h"
 
-/* some reasonable minimums */
-#define MIN_BUF  (1* K_BYTES)
-#define MIN_FILE (MIN_BUF)
+using namespace snort;
+
+/* a reasonable minimum */
+#define MIN_BUF  (4* K_BYTES)
+#define STDLOG_FILENO 3
 
 struct TextLog
 {
@@ -65,7 +69,14 @@ struct TextLog
 static FILE* TextLog_Open(const char* name)
 {
     if ( name && !strcasecmp(name, "stdout") )
+    {
+#ifdef USE_STDLOG
+        FILE* stdlog = fdopen(STDLOG_FILENO, "w");
+        return stdlog ? stdlog : stdout;
+#else
         return stdout;
+#endif
+    }
 
     return OpenAlertFile(name);
 }
@@ -86,11 +97,8 @@ static size_t TextLog_Size(FILE* file)
     return err ? 0 : sbuf.st_size;
 }
 
-int TextLog_Tell(TextLog* const txt)
+namespace snort
 {
-    return txt->pos;
-}
-
 int TextLog_Avail(TextLog* const txt)
 {
     return txt->maxBuf - txt->pos - 1;
@@ -107,29 +115,19 @@ void TextLog_Reset(TextLog* const txt)
  *-------------------------------------------------------------------
  */
 TextLog* TextLog_Init(
-    const char* name, unsigned int maxBuf, size_t maxFile
-    )
+    const char* name, unsigned int maxBuf, size_t maxFile)
 {
     TextLog* txt;
 
     if ( maxBuf < MIN_BUF )
         maxBuf = MIN_BUF;
-    if ( maxFile < MIN_FILE )
-        maxFile = MIN_FILE;
-    if ( maxFile < maxBuf )
-        maxFile = maxBuf;
 
-    txt = (TextLog*)malloc(sizeof(TextLog)+maxBuf);
+    txt = (TextLog*)snort_alloc(sizeof(TextLog)+maxBuf);
 
-    if ( !txt )
-    {
-        FatalError("Unable to allocate a TextLog(%u)\n", maxBuf);
-        return nullptr;
-    }
-    txt->name = name ? SnortStrdup(name) : NULL;
+    txt->name = name ? snort_strdup(name) : nullptr;
     txt->file = TextLog_Open(txt->name);
     txt->size = TextLog_Size(txt->file);
-    txt->last = time(NULL);
+    txt->last = time(nullptr);
     txt->maxFile = maxFile;
 
     txt->maxBuf = maxBuf;
@@ -151,8 +149,8 @@ void TextLog_Term(TextLog* const txt)
     TextLog_Close(txt->file);
 
     if ( txt->name )
-        free(txt->name);
-    free(txt);
+        snort_free(txt->name);
+    snort_free(txt);
 }
 
 /*-------------------------------------------------------------------
@@ -165,14 +163,14 @@ static void TextLog_Roll(TextLog* const txt)
 {
     if ( txt->file == stdout )
         return;
-    if ( txt->last >= time(NULL) )
+    if ( txt->last >= time(nullptr) )
         return;
 
     TextLog_Close(txt->file);
     RollAlertFile(txt->name);
     txt->file = TextLog_Open(txt->name);
 
-    txt->last = time(NULL);
+    txt->last = time(nullptr);
     txt->size = 0;
 }
 
@@ -186,7 +184,8 @@ bool TextLog_Flush(TextLog* const txt)
 
     if ( !txt->pos )
         return false;
-    if ( txt->size + txt->pos > txt->maxFile )
+
+    if ( txt->maxFile and txt->size + txt->pos > txt->maxFile )
         TextLog_Roll(txt);
 
     ok = fwrite(txt->buf, txt->pos, 1, txt->file);
@@ -222,26 +221,26 @@ bool TextLog_Putc(TextLog* const txt, char c)
  */
 bool TextLog_Write(TextLog* const txt, const char* str, int len)
 {
-    int avail = TextLog_Avail(txt);
+    do
+    {
+        int avail = TextLog_Avail(txt);
+        int n = snprintf(txt->buf+txt->pos, avail, "%.*s", len, str);
+        if ( n < avail and n < len )
+            return false;
 
-    if ( len >= avail )
-    {
-        TextLog_Flush(txt);
-        avail = TextLog_Avail(txt);
-    }
-    len = snprintf(txt->buf+txt->pos, avail, "%s", str);
+        // actual bytes written:
+        // 1) if avail is a limit, auto-appended '\0' should be truncated
+        // 2) avail could be zero from the start, keep it as 0
+        int l = std::min(n, avail > 0 ? avail - 1 : 0);
+        txt->pos += l;
+        str += l;
+        len -= l;
 
-    if ( len >= avail )
-    {
-        txt->pos = txt->maxBuf - 1;
-        txt->buf[txt->pos] = '\0';
-        return false;
+        if ( n >= avail )
+            TextLog_Flush(txt);
     }
-    else if ( len < 0 )
-    {
-        return false;
-    }
-    txt->pos += len;
+    while ( len > 0 );
+
     return true;
 }
 
@@ -278,40 +277,38 @@ bool TextLog_Print(TextLog* const txt, const char* fmt, ...)
     {
         return false;
     }
+
     txt->pos += len;
+
     return true;
 }
 
 /*-------------------------------------------------------------------
  * TextLog_Quote: write string escaping quotes
- * TBD could be smarter by counting required escapes instead of
- * checking for 3
  *-------------------------------------------------------------------
  */
 bool TextLog_Quote(TextLog* const txt, const char* qs)
 {
-    int pos = txt->pos;
+    TextLog_Putc(txt, '"');
 
-    if ( TextLog_Avail(txt) < 3 )
+    do
     {
-        TextLog_Flush(txt);
-    }
-    txt->buf[pos++] = '"';
+        int len = strlen(qs);
+        int pre = strcspn(qs, "\"\\");
 
-    while ( *qs && (txt->maxBuf - pos > 2) )
-    {
-        if ( *qs == '"' || *qs == '\\' )
+        TextLog_Write(txt, qs, pre);
+        qs += pre;
+
+        if ( pre < len )
         {
-            txt->buf[pos++] = '\\';
+            TextLog_Putc(txt, '\\');
+            TextLog_Putc(txt, *qs++);
         }
-        txt->buf[pos++] = *qs++;
     }
-    if ( *qs )
-        return false;
+    while ( *qs );
 
-    txt->buf[pos++] = '"';
-    txt->pos = pos;
+    TextLog_Putc(txt, '"');
 
     return true;
 }
-
+} // namespace snort

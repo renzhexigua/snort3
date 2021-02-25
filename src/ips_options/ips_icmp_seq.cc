@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -39,24 +39,20 @@
  *
  */
 
-#include <stdlib.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include "snort_types.h"
-#include "protocols/packet.h"
-#include "snort_debug.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
 #include "framework/range.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
 #include "protocols/icmp4.h"
 #include "protocols/icmp6.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "icmp_seq"
 
@@ -72,7 +68,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     RangeCheck config;
@@ -84,61 +80,56 @@ private:
 
 uint32_t IcmpSeqOption::hash() const
 {
-    uint32_t a,b,c;
+    uint32_t a = config.op;
+    uint32_t b = config.min;
+    uint32_t c = config.max;
 
-    a = config.op;
-    b = config.min;
-    c = config.max;
+    mix(a,b,c);
+    a += IpsOption::hash();
 
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
-
+    finalize(a,b,c);
     return c;
 }
 
 bool IcmpSeqOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    IcmpSeqOption& rhs = (IcmpSeqOption&)ips;
+    const IcmpSeqOption& rhs = (const IcmpSeqOption&)ips;
     return ( config == rhs.config );
-
-    return false;
 }
 
-int IcmpSeqOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus IcmpSeqOption::eval(Cursor&, Packet* p)
 {
-    PROFILE_VARS;
+    RuleProfile profile(icmpSeqPerfStats);
 
     if (!p->ptrs.icmph)
-        return DETECTION_OPTION_NO_MATCH;
-
-    MODULE_PROFILE_START(icmpSeqPerfStats);
+        return NO_MATCH;
 
     if ( (p->ptrs.icmph->type == ICMP_ECHO ||
         p->ptrs.icmph->type == ICMP_ECHOREPLY) ||
-        ((uint16_t)p->ptrs.icmph->type == icmp::Icmp6Types::ECHO_6 ||
-        (uint16_t)p->ptrs.icmph->type == icmp::Icmp6Types::REPLY_6) )
+        ((uint8_t)p->ptrs.icmph->type == icmp::Icmp6Types::ECHO_REQUEST ||
+        (uint8_t)p->ptrs.icmph->type == icmp::Icmp6Types::ECHO_REPLY) )
     {
-        if ( config.eval(p->ptrs.icmph->s_icmp_seq) )
-        {
-            MODULE_PROFILE_END(icmpSeqPerfStats);
-            return DETECTION_OPTION_MATCH;
-        }
+        uint16_t icmp_seq = ntohs(p->ptrs.icmph->s_icmp_seq);
+
+        if ( config.eval( icmp_seq ) )
+            return MATCH;
     }
-    MODULE_PROFILE_END(icmpSeqPerfStats);
-    return DETECTION_OPTION_NO_MATCH;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
 // module
 //-------------------------------------------------------------------------
 
+#define RANGE "0:65535"
+
 static const Parameter s_params[] =
 {
-    { "~range", Parameter::PT_STRING, nullptr, nullptr,
-      "check if icmp sequence number is 'seq | min<>max | <max | >min'" },
+    { "~range", Parameter::PT_INTERVAL, RANGE, nullptr,
+      "check if ICMP sequence number is in given range" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -157,6 +148,10 @@ public:
     ProfileStats* get_profile() const override
     { return &icmpSeqPerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     RangeCheck data;
 };
 
@@ -171,7 +166,7 @@ bool IcmpSeqModule::set(const char*, Value& v, SnortConfig*)
     if ( !v.is("~range") )
         return false;
 
-    return data.parse(v.get_string());
+    return data.validate(v.get_string(), RANGE);
 }
 
 //-------------------------------------------------------------------------
@@ -226,11 +221,11 @@ static const IpsApi icmp_seq_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_icmp_seq[] =
+#endif
 {
     &icmp_seq_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_icmp_seq = &icmp_seq_api.base;
-#endif
 

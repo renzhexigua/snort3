@@ -6,23 +6,23 @@ if(STATIC_CODECS)
         cd_icmp6_ip.cc
         cd_llc.cc
         cd_teredo.cc
+        cd_user.cc
+        cd_vxlan.cc
     )
 
 else(STATIC_CODECS)
-    add_shared_library(cd_gtp codecs cd_gtp.cc)
-    add_shared_library(cd_icmp4_ip codecs cd_icmp4_ip.cc)
-    add_shared_library(cd_icmp6_ip codecs cd_icmp6_ip.cc)
-    add_shared_library(cd_llc codecs cd_llc.cc)
-    add_shared_library(cd_teredo codecs cd_teredo.cc)
+    add_dynamic_module(cd_gtp codecs cd_gtp.cc)
+    add_dynamic_module(cd_icmp4_ip codecs cd_icmp4_ip.cc)
+    add_dynamic_module(cd_icmp6_ip codecs cd_icmp6_ip.cc)
+    add_dynamic_module(cd_llc codecs cd_llc.cc)
+    add_dynamic_module(cd_teredo codecs cd_teredo.cc)
+    add_dynamic_module(cd_user codecs cd_user.cc)
+    add_dynamic_module(cd_vxlan codecs cd_vxlan.cc)
 
 endif(STATIC_CODECS)
 
-add_library( misc_codecs STATIC
+add_library( misc_codecs OBJECT
     cd_default.cc
     ${PLUGIN_LIST}
 )
 
-target_link_libraries( misc_codecs
-    protocols
-    codec_module
-)

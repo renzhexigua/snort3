@@ -9,9 +9,7 @@
 #
 #  PCAP_FOUND                System has libpcap, include and library dirs found
 #  PCAP_INCLUDE_DIR          The libpcap include directories.
-#  PCAP_LIBRARIES            The libpcap library (possibly includes a thread
-#                            library e.g. required by pf_ring's libpcap)
-#  HAVE_LIBPFRING              If a found version of libpcap supports PF_RING
+#  PCAP_LIBRARIES            The libpcap library
 
 
 set(ERROR_MESSAGE
@@ -23,25 +21,24 @@ set(ERROR_MESSAGE
     shared library that may be installed in an unusual place"
 )
 
+# Call find_path twice.  First search custom path, then search standard paths.
+if (PCAP_INCLUDE_DIR_HINT)
+    find_path(PCAP_INCLUDE_DIR pcap.h
+        HINTS ${PCAP_INCLUDE_DIR_HINT}
+        NO_DEFAULT_PATH
+    )
+endif()
+find_path(PCAP_INCLUDE_DIR pcap.h)
 
-
-find_path(PCAP_INCLUDE_DIR
-    NAMES pcap.h
-)
-
-# call find_library twice. First search custom path, then search standard paths
-find_library(PCAP_LIBRARIES 
-    NAMES pcap
-    HINTS ${PCAP_LIBRARIES_DIR} # user specified option in ./configure_cmake.sh
-    NO_DEFAULT_PATH
-    NO_CMAKE_ENVIRONMENT_PATH
-)
-find_library(PCAP_LIBRARIES 
-    NAMES pcap
-)
-
-
-#  foo to ensure PCAP compiles
+# Ditto for the library.
+if (PCAP_LIBRARIES_DIR_HINT)
+    find_library(PCAP_LIBRARIES
+        pcap
+        HINTS ${PCAP_LIBRARIES_DIR_HINT}
+        NO_DEFAULT_PATH
+    )
+endif()
+find_library(PCAP_LIBRARIES pcap)
 
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(PCAP
@@ -49,14 +46,13 @@ find_package_handle_standard_args(PCAP
     FAIL_MESSAGE ${ERROR_MESSAGE}
 )
 
-
+# Check if linking against libpcap also requires linking against a thread library.
+# (lifted from Bro's FindPCAP.cmake)
 include(CheckCSourceCompiles)
 set(CMAKE_REQUIRED_LIBRARIES ${PCAP_LIBRARIES})
 check_c_source_compiles("int main() { return 0; }" PCAP_LINKS_SOLO)
 set(CMAKE_REQUIRED_LIBRARIES)
 
-
-# check if linking against libpcap also needs to link against a thread library
 if (NOT PCAP_LINKS_SOLO)
     find_package(Threads)
     if (THREADS_FOUND)
@@ -70,17 +66,11 @@ if (NOT PCAP_LINKS_SOLO)
         set(PCAP_LIBRARIES ${_tmp}
             CACHE STRING "Libraries needed to link against libpcap" FORCE)
     else ()
-        message(FATAL_ERROR "Couldn't determine how to link against libpcap")
+        message(SEND_ERROR "Couldn't determine how to link against libpcap")
     endif ()
 endif ()
-
-include(CheckFunctionExists)
-set(CMAKE_REQUIRED_LIBRARIES ${PCAP_LIBRARIES})
-check_function_exists(pcap_get_pfring_id HAVE_LIBPFRING)
-set(CMAKE_REQUIRED_LIBRARIES)
 
 mark_as_advanced(
     PCAP_INCLUDE_DIR
     PCAP_LIBRARIES
 )
-unset(PCAP_CONFIG CACHE)

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,18 +22,17 @@
 #include "config.h"
 #endif
 
+#include <daq.h>
+
+#include "codecs/codec_module.h"
 #include "framework/codec.h"
+#include "log/text_log.h"
 #include "main/snort_config.h"
 #include "protocols/icmp4.h"
-#include "codecs/ip/checksum.h"
-#include "codecs/codec_module.h"
-#include "protocols/protocol_ids.h"
-#include "protocols/packet.h"
-#include "protocols/ipv4_options.h"
-#include "packet_io/active.h"
-#include "log/text_log.h"
-#include "main/snort_debug.h"
-#include "sfip/sf_ip.h"
+
+#include "checksum.h"
+
+using namespace snort;
 
 #define CD_ICMP4_NAME "icmp4"
 #define CD_ICMP4_HELP "support for Internet control message protocol v4"
@@ -42,13 +41,15 @@ namespace
 {
 const PegInfo pegs[]
 {
-    { "bad checksum", "non-zero icmp checksums" },
-    { nullptr, nullptr }
+    { CountType::SUM, "bad_checksum", "non-zero icmp checksums" },
+    { CountType::SUM, "checksum_bypassed", "checksum calculations bypassed" },
+    { CountType::END, nullptr, nullptr }
 };
 
 struct Stats
 {
     PegCount bad_ip4_cksum;
+    PegCount cksum_bypassed;
 };
 
 static THREAD_LOCAL Stats stats;
@@ -68,7 +69,7 @@ static const RuleMap icmp4_rules[] =
     { DECODE_ICMP4_DST_MULTICAST, "ICMP4 packet to multicast dest address" },
     { DECODE_ICMP4_DST_BROADCAST, "ICMP4 packet to broadcast dest address" },
     { DECODE_ICMP4_TYPE_OTHER, "ICMP4 type other" },
-    { DECODE_ICMP_PING_NMAP, "ICMP ping NMAP" },
+    { DECODE_ICMP_PING_NMAP, "ICMP ping Nmap" },
     { DECODE_ICMP_ICMPENUM, "ICMP icmpenum v1.1.1" },
     { DECODE_ICMP_REDIRECT_HOST, "ICMP redirect host" },
     { DECODE_ICMP_REDIRECT_NET, "ICMP redirect net" },
@@ -78,19 +79,21 @@ static const RuleMap icmp4_rules[] =
     { DECODE_ICMP_DST_UNREACH_ADMIN_PROHIBITED,
       "ICMP destination unreachable communication administratively prohibited" },
     { DECODE_ICMP_DST_UNREACH_DST_HOST_PROHIBITED,
-      "ICMP destination unreachable communication with destination host is administratively prohibited" },
+      "ICMP destination unreachable communication with destination host is "
+      "administratively prohibited" },
     { DECODE_ICMP_DST_UNREACH_DST_NET_PROHIBITED,
-      "ICMP destination unreachable communication with destination network is administratively prohibited" },
+      "ICMP destination unreachable communication with destination network is "
+      "administratively prohibited" },
     { DECODE_ICMP_PATH_MTU_DOS, "ICMP path MTU denial of service attempt" },
-    { DECODE_ICMP_DOS_ATTEMPT, "BAD-TRAFFIC Linux ICMP header DOS attempt" },
+    { DECODE_ICMP_DOS_ATTEMPT, "Linux ICMP header DOS attempt" },
     { DECODE_ICMP4_HDR_TRUNC, "truncated ICMP4 header" },
     { 0, nullptr }
 };
 
-class Icmp4Module : public CodecModule
+class Icmp4Module : public BaseCodecModule
 {
 public:
-    Icmp4Module() : CodecModule(CD_ICMP4_NAME, CD_ICMP4_HELP) { }
+    Icmp4Module() : BaseCodecModule(CD_ICMP4_NAME, CD_ICMP4_HELP) { }
 
     const RuleMap* get_rules() const override
     { return icmp4_rules; }
@@ -106,9 +109,8 @@ class Icmp4Codec : public Codec
 {
 public:
     Icmp4Codec() : Codec(CD_ICMP4_NAME) { }
-    ~Icmp4Codec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>&) override;
+    void get_protocol_ids(std::vector<ProtocolId>&) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
     void update(const ip::IpApi&, const EncodeFlags, uint8_t* raw_pkt,
         uint16_t lyr_len, uint32_t& updated_len) override;
@@ -116,29 +118,32 @@ public:
     void log(TextLog* const, const uint8_t* pkt, const uint16_t len) override;
 
 private:
+    bool valid_checksum_from_daq(const RawData&);
     void ICMP4AddrTests(const DecodeData& snort, const CodecData& codec);
     void ICMP4MiscTests(const ICMPHdr* const, const CodecData&, const uint16_t);
 };
 } // namespace
 
-void Icmp4Codec::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(IPPROTO_ID_ICMPV4); }
+void Icmp4Codec::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::ICMPV4); }
 
-//--------------------------------------------------------------------
-// decode.c::ICMP
-//--------------------------------------------------------------------
+inline bool Icmp4Codec::valid_checksum_from_daq(const RawData& raw)
+{
+    const DAQ_PktDecodeData_t* pdd =
+        (const DAQ_PktDecodeData_t*) daq_msg_get_meta(raw.daq_msg, DAQ_PKT_META_DECODE_DATA);
+    if (!pdd || !pdd->flags.bits.l4_checksum || !pdd->flags.bits.icmp || !pdd->flags.bits.l4)
+        return false;
+    // Sanity check to make sure we're talking about the same thing if offset is available
+    if (pdd->l4_offset != DAQ_PKT_DECODE_OFFSET_INVALID)
+    {
+        const uint8_t* data = daq_msg_get_data(raw.daq_msg);
+        if (raw.data - data != pdd->l4_offset)
+            return false;
+    }
+    stats.cksum_bypassed++;
+    return true;
+}
 
-/*
- * Function: DecodeICMP(uint8_t *, const uint32_t, Packet *)
- *
- * Purpose: Decode the ICMP transport layer
- *
- * Arguments: pkt => ptr to the packet data
- *            len => length from here to the end of the packet
- *            p   => pointer to the decoded packet struct
- *
- * Returns: void function
- */
 bool Icmp4Codec::decode(const RawData& raw, CodecData& codec,DecodeData& snort)
 {
     if (raw.len < icmp::ICMP_BASE_LEN)
@@ -150,6 +155,18 @@ bool Icmp4Codec::decode(const RawData& raw, CodecData& codec,DecodeData& snort)
     /* set the header ptr first */
     const ICMPHdr* const icmph = reinterpret_cast<const ICMPHdr*>(raw.data);
     uint16_t len = 0;
+
+    if (snort::get_network_policy()->icmp_checksums() && !valid_checksum_from_daq(raw))
+    {
+        uint16_t csum = checksum::cksum_add((const uint16_t*)icmph, raw.len);
+
+        if (csum && !codec.is_cooked())
+        {
+            stats.bad_ip4_cksum++;
+            snort.decode_flags |= DECODE_ERR_CKSUM_ICMP;
+            return false;
+        }
+    }
 
     switch (icmph->type)
     {
@@ -195,18 +212,6 @@ bool Icmp4Codec::decode(const RawData& raw, CodecData& codec,DecodeData& snort)
         break;
     }
 
-    if (SnortConfig::icmp_checksums())
-    {
-        uint16_t csum = checksum::cksum_add((uint16_t*)icmph, raw.len);
-
-        if (csum && !codec.is_cooked())
-        {
-            stats.bad_ip4_cksum++;
-            snort.decode_flags |= DECODE_ERR_CKSUM_ICMP;
-            return false;
-        }
-    }
-
     len =  icmp::ICMP_BASE_LEN;
 
     switch (icmph->type)
@@ -237,14 +242,13 @@ bool Icmp4Codec::decode(const RawData& raw, CodecData& codec,DecodeData& snort)
     case icmp::IcmpType::PARAMETERPROB:
         /* account for extra 4 bytes in header */
         len += 4;
-        codec.next_prot_id = PROTO_IP_EMBEDDED_IN_ICMP4;
+        codec.next_prot_id = ProtocolId::IP_EMBEDDED_IN_ICMP4;
         break;
 
     default:
         break;
     }
 
-    /* Run a bunch of ICMP decoder rules */
     ICMP4MiscTests(icmph, codec, (uint16_t)raw.len - len);
 
     snort.set_pkt_type(PktType::ICMP);
@@ -256,7 +260,7 @@ bool Icmp4Codec::decode(const RawData& raw, CodecData& codec,DecodeData& snort)
 
 void Icmp4Codec::ICMP4AddrTests(const DecodeData& snort, const CodecData& codec)
 {
-    uint32_t dst = snort.ip_api.get_dst()->ip32[0];
+    uint32_t dst = snort.ip_api.get_dst()->get_ip4_value();
 
     // check all 32 bits; all set so byte order is irrelevant ...
     if ( dst == ip::IP4_BROADCAST )
@@ -450,14 +454,7 @@ void Icmp4Codec::log(TextLog* const log, const uint8_t* raw_pkt,
             break;
         }
 
-/* written this way since inet_ntoa was typedef'ed to use sfip_ntoa
- * which requires sfip_t instead of inaddr's.  This call to inet_ntoa
- * is a rare case that doesn't use sfip_t's. */
-
-// XXX-IPv6 NOT YET IMPLEMENTED - IPV6 addresses technically not supported - need to change ICMP
-
-        /* no inet_ntop in Windows */
-        sfip_raw_ntop(AF_INET, (const void*)(&icmph->s_icmp_gwaddr.s_addr),
+        snort_inet_ntop(AF_INET, (const void*)(&icmph->s_icmp_gwaddr.s_addr),
             buf, sizeof(buf));
         TextLog_Print(log, " NEW GW: %s", buf);
         break;
@@ -469,7 +466,7 @@ void Icmp4Codec::log(TextLog* const log, const uint8_t* raw_pkt,
         break;
 
     case icmp::IcmpType::ROUTER_ADVERTISE:
-        TextLog_Print(log, "ROUTER ADVERTISMENT: "
+        TextLog_Print(log, "ROUTER ADVERTISEMENT: "
             "Num addrs: %d Addr entry size: %d Lifetime: %u",
             icmph->s_icmp_num_addrs, icmph->s_icmp_wpa,
             ntohs(icmph->s_icmp_lifetime));
@@ -551,12 +548,11 @@ void Icmp4Codec::log(TextLog* const log, const uint8_t* raw_pkt,
     case icmp::IcmpType::ADDRESSREPLY:
         TextLog_Print(log, "ID: %u  Seq: %u  ADDRESS REPLY: 0x%08X",
             ntohs(icmph->s_icmp_id), ntohs(icmph->s_icmp_seq),
-            (u_int)ntohl(icmph->s_icmp_mask));
+            ntohl(icmph->s_icmp_mask));
         break;
 
     default:
         TextLog_Puts(log, "UNKNOWN");
-
         break;
     }
 }
@@ -591,7 +587,7 @@ void Icmp4Codec::update(const ip::IpApi&, const EncodeFlags flags,
 
 void Icmp4Codec::format(bool /*reverse*/, uint8_t* raw_pkt, DecodeData& snort)
 {
-    // TBD handle nested icmp4 layers
+    // FIXIT-L handle nested icmp4 layers
     snort.icmph = reinterpret_cast<ICMPHdr*>(raw_pkt);
     snort.set_pkt_type(PktType::ICMP);
 }
@@ -636,11 +632,11 @@ static const CodecApi icmp4_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_icmp4[] =
+#endif
 {
     &icmp4_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_icmp4 = &icmp4_api.base;
-#endif
 

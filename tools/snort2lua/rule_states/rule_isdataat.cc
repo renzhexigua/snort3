@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -22,8 +22,8 @@
 
 #include "conversion_state.h"
 #include "helpers/converter.h"
-#include "rule_states/rule_api.h"
 #include "helpers/s2l_util.h"
+#include "rule_api.h"
 
 namespace rules
 {
@@ -33,8 +33,7 @@ class IsDataAt : public ConversionState
 {
 public:
     IsDataAt(Converter& c) : ConversionState(c) { }
-    virtual ~IsDataAt() { }
-    virtual bool convert(std::istringstream& data);
+    bool convert(std::istringstream& data) override;
 };
 } // namespace
 
@@ -58,10 +57,10 @@ bool IsDataAt::convert(std::istringstream& data_stream)
 
         while (util::get_string(arg_stream, value, " ,"))
         {
-            if (!value.compare("relative"))
+            if (value == "relative")
                 rule_api.add_suboption("relative");
 
-            else if (!value.compare("rawbytes"))
+            else if (value == "rawbytes")
                 rule_api.set_curr_options_buffer("pkt_data");
 
             else

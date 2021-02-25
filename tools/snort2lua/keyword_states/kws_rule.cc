@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,13 +17,7 @@
 //--------------------------------------------------------------------------
 // kws_rule.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
-#include <sstream>
-#include <vector>
-
 #include "conversion_state.h"
-#include "helpers/converter.h"
-#include "helpers/s2l_util.h"
-#include "rule_states/rule_api.h"
 
 namespace keywords
 {
@@ -33,8 +27,7 @@ class RuleHeader : public ConversionState
 {
 public:
     explicit RuleHeader(Converter& c) : ConversionState(c) { }
-    virtual ~RuleHeader() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -58,7 +51,7 @@ bool RuleHeader::convert(std::istringstream& data_stream)
     std::string rule_string = data_stream.str();
     std::size_t end_pos = rule_string.rfind(')');
     rule_string = rule_string.substr(0, end_pos);
-    util::rtrim(rule_string); // gaurantee last char is a rule opt/subopt
+    util::rtrim(rule_string); // guarantee last char is a rule opt/subopt
     data_stream.str(rule_string);
     data_stream.seekg(curr_pos);  // position was reset. so find curr position
 
@@ -73,6 +66,7 @@ bool RuleHeader::convert(std::istringstream& data_stream)
 template<const std::string* name>
 static ConversionState* rule_ctor(Converter& c)
 {
+    c.get_rule_api().set_rule_old_action(*name);
     c.get_rule_api().add_hdr_data(*name);
     return new RuleHeader(c);
 }
@@ -80,6 +74,7 @@ static ConversionState* rule_ctor(Converter& c)
 template<const std::string* name>
 static ConversionState* dep_rule_ctor(Converter& c)
 {
+    c.get_rule_api().set_rule_old_action(*name);
     c.get_rule_api().add_hdr_data(*name);
     c.get_rule_api().make_rule_a_comment();
     c.get_rule_api().add_comment("The '" + *name + "' ruletype is no longer supported");
@@ -89,6 +84,7 @@ static ConversionState* dep_rule_ctor(Converter& c)
 template<const std::string* name, const std::string* old>
 static ConversionState* conv_rule_ctor(Converter& c)
 {
+    c.get_rule_api().set_rule_old_action(*old);
     c.get_rule_api().add_hdr_data(*name);
     c.get_rule_api().add_comment(
         "The '" + *old + "' ruletype is no longer supported, using " + *name);
@@ -97,6 +93,7 @@ static ConversionState* conv_rule_ctor(Converter& c)
 
 static ConversionState* drop_rule_ctor(Converter& c)
 {
+    c.get_rule_api().set_rule_old_action("drop");
     c.get_rule_api().add_hdr_data("block");
     c.get_rule_api().add_comment(
         "Ruletype 'drop' discards the current packet only; "
@@ -105,36 +102,46 @@ static ConversionState* drop_rule_ctor(Converter& c)
 }
 
 static const std::string alert = "alert";
+static const std::string c_alert = "# alert";
 static const std::string block = "block";
 static const std::string log = "log";
 static const std::string pass = "pass";
 static const std::string drop = "drop";
 static const std::string reject = "reject";
+
 static const std::string sblock = "sblock";
 static const std::string sdrop = "sdrop";
+
 static const std::string activate = "activate";
 static const std::string dynamic = "dynamic";
 
 static const ConvertMap alert_api = { alert, rule_ctor<& alert>};
+static const ConvertMap c_alert_api = { c_alert, rule_ctor<& c_alert>};
 static const ConvertMap block_api = { block, rule_ctor<& block>};
 static const ConvertMap log_api = { log, rule_ctor<& log>};
 static const ConvertMap pass_api = { pass, rule_ctor<& pass>};
 static const ConvertMap drop_api = { drop, drop_rule_ctor};
 static const ConvertMap reject_api = { reject, rule_ctor<& reject>};
+
 static const ConvertMap sblock_api = { sblock, conv_rule_ctor<& block, &sblock>};
 static const ConvertMap sdrop_api = { sdrop, conv_rule_ctor<& block, &sdrop>};
+
 static const ConvertMap activate_api = { activate, dep_rule_ctor<& activate>};
 static const ConvertMap dynamic_api = { dynamic, dep_rule_ctor<& dynamic>};
 
 const ConvertMap* alert_map = &alert_api;
+const ConvertMap* c_alert_map = &c_alert_api;
 const ConvertMap* block_map = &block_api;
 const ConvertMap* log_map = &log_api;
 const ConvertMap* pass_map = &pass_api;
 const ConvertMap* drop_map = &drop_api;
 const ConvertMap* reject_map = &reject_api;
+
 const ConvertMap* sblock_map = &sblock_api;
 const ConvertMap* sdrop_map = &sdrop_api;
+
 const ConvertMap* activate_map = &activate_api;
 const ConvertMap* dynamic_map = &dynamic_api;
+
 } // namespace keywords
 

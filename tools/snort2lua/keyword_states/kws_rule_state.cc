@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,43 +32,50 @@ class RuleState : public ConversionState
 {
 public:
     RuleState(Converter& c) : ConversionState(c) { }
-    virtual ~RuleState() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
+using namespace std;
+
 bool RuleState::convert(std::istringstream& data_stream)
 {
+    static bool did_preamble = false;
+
     std::string arg;
     bool retval = true;
     int count = 0;
 
-    table_api.open_table("rule_state");
-    table_api.open_table();
+    if ( !did_preamble )
+    {
+        did_preamble = true;
+        table_api.open_table("detection");
+        table_api.add_option("global_rule_state", true);
+        table_api.close_table();
+    }
+
+    string gid;
+    string sid;
+    string enable;
+    string action;
 
     while (util::get_string(data_stream, arg, ", "))
     {
         switch (count)
         {
         case 0:
-            table_api.add_option("sid", std::stoi(arg));
+            sid = arg;
             count++;
             break;
         case 1:
-            table_api.add_option("gid", std::stoi(arg));
+            gid = arg;
             count++;
             break;
         case 2:
-            if (!arg.compare("enabled"))
-            {
-                table_api.add_diff_option_comment("enabled", "enable");
-                table_api.add_option("enable", true);
-            }
-            else if (!arg.compare("disabled"))
-            {
-                table_api.add_diff_option_comment("disabled", "enable");
-                table_api.add_option("enable", false);
-            }
+            if (arg == "enabled")
+                enable = "yes";
+            else if (arg == "disabled")
+                enable = "no";
             else
             {
                 data_api.failed_conversion(data_stream, "third option must be {enabled|disabled|");
@@ -78,7 +85,7 @@ bool RuleState::convert(std::istringstream& data_stream)
             count++;
             break;
         case 3:
-            table_api.add_deleted_comment("action");
+            action = arg;
             count++;
             break;
         default:
@@ -87,8 +94,36 @@ bool RuleState::convert(std::istringstream& data_stream)
         }
     }
 
-    table_api.close_table();
-    table_api.close_table();
+    if ( count < 2 )
+    {
+        data_api.failed_conversion(data_stream, "must set a gid and sid for rule state" + arg);
+        retval = false;
+    }
+
+    if ( retval )
+    {
+        state_api.create_state();
+        state_api.add_option("gid", gid);
+        state_api.add_option("sid", sid);
+
+        if ( !enable.empty() )
+        {
+            state_api.add_option("enable", enable);
+            state_api.add_deleted_comment("enable");
+        }
+
+        if ( !action.empty() )
+        {
+            if ( action == "sdrop" )
+            {
+                action = "drop";
+                state_api.add_deleted_comment("action");
+            }
+
+            state_api.set_action(action);
+        }
+    }
+
     return retval;
 }
 

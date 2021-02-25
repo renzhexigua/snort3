@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 1998-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -24,24 +24,26 @@
  *
  * Library for managing IP variables.
 */
-#include "sf_vartable.h"
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
+#include "sf_vartable.h"
+#include "sf_ip.h"
+#include "sf_ipvar.h"
+#include "utils/util.h"
+#include "utils/util_cstring.h"
 
-#include "snort_types.h"
-#include "sfip/sf_vartable.h"
-#include "sfip/sf_ipvar.h"
-#include "util.h"
+#ifdef UNIT_TEST
+#include "catch/snort_catch.h"
+#endif
 
-vartable_t* sfvt_alloc_table(void)
+using namespace snort;
+
+vartable_t* sfvt_alloc_table()
 {
-    vartable_t* table = (vartable_t*)SnortAlloc(sizeof(vartable_t));
+    vartable_t* table = (vartable_t*)snort_calloc(sizeof(vartable_t));
 
     /* ID for recognition of variables with different name, but same content
      * Start at 1, so a value of zero indicates not set.
@@ -55,15 +57,15 @@ vartable_t* sfvt_alloc_table(void)
 static char* sfvt_expand_value(vartable_t* table, const char* value)
 {
     const char* ptr, * end;
-    char* tmp, * ret = NULL;
+    char* tmp, * ret = nullptr;
     int retlen = 0, retsize = 0;
     int escaped = 0;
 
-    if ((table == NULL) || (value == NULL))
-        return NULL;
+    if ((table == nullptr) || (value == nullptr))
+        return nullptr;
 
     if (strlen(value) == 0)
-        return NULL;
+        return nullptr;
 
     ptr = value;
     end = value + strlen(value);
@@ -72,15 +74,13 @@ static char* sfvt_expand_value(vartable_t* table, const char* value)
     while ((end > ptr) && isspace((int)*(end-1)))
         end--;
     if (ptr == end)
-        return NULL;
+        return nullptr;
 
-    tmp = SnortStrndup(ptr, end-ptr);
-    if (tmp == NULL)
-        return NULL;
+    tmp = snort_strndup(ptr, end-ptr);
 
     /* Start by allocating the length of the value */
     retsize = strlen(value) + 1;
-    ret = (char*)SnortAlloc(retsize);
+    ret = (char*)snort_calloc(retsize);
 
     ptr = tmp;
     end = tmp + strlen(tmp);
@@ -124,26 +124,24 @@ static char* sfvt_expand_value(vartable_t* table, const char* value)
             if (varstart == ptr)
                 goto sfvt_expand_value_error;
 
-            vartmp = SnortStrndup(varstart, ptr - varstart);
-            if (vartmp == NULL)
-                goto sfvt_expand_value_error;
-
+            vartmp = snort_strndup(varstart, ptr - varstart);
             ipvar = sfvt_lookup_var(table, vartmp);
-            free(vartmp);
-            if (ipvar == NULL)
+            snort_free(vartmp);
+
+            if (ipvar == nullptr)
                 goto sfvt_expand_value_error;
 
-            if (ipvar->value != NULL)
+            if (ipvar->value != nullptr)
             {
                 if ((int)(retlen + strlen(ipvar->value)) >= retsize)
                 {
                     char* tmpalloc;
 
                     retsize = retlen + strlen(ipvar->value) + (end - ptr) + 1;
-                    tmpalloc = (char*)SnortAlloc(retsize);
+                    tmpalloc = (char*)snort_alloc(retsize);
                     memcpy(tmpalloc, ret, retlen);
-                    memcpy(tmpalloc + retlen, ipvar->value, strlen(ipvar->value));
-                    free(ret);
+                    strncpy(tmpalloc + retlen, ipvar->value, retsize - retlen);
+                    snort_free(ret);
                     retlen += strlen(ipvar->value);
                     ret = tmpalloc;
                 }
@@ -164,13 +162,13 @@ static char* sfvt_expand_value(vartable_t* table, const char* value)
         ptr++;
     }
 
-    free(tmp);
+    snort_free(tmp);
 
     if ((retlen + 1) < retsize)
     {
-        char* tmpalloc = (char*)SnortAlloc(retlen + 1);
+        char* tmpalloc = (char*)snort_calloc(retlen + 1);
         memcpy(tmpalloc, ret, retlen);
-        free(ret);
+        snort_free(ret);
         ret = tmpalloc;
     }
 
@@ -178,54 +176,49 @@ static char* sfvt_expand_value(vartable_t* table, const char* value)
     return ret;
 
 sfvt_expand_value_error:
-    free(ret);
-    free(tmp);
-    return NULL;
+    snort_free(ret);
+    snort_free(tmp);
+    return nullptr;
 }
 
-// XXX this implementation is just used to support
+// this implementation is just used to support
 // Snort's underlying implementation better
-SFIP_RET sfvt_define(vartable_t* table, const char* name, const char* value)
+SfIpRet sfvt_define(vartable_t* table, const char* name, const char* value)
 {
     char* buf;
     int len;
-    sfip_var_t* ipret = NULL;
-    SFIP_RET ret;
+    sfip_var_t* ipret = nullptr;
+    SfIpRet ret;
 
     if (!name || !value)
         return SFIP_ARG_ERR;
 
     len = strlen(name) + strlen(value) + 2;
-
-    if ((buf = (char*)malloc(len)) == NULL)
-    {
-        return SFIP_FAILURE;
-    }
-
+    buf = (char*)snort_alloc(len);
     SnortSnprintf(buf, len, "%s %s", name, value);
 
     ret = sfvt_add_str(table, buf, &ipret);
     if ((ret == SFIP_SUCCESS) || (ret == SFIP_DUPLICATE))
         ipret->value = sfvt_expand_value(table, value);
-    free(buf);
+    snort_free(buf);
     return ret;
 }
 
 /* Adds the variable described by "str" to the table "table" */
-SFIP_RET sfvt_add_str(vartable_t* table, const char* str, sfip_var_t** ipret)
+SfIpRet sfvt_add_str(vartable_t* table, const char* str, sfip_var_t** ipret)
 {
     sfip_var_t* var;
     sfip_var_t* swp;
     sfip_var_t* p;
     int ret;
-    SFIP_RET status = SFIP_FAILURE;
+    SfIpRet status = SFIP_FAILURE;
 
     if (!table || !str || !ipret)
         return SFIP_FAILURE;
 
     /* Creates the variable */
     var = sfvar_alloc(table, str, &status);
-    if ( var == NULL )
+    if ( var == nullptr )
     {
         return SFIP_FAILURE;
     }
@@ -299,12 +292,14 @@ SFIP_RET sfvt_add_str(vartable_t* table, const char* str, sfip_var_t** ipret)
 }
 
 /* Adds the variable described by "src" to the variable "dst",
- * using the vartable for looking variables used within "src" */
-SFIP_RET sfvt_add_to_var(vartable_t* table, sfip_var_t* dst, const char* src)
+ * using the vartable for looking variables used within "src".
+ * If vartable is null variables are not supported.
+ */
+SfIpRet sfvt_add_to_var(vartable_t* table, sfip_var_t* dst, const char* src)
 {
-    SFIP_RET ret;
+    SfIpRet ret;
 
-    if (!table || !dst || !src)
+    if (!dst || !src)
         return SFIP_ARG_ERR;
 
     if ((ret = sfvar_parse_iplist(table, dst, src, 0)) == SFIP_SUCCESS)
@@ -321,17 +316,15 @@ sfip_var_t* sfvt_lookup_var(vartable_t* table, const char* name)
     const char* end;
 
     if (!table || !name)
-        return NULL;
+        return nullptr;
 
     if (*name == '$')
         name++;
 
-    /* XXX should I assume there will be trailing garbage or
+    /* should I assume there will be trailing garbage or
      * should I automatically find where the variable ends? */
-    for (end=name;
-        *end && !isspace((int)*end) && *end != '\\' && *end != ']';
-        end++)
-        ;
+    for (end=name; *end && !isspace((int)*end) && *end != '\\' && *end != ']'; end++);
+
     len = end - name;
 
     for (p=table->head; len && p; p=p->next)
@@ -341,7 +334,7 @@ sfip_var_t* sfvt_lookup_var(vartable_t* table, const char* name)
             return p;
     }
 
-    return NULL;
+    return nullptr;
 }
 
 void sfvt_free_table(vartable_t* table)
@@ -358,99 +351,71 @@ void sfvt_free_table(vartable_t* table)
         sfvar_free(p);
         p = tmp;
     }
-    free(table);
+    snort_free(table);
 }
 
-/* Prints a table's contents */
-void sfip_print_table(FILE* f, vartable_t* table)
-{
-    sfip_var_t* p;
 
-    if (!f || !table)
-        return;
+#ifdef UNIT_TEST
 
-    fprintf(f, "(Table %p)\n", (void*)table);
-    for (p=table->head; p; p=p->next)
-    {
-        sfvar_print_to_file(f, p);
-        puts("");
-    }
-}
-
-//#define TESTER
-
-#ifdef TESTER
-int failures = 0;
-#define TEST(x) \
-    if (x) printf("\tSuccess: line %d\n", __LINE__); \
-    else { printf("\tFAILURE: line %d\n", __LINE__); failures++; }
-
-int main()
+TEST_CASE("SfVarTable_Kitchen_Sink", "[SfVarTable]")
 {
     vartable_t* table;
     sfip_var_t* var;
-    sfip_t* ip;
+    SfIp* ip;
+    SfIpRet status;
 
-    puts("********************************************************************");
-    puts("Testing variable table parsing:");
     table = sfvt_alloc_table();
+
+    /* Parsing tests */
     /* These are all valid */
-    TEST(sfvt_add_str(table, "foo [ 1.2.0.0/16, ffff:dead:beef::0 ] ", &var) == SFIP_SUCCESS);
-    TEST(sfvt_add_str(table, " goo [ ffff:dead:beef::0 ] ", &var) == SFIP_SUCCESS);
-    TEST(sfvt_add_str(table, " moo [ any ] ", &var) == SFIP_SUCCESS);
+    CHECK(sfvt_add_str(table, "foo [ 1.2.0.0/16, ffff:dead:beef::0 ] ", &var) == SFIP_SUCCESS);
+    CHECK(sfvt_add_str(table, " goo [ ffff:dead:beef::0 ] ", &var) == SFIP_SUCCESS);
+    CHECK(sfvt_add_str(table, " moo [ any ] ", &var) == SFIP_SUCCESS);
 
     /* Test variable redefine */
-    TEST(sfvt_add_str(table, " goo [ 192.168.0.1, 192.168.0.2, 192.168.255.0 255.255.248.0 ] ",
+    CHECK(sfvt_add_str(table, " goo [ 192.168.0.1, 192.168.0.2, 192.168.255.0 255.255.248.0 ] ",
         &var) == SFIP_DUPLICATE);
 
     /* These should fail since it's a variable name with bogus arguments */
-    TEST(sfvt_add_str(table, " phlegm ", &var) == SFIP_FAILURE);
-    TEST(sfvt_add_str(table, " phlegm [", &var) == SFIP_FAILURE);
-    TEST(sfvt_add_str(table, " phlegm [ ", &var) == SFIP_FAILURE);
-    TEST(sfvt_add_str(table, " phlegm [sdfg ", &var) == SFIP_FAILURE);
-    TEST(sfvt_add_str(table, " phlegm [ sdfg, 12.123.1.4.5 }", &var) == SFIP_FAILURE);
-    TEST(sfvt_add_str(table, " [ 12.123.1.4.5 ]", &var) == SFIP_FAILURE);
-    TEST(sfvt_add_str(table, NULL, &var) == SFIP_FAILURE);
-    TEST(sfvt_add_str(table, "", &var) == SFIP_FAILURE);
+    CHECK(sfvt_add_str(table, " phlegm ", &var) == SFIP_FAILURE);
+    CHECK(sfvt_add_str(table, " phlegm [", &var) == SFIP_FAILURE);
+    CHECK(sfvt_add_str(table, " phlegm [ ", &var) == SFIP_FAILURE);
+    CHECK(sfvt_add_str(table, " phlegm [sdfg ", &var) == SFIP_FAILURE);
+    CHECK(sfvt_add_str(table, " phlegm [ sdfg, 12.123.1.4.5 }", &var) == SFIP_FAILURE);
+    CHECK(sfvt_add_str(table, " [ 12.123.1.4.5 ]", &var) == SFIP_FAILURE);
+    CHECK(sfvt_add_str(table, nullptr, &var) == SFIP_FAILURE);
+    CHECK(sfvt_add_str(table, "", &var) == SFIP_FAILURE);
 
-    puts("");
-    puts("********************************************************************");
-    puts("Expansions:");
-    /* Note: used this way leaks memory */
-    printf("\t%s\n", sfvt_alloc_expanded(table, "$foo"));
-    printf("\t%s\n", sfvt_alloc_expanded(table, "goo $goo sf sfasdfasdf $moo"));
-    printf("\t%s\n", sfvt_alloc_expanded(table, " ssdf $moo $moo asdf $fooadff $foo "));
-    printf("\t%s\n", sfvt_alloc_expanded(table, " ssdf $moo $moo\\sdf $foo adff"));
-
-    puts("");
-    puts("********************************************************************");
-    puts("Containment checks:");
-    var = sfvt_lookup(table, "goo");
-    ip = sfip_alloc("192.168.248.255");
-    TEST(sfvar_ip_in(var, ip) == SFIP_SUCCESS);
+    /* Containment tests */
+    var = sfvt_lookup_var(table, "goo");
+    ip = (SfIp *)snort_alloc(sizeof(SfIp));
+    status = ip->set("192.168.248.255");
+    CHECK(SFIP_SUCCESS == status);
+    CHECK((sfvar_ip_in(var, ip) == false));
 
     /* Check against the 'any' variable */
     var = sfvt_lookup_var(table, "moo");
-    TEST(sfvar_ip_in(var, ip) == SFIP_SUCCESS);
+    CHECK((sfvar_ip_in(var, ip) == true));
 
     /* Verify it's not in this variable */
     var = sfvt_lookup_var(table, "foo");
-    TEST(sfvar_ip_in(var, ip) == SFIP_FAILURE);
+    CHECK((sfvar_ip_in(var, ip) == false));
 
     /* Check boundary cases */
     var = sfvt_lookup_var(table, "goo");
-    free_ip(ip);
-    ip = sfip_alloc_str("192.168.0.3");
-    TEST(sfvar_ip_in(var, ip) == SFIP_FAILURE);
-    free_ip(ip);
-    ip = sfip_alloc_str("192.168.0.2");
-    TEST(sfvar_ip_in(var, ip) == SFIP_SUCCESS);
+    snort_free(ip);
+    ip = (SfIp *)snort_alloc(sizeof(SfIp));
+    status = ip->set("192.168.0.3");
+    CHECK(SFIP_SUCCESS == status);
+    CHECK((sfvar_ip_in(var, ip) == false));
+    snort_free(ip);
+    ip = (SfIp *)snort_alloc(sizeof(SfIp));
+    status = ip->set("192.168.0.2");
+    CHECK(SFIP_SUCCESS == status);
+    CHECK((sfvar_ip_in(var, ip) == true));
+    snort_free(ip);
 
-    puts("");
-    puts("********************************************************************");
-
-    printf("\n\tTotal Failures: %d\n", failures);
-    return 0;
+    sfvt_free_table(table);
 }
 
 #endif

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,64 +17,30 @@
 //--------------------------------------------------------------------------
 // alert_luajit.cc author Russ Combs <rucombs@cisco.com>
 
-#include <assert.h>
-#include <luajit-2.0/lua.hpp>
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
-#include "main/snort_types.h"
+#include "detection/ips_context.h"
+#include "detection/signature.h"
 #include "events/event.h"
-#include "helpers/chunk.h"
-#include "managers/event_manager.h"
-#include "managers/module_manager.h"
-#include "managers/plugin_manager.h"
-#include "managers/script_manager.h"
-#include "hash/sfhashfcn.h"
-#include "parser/parser.h"
-#include "protocols/packet.h"
 #include "framework/logger.h"
 #include "framework/module.h"
-#include "framework/parameter.h"
-#include "time/profiler.h"
-#include "utils/stats.h"
+#include "helpers/chunk.h"
+#include "log/messages.h"
+#include "lua/lua.h"
+#include "main/thread_config.h"
+#include "managers/lua_plugin_defs.h"
+#include "managers/plugin_manager.h"
+#include "managers/script_manager.h"
+#include "profiler/profiler_defs.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 static THREAD_LOCAL ProfileStats luaLogPerfStats;
 
-//-------------------------------------------------------------------------
-// ffi stuff
-//
-// IMPORTANT - if you change these structs, you must also update
-// snort_plugins.lua.
-//-------------------------------------------------------------------------
-
-struct SnortEvent
-{
-    unsigned gid;
-    unsigned sid;
-    unsigned rev;
-
-    uint32_t event_id;
-    uint32_t event_ref;
-
-    const char* msg;
-    const char* svc;
-    const char* os;
-};
-
-struct SnortPacket
-{
-    // FIXIT-L add ip addrs and other useful foo to lua packet
-    const char* type;
-    uint64_t num;
-    unsigned sp;
-    unsigned dp;
-};
-
-extern "C" {
-// ensure Lua can link with this
-    const SnortEvent* get_event();
-    const SnortPacket* get_packet();
-}
-
-static THREAD_LOCAL Event* event;
+static THREAD_LOCAL const Event* event;
 static THREAD_LOCAL SnortEvent lua_event;
 
 static THREAD_LOCAL Packet* packet;
@@ -84,20 +50,17 @@ SO_PUBLIC const SnortEvent* get_event()
 {
     assert(event);
 
-    lua_event.gid = event->sig_info->generator;
-    lua_event.sid = event->sig_info->id;
+    lua_event.gid = event->sig_info->gid;
+    lua_event.sid = event->sig_info->sid;
     lua_event.rev = event->sig_info->rev;
 
     lua_event.event_id = event->event_id;
     lua_event.event_ref = event->event_reference;
 
-    if ( event->sig_info->message )
-        lua_event.msg = event->sig_info->message;
+    if ( !event->sig_info->message.empty() )
+        lua_event.msg = event->sig_info->message.c_str();
     else
         lua_event.msg = "";
-
-    lua_event.svc = event->sig_info->num_services ? event->sig_info->services[1].service : "n/a";
-    lua_event.os = event->sig_info->os ? event->sig_info->os : "n/a";
 
     return &lua_event;
 }
@@ -115,7 +78,7 @@ SO_PUBLIC const SnortPacket* get_packet()
     default: lua_packet.type = "OTHER";
     }
 
-    lua_packet.num = pc.total_from_daq;
+    lua_packet.num = packet->context->packet_number;
     lua_packet.sp = packet->ptrs.sp;
     lua_packet.dp = packet->ptrs.dp;
 
@@ -158,6 +121,9 @@ public:
     ProfileStats* get_profile() const override
     { return &luaLogPerfStats; }
 
+    Usage get_usage() const override
+    { return GLOBAL; }
+
 public:
     std::string args;
 };
@@ -170,15 +136,14 @@ class LuaJitLogger : public Logger
 {
 public:
     LuaJitLogger(const char* name, std::string& chunk, class LuaLogModule*);
-    ~LuaJitLogger();
 
-    void alert(Packet*, const char*, Event*) override;
+    void alert(Packet*, const char*, const Event&) override;
 
     static const struct LogApi* get_api();
 
 private:
     std::string config;
-    struct lua_State** lua;
+    std::vector<Lua::State> states;
 };
 
 LuaJitLogger::LuaJitLogger(const char* name, std::string& chunk, LuaLogModule* mod)
@@ -188,46 +153,36 @@ LuaJitLogger::LuaJitLogger(const char* name, std::string& chunk, LuaLogModule* m
     config += mod->args;
     config += "}";
 
-    unsigned max = get_instance_max();
+    unsigned max = ThreadConfig::get_instance_max();
 
-    lua = new lua_State*[max];
-
-    // FIXIT-L might make more sense to have one instance
-    // with one lua state in each thread instead of one
-    // instance with one lua state per thread
-    // (same for LuaJitOption)
-    for ( unsigned i = 0; i < max; ++i )
-        init_chunk(lua[i], chunk, name, config);
+    // FIXIT-L might make more sense to have one instance with one lua state in
+    // each thread instead of one instance with one lua state per thread (same
+    // for LuaJitOption)
+    for ( unsigned i = 0; i < max; i++ )
+    {
+        states.emplace_back(true);
+        init_chunk(states[i], chunk, name, config);
+    }
 }
 
-LuaJitLogger::~LuaJitLogger()
+
+void LuaJitLogger::alert(Packet* p, const char*, const Event& e)
 {
-    unsigned max = get_instance_max();
-
-    for ( unsigned i = 0; i < max; ++i )
-        term_chunk(lua[i]);
-
-    delete[] lua;
-}
-
-void LuaJitLogger::alert(Packet* p, const char*, Event* e)
-{
-    PROFILE_VARS;
-    MODULE_PROFILE_START(luaLogPerfStats);
+    Profile profile(luaLogPerfStats);
 
     packet = p;
-    event = e;
+    event = &e;
 
-    lua_State* L = lua[get_instance_id()];
+    lua_State* L = states[get_instance_id()];
+
+    Lua::ManageStack ms(L, 1);
+
     lua_getglobal(L, "alert");
-
     if ( lua_pcall(L, 0, 1, 0) )
     {
         const char* err = lua_tostring(L, -1);
         ErrorMessage("%s\n", err);
-        MODULE_PROFILE_END(luaLogPerfStats);
     }
-    MODULE_PROFILE_END(luaLogPerfStats);
 }
 
 //-------------------------------------------------------------------------
@@ -245,7 +200,7 @@ static void mod_dtor(Module* m)
     delete m;
 }
 
-static Logger* log_ctor(SnortConfig*, Module* m)
+static Logger* log_ctor(Module* m)
 {
     const char* key = m->get_name();
     std::string* chunk = ScriptManager::get_chunk(key);

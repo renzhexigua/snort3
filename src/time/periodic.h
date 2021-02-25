@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,15 +20,19 @@
 #ifndef PERIODIC_H
 #define PERIODIC_H
 
-#include "snort_types.h"
+#include <cstdint>
 
-typedef void (* PeriodicFunc)(void*);
+using PeriodicHook = void (*)(void*);
 
-void periodic_register(
-PeriodicFunc, void* arg, uint16_t priority, uint32_t period);
+class Periodic
+{
+public:
+    // lower number is higher priority
+    static void register_handler(PeriodicHook, void*, uint16_t priority, uint32_t);
+    static void check();
 
-void periodic_check();
-void periodic_release();
+    static void unregister_all();
+};
 
 #endif
 

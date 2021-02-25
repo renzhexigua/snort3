@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,14 +17,23 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "expect_cache.h"
 
-#include <assert.h>
-
-#include "time/packet_time.h"
-#include "stream/stream_api.h"  // FIXIT-M bad dependency
-#include "zhash.h"
+#include "detection/ips_context.h"
+#include "hash/zhash.h"
+#include "packet_io/sfdaq_instance.h"
+#include "protocols/packet.h"
+#include "protocols/vlan.h"
+#include "pub_sub/expect_events.h"
 #include "sfip/sf_ip.h"
+#include "stream/stream.h"      // FIXIT-M bad dependency
+#include "time/packet_time.h"
+
+using namespace snort;
 
 /* Reasonably small, and prime */
 // FIXIT-L size based on max_tcp + max_udp?
@@ -32,55 +41,17 @@
 #define MAX_LIST    8
 #define MAX_DATA    4
 #define MAX_WAIT  300
-#define MAX_PRUNE   5
 
-//-------------------------------------------------------------------------
-// data structs
-// -- key has IP address and port pairs; one port must be zero (wild card)
-//    forming a 3-tuple
-// -- node struct is stored in hash table by key
-// -- each node struct has one or more list structs linked together
-// -- each list struct has a list of flow data
-// -- when a new expect is added, a new list struct is created if a new
-//    node is created or the last list struct of an existing node already
-//    has the same preproc id in the flow data list
-// -- when a new expect is added, the last list struct is used if the
-//    given preproc id is not already in the flow data list
-// -- nodes are preallocated and stored in hash table; if there is no node
-//    available when an expect is added, LRU nodes are pruned
-// -- list structs are also preallocated and stored in free list; if there
-//    is no list struct available when an expect is added, LRU nodes are
-//    pruned freeing up both nodes and list structs
-// -- the number of list structs per node is capped at MAX_LIST; once
-//    reached, requests to add new expects requiring new list structs fail
-// -- the number of data structs per list struct is not capped
-// -- example:  ftp preproc adds a new 3-tuple twice for 2 expected data
-//    channels -> new node with 2 list structs linked to it
-// -- example:  ftp preproc adds a new 3-tuple once and then another
-//    preproc expects the same 3-tuple -> new node with one list struct
-//    is created for ftp and the next request goes in that same list
-//    struct
-// -- new list structs are appended to node's list struct chain
-// -- matching expected sessions are pulled off from the head of the node's
-//    list struct chain
-//
-// FIXIT-M expiration is by node struct but should be by list struct, ie
-//    individual sessions, not all sessions to a given 3-tuple
-//    (this would make pruning a little harder unless we add linkage
-//    a la FlowCache)
-//-------------------------------------------------------------------------
+static THREAD_LOCAL std::vector<ExpectFlow*>* packet_expect_flows = nullptr;
 
-struct ExpectFlow
+ExpectFlow::~ExpectFlow()
 {
-    struct ExpectFlow* next;
-    FlowData* data;
-
-    void clear();
-};
+    clear();
+}
 
 void ExpectFlow::clear()
 {
-    while ( data )
+    while (data)
     {
         FlowData* fd = data;
         data = data->next;
@@ -89,13 +60,49 @@ void ExpectFlow::clear()
     data = nullptr;
 }
 
+int ExpectFlow::add_flow_data(FlowData* fd)
+{
+    if (data)
+    {
+        FlowData* prev_fd;
+        for (prev_fd = data; prev_fd && prev_fd->next; prev_fd = prev_fd->next);
+
+        prev_fd->next = fd;
+    }
+    else
+        data = fd;
+    return 0;
+}
+
+std::vector<ExpectFlow*>* ExpectFlow::get_expect_flows()
+{
+    return packet_expect_flows;
+}
+
+void ExpectFlow::reset_expect_flows()
+{
+    if(packet_expect_flows)
+        packet_expect_flows->clear();
+}
+
+FlowData* ExpectFlow::get_flow_data(unsigned id)
+{
+    for (FlowData* p = data; p; p = p->next)
+    {
+        if (p->get_id() == id)
+            return p;
+    }
+    return nullptr;
+}
+
 struct ExpectNode
 {
     time_t expires = 0;
-    int reversed_key = 0;
+    bool reversed_key = false;
     int direction = 0;
+    bool swap_app_direction = false;
     unsigned count = 0;
-    int16_t appId = 0;
+    SnortProtocolId snort_protocol_id = UNKNOWN_PROTOCOL_ID;
 
     ExpectFlow* head = nullptr;
     ExpectFlow* tail = nullptr;
@@ -105,7 +112,7 @@ struct ExpectNode
 
 void ExpectNode::clear(ExpectFlow*& list)
 {
-    while ( head )
+    while (head)
     {
         ExpectFlow* p = head;
         head = head->next;
@@ -117,150 +124,278 @@ void ExpectNode::clear(ExpectFlow*& list)
     count = 0;
 }
 
-struct ExpectKey
-{
-    sfip_t ip1;
-    sfip_t ip2;
-    uint16_t port1;
-    uint16_t port2;
-    PktType protocol;
-
-    bool set(
-        const sfip_t *cliIP, uint16_t cliPort,
-        const sfip_t *srvIP, uint16_t srvPort,
-        PktType proto);
-};
-
-inline bool ExpectKey::set(
-    const sfip_t *cliIP, uint16_t cliPort,
-    const sfip_t *srvIP, uint16_t srvPort,
-    PktType proto )
-{
-    bool reverse;
-    SFIP_RET rval = sfip_compare(cliIP, srvIP);
-
-    if (rval == SFIP_LESSER || (rval == SFIP_EQUAL && cliPort < srvPort))
-    {
-        sfip_copy(ip1, cliIP);
-        port1 = cliPort;
-        sfip_copy(ip2, srvIP);
-        port2 = srvPort;
-        reverse = false;
-    }
-    else
-    {
-        sfip_copy(ip1, srvIP);
-        port1 = srvPort;
-        sfip_copy(ip2, cliIP);
-        port2 = cliPort;
-        reverse = true;
-    }
-    protocol = proto;
-    return reverse;
-}
-
 //-------------------------------------------------------------------------
 // private ExpectCache methods
 //-------------------------------------------------------------------------
 
-// Clean the hash table of at most MAX_PRUNE expired nodes
-void ExpectCache::prune()
+void ExpectCache::prune_lru()
 {
-    time_t now = packet_time();
-
-    for (unsigned i = 0; i < MAX_PRUNE; ++i )
-    {
-        ExpectNode* node = (ExpectNode*)hash_table->first();
-
-        if ( !node || now <= node->expires )
-            break;
-
-        hash_table->remove();
-        ++prunes;
-    }
+    ExpectNode* node = static_cast<ExpectNode*>( hash_table->lru_first() );
+    assert(node);
+    node->clear(free_list);
+    hash_table->release();
+    ++prunes;
 }
 
-inline ExpectNode* ExpectCache::get_node(ExpectKey& key, bool& init)
+ExpectNode* ExpectCache::find_node_by_packet(Packet* p, FlowKey &key)
 {
-    ExpectNode* node;
+    if (!hash_table->get_num_nodes())
+        return nullptr;
 
-    if ( !list )
-        node = nullptr;
-    else
-        node = (ExpectNode*)hash_table->get(&key);
+    const SfIp* srcIP = p->ptrs.ip_api.get_src();
+    const SfIp* dstIP = p->ptrs.ip_api.get_dst();
+    uint16_t vlanId = (p->proto_bits & PROTO_BIT__VLAN) ? layer::get_vlan_layer(p)->vid() : 0;
+    uint32_t mplsId = (p->proto_bits & PROTO_BIT__MPLS) ? p->ptrs.mplsHdr.label : 0;
+    PktType type = p->type();
+    IpProtocol ip_proto = p->get_ip_proto_next();
 
-    if ( node )
-        init = false;
+    bool reversed_key = key.init(p->context->conf, type, ip_proto, dstIP, p->ptrs.dp,
+        srcIP, p->ptrs.sp, vlanId, mplsId, *p->pkth);
 
-    else
+    /*
+        Lookup order:
+            1. Full match.
+            2. Unknown (zeroed) source port.
+            3. Unknown (zeroed) destination port.
+        If the client/server addresses were reversed during key creation, the
+        source port will be in port_l.
+    */
+    // FIXIT-P X This should be optimized to only do full matches when full keys
+    //      are present, likewise for partial keys.
+    ExpectNode* node = static_cast<ExpectNode*>( hash_table->get_user_data(&key) );
+    if (!node)
     {
-        prune();
+        // FIXIT-M X This logic could fail if IPs were equal because the original key
+        // would always have been created with a 0 for src or dst port and put the
+        // known port in port_h.
+        uint16_t port1;
+        uint16_t port2;
 
-        node = (ExpectNode*)hash_table->get(&key);
-
-        if ( !node )
+        if (reversed_key)
         {
-            ++overflows;
-            return nullptr;
+            port1 = key.port_l;
+            port2 = 0;
+            key.port_l = 0;
         }
-        else if ( !list )
+        else
         {
-            assert(false);
-            ++overflows;
-            return nullptr;
+            port1 = 0;
+            port2 = key.port_h;
+            key.port_h = 0;
+        }
+        node = static_cast<ExpectNode*> ( hash_table->get_user_data(&key) );
+        if (!node)
+        {
+            key.port_l = port1;
+            key.port_h = port2;
+            node = static_cast<ExpectNode*> ( hash_table->get_user_data(&key) );
+            if (!node)
+                return nullptr;
         }
     }
+    if (!node->head || (p->pkth->ts.tv_sec > node->expires))
+    {
+        if (node->head)
+            node->clear(free_list);
+        hash_table->release_node(&key);
+        return nullptr;
+    }
+    /* Make sure the packet direction is correct */
+    switch (node->direction)
+    {
+        case SSN_DIR_BOTH:
+            break;
+
+        case SSN_DIR_FROM_CLIENT:
+        case SSN_DIR_FROM_SERVER:
+            if (node->reversed_key != reversed_key)
+                return nullptr;
+            break;
+    }
+
     return node;
 }
 
-inline ExpectFlow* ExpectCache::get_flow(
-    ExpectNode* node, unsigned flow_id, int16_t appId)
+bool ExpectCache::process_expected(ExpectNode* node, FlowKey& key, Packet* p, Flow* lws)
 {
-    if ( packet_time() > node->expires )
+    ExpectFlow* head;
+    FlowData* fd;
+    bool ignoring = false;
+
+    assert(node->count && node->head);
+
+    /* Pull the first set of expected flow data off of the Expect node and apply it
+        in its entirety to the target flow.  Discard the set (and potentially the
+        entire node, it empty) after this is done. */
+    node->count--;
+    head = node->head;
+    node->head = head->next;
+
+    while ((fd = head->data))
     {
-        node->clear(list);
-        node->appId = appId;
-        ++prunes;
+        head->data = fd->next;
+        lws->set_flow_data(fd);
+        ++realized;
+        fd->handle_expected(p);
     }
-    else if ( node->appId != appId )
+    head->next = free_list;
+    free_list = head;
+
+    /* If this is 0, we're ignoring, otherwise setting id of new session */
+    if (!node->snort_protocol_id)
+        ignoring = node->direction != 0;
+    else
     {
-        if ( node->appId && appId )
-            // reject changing known appId
-            return nullptr;
-
-        // allow changing unknown appId
-        node->appId = appId;
+        lws->ssn_state.snort_protocol_id = node->snort_protocol_id;
+        if ( node->swap_app_direction)
+            lws->flags.app_direction_swapped = true;
     }
-    ExpectFlow* last = node->tail;
 
-    if ( !last )
-        return nullptr;
+    if (!node->count)
+        hash_table->release_node(&key);
 
-    FlowData* fd = last->data;
-
-    while ( fd )
-    {
-        if ( fd->get_id() == flow_id )
-            return nullptr;
-
-        fd = fd->next;
-    }
-    return last;
+    return ignoring;
 }
 
-inline bool ExpectCache::set_data(
-    ExpectNode* node, ExpectFlow*& last, FlowData* fd)
+//-------------------------------------------------------------------------
+// public ExpectCache methods
+//-------------------------------------------------------------------------
+
+ExpectCache::ExpectCache(uint32_t max)
 {
+    // -size forces use of abs(size) ie w/o bumping up
+    hash_table = new ZHash(-MAX_HASH, sizeof(FlowKey));
+    nodes = new ExpectNode[max];
+    for (unsigned i = 0; i < max; ++i)
+        hash_table->push(nodes + i);
+
+    /* Preallocate a pool of ExpectFlows big enough to handle the worst case
+        requirement (max number of nodes * max flows per node) and add them all
+        to an initial free list. */
+    max *= MAX_LIST;
+    pool = new ExpectFlow[max];
+    free_list = nullptr;
+    for (unsigned i = 0; i < max; ++i)
+    {
+        ExpectFlow* p = pool + i;
+        p->data = nullptr;
+        p->next = free_list;
+        free_list = p;
+    }
+
+    if (packet_expect_flows == nullptr)
+        packet_expect_flows = new std::vector<ExpectFlow*>;
+}
+
+ExpectCache::~ExpectCache()
+{
+    delete hash_table;
+    delete[] nodes;
+    delete[] pool;
+    delete packet_expect_flows;
+    packet_expect_flows = nullptr;
+}
+
+/**Either expect or expect future session.
+ *
+ * Preprocessors may add sessions to be expected altogether or to be associated
+ * with some data. For example, FTP preprocessor may add data channel that
+ * should be expected. Alternatively, FTP preprocessor may add session with
+ * snort protocol ID FTP-DATA.
+ *
+ * It is assumed that only one of cliPort or srvPort should be known (!0). This
+ * violation of this assumption will cause hash collision that will cause some
+ * session to be not expected and expected. This will occur only rarely and
+ * therefore acceptable design optimization.
+ *
+ * Also, snort_protocol_id is assumed to be consistent between different
+ * preprocessors.  Each session can be assigned only one snort protocol ID.
+ * When new snort_protocol_id mismatches existing snort_protocol_id, new
+ * snort_protocol_id and associated data is not stored.
+ *
+ */
+int ExpectCache::add_flow(const Packet *ctrlPkt, PktType type, IpProtocol ip_proto,
+    const SfIp* cliIP, uint16_t cliPort, const SfIp* srvIP, uint16_t srvPort,
+    char direction, FlowData* fd, SnortProtocolId snort_protocol_id, bool swap_app_direction)
+{
+    /* Just pull the VLAN ID, MPLS ID, and Address Space ID from the
+        control packet until we have a use case for not doing so. */
+    uint16_t vlanId = (ctrlPkt->proto_bits & PROTO_BIT__VLAN) ? layer::get_vlan_layer(ctrlPkt)->vid() : 0;
+    uint32_t mplsId = (ctrlPkt->proto_bits & PROTO_BIT__MPLS) ? ctrlPkt->ptrs.mplsHdr.label : 0;
+    FlowKey key;
+
+    bool reversed_key = key.init(ctrlPkt->context->conf, type, ip_proto, cliIP, cliPort,
+        srvIP, srvPort, vlanId, mplsId, *ctrlPkt->pkth);
+
+    bool new_node = false;
+    ExpectNode* node = static_cast<ExpectNode*> ( hash_table->get_user_data(&key) );
+    if ( !node )
+    {
+        if ( hash_table->full() )
+            prune_lru();
+        node = static_cast<ExpectNode*> ( hash_table->get(&key) );
+        assert(node);
+        new_node = true;
+    }
+    else if ( packet_time() > node->expires )
+    {
+        // node is past its expiration date, whack it and reuse it.
+        node->clear(free_list);
+        new_node = true;
+    }
+
+    ExpectFlow* last = nullptr;
+    if ( !new_node )
+    {
+        //  reject if the snort_protocol_id doesn't match
+        if ( node->snort_protocol_id != snort_protocol_id )
+        {
+            if ( node->snort_protocol_id && snort_protocol_id )
+                return -1;
+            node->snort_protocol_id = snort_protocol_id;
+        }
+
+        last = node->tail;
+        if ( last )
+        {
+            FlowData* lfd = last->data;
+            while ( lfd )
+            {
+                if ( lfd->get_id() == fd->get_id() )
+                {
+                    last = nullptr;
+                    break;
+                }
+                lfd = lfd->next;
+            }
+        }
+    }
+    else
+    {
+        node->snort_protocol_id = snort_protocol_id;
+        node->reversed_key = reversed_key;
+        node->direction = direction;
+        node->swap_app_direction = swap_app_direction;
+        node->head = node->tail = nullptr;
+        node->count = 0;
+        last = nullptr;
+        /* Only add TCP and UDP expected flows for now via the DAQ module. */
+        if ((ip_proto == IpProtocol::TCP || ip_proto == IpProtocol::UDP) && ctrlPkt->daq_instance)
+            ctrlPkt->daq_instance->add_expected(ctrlPkt, cliIP, cliPort, srvIP, srvPort,
+                    ip_proto, 1000, 0);
+    }
+
+    bool new_expect_flow = false;
     if ( !last )
     {
         if ( node->count >= MAX_LIST )
         {
             // fail when maxed out
             ++overflows;
-            return false;
+            return -1;
         }
-        last = list;
-        list = list->next;
+        last = free_list;
+        free_list = free_list->next;
 
         if ( !node->tail )
             node->head = last;
@@ -269,227 +404,37 @@ inline bool ExpectCache::set_data(
 
         node->tail = last;
         last->next = nullptr;
-
         node->count++;
+        new_expect_flow = true;
     }
-    fd = last->data;
-    last->data = fd;
-
-    return true;
-}
-
-//-------------------------------------------------------------------------
-// public ExpectCache methods
-//-------------------------------------------------------------------------
-
-ExpectCache::ExpectCache (uint32_t max)
-{
-    // -size forces use of abs(size) ie w/o bumping up
-    hash_table = new ZHash(-MAX_HASH, sizeof(ExpectKey));
-
-    nodes = new ExpectNode[max];
-
-    for ( unsigned i = 0; i < max; ++i )
-        hash_table->push(nodes+i);
-
-    max *= MAX_LIST;
-
-    pool = new ExpectFlow[max];
-    list = nullptr;
-
-    for ( unsigned i = 0; i < max; ++i )
-    {
-        ExpectFlow* p = pool + i;
-        p->data = nullptr;
-        p->next = list;
-        list = p;
-    }
-    memset(&zeroed, 0, sizeof(zeroed));
-
-    expects = realized = 0;
-    prunes = overflows = 0;
-}
-
-ExpectCache::~ExpectCache ()
-{
-    delete hash_table;
-    delete[] nodes;
-    delete[] pool;
-}
-
-/**Either expect or expect future session.
- *
- * Preprocessors may add sessions to be expected altogether or to be associated
- * with some data. For example, FTP preprocessor may add data channel that
- * should be expected. Alternatively, FTP preprocessor may add session with
- * appId FTP-DATA.
- *
- * It is assumed that only one of cliPort or srvPort should be known (!0). This
- * violation of this assumption will cause hash collision that will cause some
- * session to be not expected and expected. This will occur only rarely and
- * therefore acceptable design optimization.
- *
- * Also, appId is assumed to be consistent between different preprocessors.
- * Each session can be assigned only one AppId. When new appId mismatches
- * existing appId, new appId and associated data is not stored.
- *
- * @param cliIP - client IP address. All preprocessors must have consistent
- * view of client side of a session.  @param cliPort - client port number
- * @param srvIP - server IP address. All preprocessors must have consisten view
- * of server side of a session.  @param srcPort - server port number @param
- * protocol - IPPROTO_TCP or IPPROTO_UDP.  @param direction - direction of
- * session. Assumed that direction value for session being expected or expected
- * will remain same across different calls to this function.  @param expiry -
- * session expiry in seconds.
- */
-int ExpectCache::add_flow(
-    const sfip_t *cliIP, uint16_t cliPort,
-    const sfip_t *srvIP, uint16_t srvPort,
-    PktType protocol, char direction,
-    FlowData* fd, int16_t appId)
-{
-    // FIXIT-L sip inspector knows both ports
-    //assert(!cliPort || !srvPort);
-
-    ExpectKey hashKey;
-    int reversed_key = hashKey.set(cliIP, cliPort, srvIP, srvPort, protocol);
-
-    bool init = true;
-    ExpectNode* node = get_node(hashKey, init);
-
-    if ( !node )
-        return -1;
-
-    ExpectFlow* last;
-
-    if ( !init )
-        last = get_flow(node, fd->get_id(), appId);
-
-    else
-    {
-        node->appId = appId;
-        node->reversed_key = reversed_key;
-        node->direction = direction;
-        node->head = node->tail = nullptr;
-        node->count = 0;
-        last = nullptr;
-    }
-    if ( !set_data(node, last, fd) )
-        return -1;
-
+    last->add_flow_data(fd);
     node->expires = packet_time() + MAX_WAIT;
     ++expects;
+    if ( new_expect_flow )
+    {
+        // chain all expected flows created by this packet
+        packet_expect_flows->emplace_back(last);
 
+        ExpectEvent event(ctrlPkt, last, fd);
+        DataBus::publish(EXPECT_EVENT_TYPE_EARLY_SESSION_CREATE_KEY, event, ctrlPkt->flow);
+    }
     return 0;
 }
 
 bool ExpectCache::is_expected(Packet* p)
 {
-    if ( !hash_table->get_count() )
-        return false;
-
-    const sfip_t* srcIP = p->ptrs.ip_api.get_src();
-    const sfip_t* dstIP = p->ptrs.ip_api.get_dst();
-
-    ExpectKey key;
-    bool reversed_key = key.set(dstIP, p->ptrs.dp, srcIP, p->ptrs.sp, p->type());
-
-    uint16_t port1;
-    uint16_t port2;
-
-    if ( reversed_key )
-    {
-        key.port2 = 0;
-        port1 = 0;
-        port2 = p->ptrs.sp;
-    }
-    else
-    {
-        key.port1 = 0;
-        port1 = p->ptrs.sp;
-        port2 = 0;
-    }
-
-    ExpectNode* node = (ExpectNode*)hash_table->find(&key);
-
-    if ( !node )
-    {
-        // can't find with dp, so try sp ...
-        key.port1 = port1;
-        key.port2 = port2;
-
-        node = (ExpectNode*)hash_table->find(&key);
-
-        if ( !node )
-            return false;
-    }
-    if ( !node->head || (p->pkth->ts.tv_sec > node->expires) )
-    {
-        hash_table->remove();
-        return false;
-    }
-    /* Make sure the packet direction is correct */
-    switch (node->direction)
-    {
-    case SSN_DIR_BOTH:
-        break;
-    case SSN_DIR_FROM_CLIENT:
-    case SSN_DIR_FROM_SERVER:
-        if (node->reversed_key != reversed_key)
-            return false;
-        break;
-    }
-    return true;
+    FlowKey key;
+    return (find_node_by_packet(p, key) != nullptr);
 }
 
-char ExpectCache::process_expected(Packet* p, Flow* lws)
+bool ExpectCache::check(Packet* p, Flow* lws)
 {
-    int retVal = SSN_DIR_NONE;
+    FlowKey key;
+    ExpectNode* node = find_node_by_packet(p, key);
 
-    ExpectNode* node = (ExpectNode*)hash_table->current();
+    if (!node)
+        return false;
 
-    if ( !node )
-        return retVal;
-
-    assert(node->count && node->head);
-
-    node->count--;
-    ExpectFlow* head = node->head;
-    node->head = head->next;
-
-    FlowData* fd = head->data;
-
-    while ( fd )
-    {
-        lws->set_application_data(fd);
-        ++realized;
-
-        fd->handle_expected(p);
-        fd = fd->next;
-    }
-    head->next = list;
-    list = head;
-
-    /* If this is 0, we're ignoring, otherwise setting id of new session */
-    if ( !node->appId )
-        retVal = node->direction;
-
-    else if ( lws->ssn_state.application_protocol != node->appId )
-    {
-        lws->ssn_state.application_protocol = node->appId;
-    }
-
-    if ( !node->count )
-        hash_table->remove();
-
-    return retVal;
-}
-
-char ExpectCache::check(Packet* p, Flow* lws)
-{
-    if ( !is_expected(p) )
-        return SSN_DIR_NONE;
-
-    return process_expected(p, lws);
+    return process_expected(node, key, p, lws);
 }
 

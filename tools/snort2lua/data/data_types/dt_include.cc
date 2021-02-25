@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -19,8 +19,7 @@
 
 #include "data/data_types/dt_include.h"
 
-Include::Include(std::string include_name) : file_name(include_name) { }
-Include::~Include() { }
+Include::Include(const std::string& include_name) : file_name(include_name) { }
 
 // overloading operators
 std::ostream& operator<<(std::ostream& out, const Include& incl)
@@ -31,7 +30,7 @@ std::ostream& operator<<(std::ostream& out, const Include& incl)
 
 bool operator==(const Include& lhs, const Include& rhs)
 {
-    return !(lhs.file_name.compare(rhs.file_name));
+    return (lhs.file_name == rhs.file_name);
 }
 
 bool operator!=(const Include& lhs, const Include& rhs)

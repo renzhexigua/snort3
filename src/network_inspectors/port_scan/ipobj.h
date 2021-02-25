@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,25 +17,22 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-/*
-    ipobj.h
+// ipobj.h
 
+#ifndef IPOBJ_H
+#define IPOBJ_H
+
+/*
     IP address encapsulation interface
 
     This module provides encapsulation of single IP ADDRESSes as objects,
     and collections of IP ADDRESSes as objects
 
-        Interaction with this library should be done in HOST byte order.
+    Interaction with this library should be done in HOST byte order.
 */
-#ifndef IPOBJ_H
-#define IPOBJ_H
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-
-#include "sflsq.h"
-#include "sfip/sfip_t.h"
+#include "sfip/sf_cidr.h"
+#include "utils/sflsq.h"
 
 struct PORTRANGE
 {
@@ -50,7 +47,7 @@ struct PORTSET
 
 struct IP_PORT
 {
-    sfip_t ip;
+    snort::SfCidr ip;
     PORTSET portset;
     char notflag;
 };
@@ -61,34 +58,28 @@ struct IPSET
 };
 
 /*
-
   IP ADDRESS SET OBJECTS
-
 
    Snort Accepts:
 
-    IP-Address		192.168.1.1
-    IP-Address/MaskBits	192.168.1.0/24
-    IP-Address/Mask		192.168.1.0/255.255.255.0
-
+    IP-Address          192.168.1.1
+    IP-Address/MaskBits 192.168.1.0/24
+    IP-Address/Mask     192.168.1.0/255.255.255.0
 
    These can all be handled via the CIDR block notation : IP/MaskBits
 
    We use collections (lists) of cidr blocks to represent address blocks
-   and indivdual addresses.
+   and individual addresses.
 
    For a single IPAddress the implied Mask is 32 bits,or
    255.255.255.255, or 0xffffffff, or -1.
 */
-IPSET* ipset_new(void);
-int ipset_add(IPSET* ipset, sfip_t* ip, void* port, int notflag);
-int ipset_contains(IPSET* ipset, const sfip_t* ip, void* port);
-IPSET* ipset_copy(IPSET* ipset);
+IPSET* ipset_new();
+int ipset_add(IPSET* ipset, snort::SfCidr* ip, void* port, int notflag);
+int ipset_contains(IPSET* ipset, const snort::SfIp* ip, void* port);
 void ipset_free(IPSET* ipset);
-int ipset_print(IPSET* ipset);
 
-/* helper functions -- all the sets work in host order
-*/
+// helper functions -- all the sets work in host order
 int ipset_parse(IPSET* ipset, const char* ipstr);
 
 #endif

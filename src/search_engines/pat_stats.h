@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,9 +20,9 @@
 #ifndef PAT_STATS_H
 #define PAT_STATS_H
 
+#include "framework/counts.h"
 #include "main/snort_types.h"
 #include "main/thread.h"
-#include "utils/stats.h"
 
 // pattern matcher queue statistics
 
@@ -31,12 +31,16 @@ struct PatMatQStat
     PegCount max_inq;
     PegCount tot_inq_flush;
     PegCount tot_inq_inserts;
+    PegCount tot_inq_overruns;
     PegCount tot_inq_uinserts;
+    PegCount non_qualified_events;
+    PegCount qualified_events;
+    PegCount matched_bytes;
 };
 
-extern THREAD_LOCAL PatMatQStat pmqs;
-
-void print_pat_stats(const char*, unsigned max);
-
+namespace snort
+{
+SO_PUBLIC extern THREAD_LOCAL PatMatQStat pmqs;
+}
 #endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -23,8 +23,8 @@
 
 #include "conversion_state.h"
 #include "helpers/converter.h"
-#include "rule_states/rule_api.h"
 #include "helpers/s2l_util.h"
+#include "rule_api.h"
 
 namespace rules
 {
@@ -34,21 +34,20 @@ template<const std::string* option_name>
 class Content : public ConversionState
 {
 public:
-    Content(Converter& c) : ConversionState(c), sticky_buffer_set(false) { }
-    virtual ~Content() { }
-    virtual bool convert(std::istringstream& data);
+    Content(Converter& c, bool val) : ConversionState(c), sticky_buffer_set(val) { }
+    bool convert(std::istringstream& data) override;
 
 private:
     bool sticky_buffer_set;
-    bool parse_options(std::istringstream&, std::string, std::string);
-    void add_sticky_buffer(std::istringstream&, std::string buffer);
+    bool parse_options(std::istringstream&, const std::string&, std::string);
+    void add_sticky_buffer(std::istringstream&, const std::string& buffer);
     bool extract_payload(std::istringstream& data_stream,
         std::string& option);
 };
 } // namespace
 
 template<const std::string* option_name>
-void Content<option_name>::add_sticky_buffer(std::istringstream& data_stream, std::string buffer)
+void Content<option_name>::add_sticky_buffer(std::istringstream& data_stream, const std::string& buffer)
 {
     if (sticky_buffer_set)
     {
@@ -63,77 +62,83 @@ void Content<option_name>::add_sticky_buffer(std::istringstream& data_stream, st
 template<const std::string* option_name>
 bool Content<option_name>::parse_options(
     std::istringstream& data_stream,
-    std::string keyword,
+    const std::string& keyword,
     std::string val)
 {
-    if (!keyword.compare("offset"))
+    if (keyword == "offset")
         rule_api.add_suboption("offset", val);
 
-    else if (!keyword.compare("distance"))
+    else if (keyword == "distance")
         rule_api.add_suboption("distance", val);
 
-    else if (!keyword.compare("within"))
+    else if (keyword == "within")
         rule_api.add_suboption("within", val);
 
-    else if (!keyword.compare("depth"))
+    else if (keyword == "depth")
         rule_api.add_suboption("depth", val);
 
-    else if (!keyword.compare("nocase"))
+    else if (keyword == "nocase")
         rule_api.add_suboption("nocase");
 
-    else if (!keyword.compare("hash"))   // PROTECTED CONTENT
+    else if (keyword == "hash")   // PROTECTED CONTENT
         rule_api.add_suboption("hash", val);
 
-    else if (!keyword.compare("length"))  // PROTECTED CONTENT
+    else if (keyword == "length")  // PROTECTED CONTENT
         rule_api.add_suboption("length", val);
 
-    else if (!keyword.compare("rawbytes"))
-        add_sticky_buffer(data_stream, "pkt_data");
+    else if (keyword == "rawbytes")
+        add_sticky_buffer(data_stream, "raw_data");
 
-    else if (!keyword.compare("http_client_body"))
+    else if (keyword == "http_client_body")
         add_sticky_buffer(data_stream, "http_client_body");
 
-    else if (!keyword.compare("http_cookie"))
+    else if (keyword == "http_cookie")
         add_sticky_buffer(data_stream, "http_cookie");
 
-    else if (!keyword.compare("http_raw_cookie"))
+    else if (keyword == "http_raw_cookie")
         add_sticky_buffer(data_stream, "http_raw_cookie");
 
-    else if (!keyword.compare("http_header"))
+    else if (keyword == "http_header")
         add_sticky_buffer(data_stream, "http_header");
 
-    else if (!keyword.compare("http_raw_header"))
+    else if (keyword == "http_raw_header")
         add_sticky_buffer(data_stream, "http_raw_header");
 
-    else if (!keyword.compare("http_method"))
+    else if (keyword == "http_method")
         add_sticky_buffer(data_stream, "http_method");
 
-    else if (!keyword.compare("http_uri"))
+    else if (keyword == "http_uri")
         add_sticky_buffer(data_stream, "http_uri");
 
-    else if (!keyword.compare("http_raw_uri"))
+    else if (keyword == "http_raw_uri")
         add_sticky_buffer(data_stream, "http_raw_uri");
 
-    else if (!keyword.compare("http_stat_code"))
+    else if (keyword == "http_stat_code")
         add_sticky_buffer(data_stream, "http_stat_code");
 
-    else if (!keyword.compare("http_stat_msg"))
+    else if (keyword == "http_stat_msg")
         add_sticky_buffer(data_stream, "http_stat_msg");
 
-    else if (!keyword.compare("fast_pattern"))
+    else if (keyword == "fast_pattern")
     {
         if (val.empty())
         {
             rule_api.add_suboption("fast_pattern");
         }
-        else if (!val.compare("only"))
+        else if (val == "only")
         {
             static bool not_printed = true;
             if ( not_printed )
             {
-                rule_api.add_comment("content's 'only' option has been deleted");
+                rule_api.add_comment("fast_pattern's 'only' option has been deleted");
                 not_printed = false;
             }
+            rule_api.add_suboption("fast_pattern");
+
+            // FIXIT-L ideally we'd prevent doubling up nocase but in practice Talos
+            // doesn't use nocase with fast_pattern:only because it is implied and
+            // Snort 3 will accept contents with multiple nocase.
+            rule_api.add_suboption("nocase");
         }
         else
         {
@@ -197,7 +202,7 @@ bool Content<option_name>::convert(std::istringstream& data_stream)
     std::string val;
     std::streamoff pos;
 
-    if (!(*option_name).compare("protected_content"))
+    if ((*option_name) == "protected_content")
         rule_api.bad_rule(data_stream, "protected_content is currently unsupported");
 
     std::string arg = util::get_rule_option_args(data_stream);
@@ -216,10 +221,9 @@ bool Content<option_name>::convert(std::istringstream& data_stream)
     while ( extract_payload(arg_stream, keyword) )
     {
         std::istringstream opts(keyword);
-        std::string tmp_str;
         val = "";
 
-        opts >> keyword;  // gauranteed to work since get_string is true
+        opts >> keyword;  // guaranteed to work since get_string is true
         std::getline(opts, val);
 
         util::trim(keyword);
@@ -254,7 +258,7 @@ bool Content<option_name>::convert(std::istringstream& data_stream)
                 add_sticky_buffer(data_stream, "pkt_data");
 
             // since this option is not an content modifier,
-            // lets coninue parsing the rest of the rule.
+            // lets continue parsing the rest of the rule.
             data_stream.clear();
             data_stream.seekg(pos);
             return set_next_rule_state(data_stream);
@@ -281,7 +285,7 @@ bool Content<option_name>::convert(std::istringstream& data_stream)
 template<const std::string* rule_name>
 static ConversionState* content_ctor(Converter& c)
 {
-    return new Content<rule_name>(c);
+    return new Content<rule_name>(c, false);
 }
 
 static const std::string content = "content";
@@ -292,9 +296,9 @@ static const std::string uricontent = "uricontent";
 //  So, just add the 'http_uri' option first, then parse as if content
 static ConversionState* uricontent_ctor(Converter& c)
 {
-    c.get_rule_api().add_option("http_uri");
     c.get_rule_api().add_comment("uricontent deprecated --> 'http_uri: content:'foo'");
-    return new Content<& content>(c);
+    c.get_rule_api().set_curr_options_buffer("http_uri", true);
+    return new Content<& content>(c, true);
 }
 
 static const ConvertMap rule_content_api =

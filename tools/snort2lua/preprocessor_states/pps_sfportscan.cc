@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,19 +32,15 @@ class PortScan : public ConversionState
 {
 public:
     PortScan(Converter& c) : ConversionState(c) { }
-    virtual ~PortScan() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 
 private:
-    bool parse_list(std::string table_name, std::istringstream& data_stream);
-    bool parse_option(std::string table_name, std::istringstream& data_stream);
-    bool add_portscan_global_option(std::string name, std::istringstream& data_stream);
-    // a wrapper for parse_list.  adds an addition '[..]' around the string
-    bool parse_ip_list(std::string table_name, std::istringstream& data_stream);
+    bool parse_option(const std::string& table_name, std::istringstream& data_stream);
+    bool parse_ip_list(const std::string& table_name, std::istringstream& data_stream);
 };
 } // namespace
 
-bool PortScan::parse_ip_list(std::string list_name, std::istringstream& data_stream)
+bool PortScan::parse_ip_list(const std::string& list_name, std::istringstream& data_stream)
 {
     std::string prev;
     std::string elem;
@@ -59,61 +55,30 @@ bool PortScan::parse_ip_list(std::string list_name, std::istringstream& data_str
     prev = "[" + elem;
 
     while (data_stream >> elem && elem != "}")
-        prev = prev + ' ' + elem;
+    {
+        prev += ' ';
+        prev += elem;
+    }
 
     prev = prev + "]";
     return table_api.add_option(list_name, prev);
 }
 
-bool PortScan::parse_list(std::string list_name, std::istringstream& data_stream)
+bool PortScan::parse_option(const std::string& var_name, std::istringstream& data_stream)
 {
-    std::string elem;
-    bool retval = true;
+    std::string val, delim;
 
-    if (!(data_stream >> elem) || (elem != "{"))
-        return false;
-
-    while (data_stream >> elem && elem != "}")
-        retval && table_api.add_list(list_name, elem) && retval;
-
-    return retval;
-}
-
-bool PortScan::parse_option(std::string list_name, std::istringstream& data_stream)
-{
-    std::string elem;
-    bool retval = true;
-
-    if (!(data_stream >> elem) || (elem != "{"))
-        return false;
-
-    while (data_stream >> elem && elem != "}")
-        retval && table_api.add_option(list_name, elem) && retval;
-
-    return retval;
-}
-
-bool PortScan::add_portscan_global_option(std::string name, std::istringstream& data_stream)
-{
-    int val;
-    std::string garbage;
-
-    if (!(data_stream >> garbage) || (garbage != "{"))
+    if (!(data_stream >> delim) || (delim != "{"))
         return false;
 
     if (!(data_stream >> val))
         return false;
 
-    table_api.close_table();
-    table_api.open_table("port_scan_global");
-    bool retval = table_api.add_option(name, val);
-    table_api.close_table();
-    table_api.open_table("port_scan");
-
-    if (!(data_stream >> garbage) || (garbage != "}"))
+    if (!(data_stream >> delim) || (delim != "}"))
         return false;
 
-    return retval;
+    int num = std::stoi(val);
+    return table_api.add_option(var_name, num);
 }
 
 bool PortScan::convert(std::istringstream& data_stream)
@@ -126,45 +91,48 @@ bool PortScan::convert(std::istringstream& data_stream)
     {
         bool tmpval = true;
 
-        if (!keyword.compare("sense_level"))
-            tmpval = parse_option("sense_level", data_stream);
-
-        else if (!keyword.compare("watch_ip"))
+        if (keyword == "sense_level")
+        {
+            table_api.add_deleted_comment("sense_level");
+            if (!util::get_string(data_stream, keyword, "}"))
+                tmpval = false;
+        }
+        else if (keyword == "watch_ip")
             tmpval = parse_ip_list("watch_ip", data_stream);
 
-        else if (!keyword.compare("ignore_scanned"))
+        else if (keyword == "ignore_scanned")
             tmpval = parse_ip_list("ignore_scanners", data_stream);
 
-        else if (!keyword.compare("ignore_scanners"))
+        else if (keyword == "ignore_scanners")
             tmpval = parse_ip_list("ignore_scanned", data_stream);
 
-        else if (!keyword.compare("include_midstream"))
+        else if (keyword == "include_midstream")
             tmpval = table_api.add_option("include_midstream", true);
 
-        else if (!keyword.compare("disabled"))
+        else if (keyword == "disabled")
             table_api.add_deleted_comment("disabled");
 
-        else if (!keyword.compare("detect_ack_scans"))
+        else if (keyword == "detect_ack_scans")
             table_api.add_deleted_comment("detect_ack_scans");
 
-        else if (!keyword.compare("logfile"))
+        else if (keyword == "logfile")
         {
             if (!util::get_string(data_stream, keyword, "}"))
                 tmpval = false;
             table_api.add_deleted_comment("logfile");
         }
-        else if (!keyword.compare("memcap"))
-            tmpval = add_portscan_global_option("memcap", data_stream);
+        else if (keyword == "memcap")
+            tmpval = parse_option("memcap", data_stream);
 
-        else if (!keyword.compare("proto"))
+        else if (keyword == "proto")
         {
             table_api.add_diff_option_comment("proto", "protos");
-            retval = parse_curly_bracket_list("protos", data_stream) && retval;
+            tmpval = parse_curly_bracket_list("protos", data_stream);
         }
-        else if (!keyword.compare("scan_type"))
+        else if (keyword == "scan_type")
         {
             table_api.add_diff_option_comment("scan_type", "scan_types");
-            tmpval = parse_curly_bracket_list("scan_types", data_stream) && retval;
+            tmpval = parse_curly_bracket_list("scan_types", data_stream);
         }
         else
             tmpval = false;
@@ -173,7 +141,7 @@ bool PortScan::convert(std::istringstream& data_stream)
             retval = tmpval;
     }
 
-    table_api.close_table(); // unecessary since the state will be reset
+    table_api.close_table(); // unnecessary since the state will be reset
     return retval;
 }
 

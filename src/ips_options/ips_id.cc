@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,22 +17,18 @@
 //--------------------------------------------------------------------------
 // ips_id.cc author Russ Combs <rucombs@cisco.com>
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include "snort_types.h"
-#include "protocols/packet.h"
-#include "snort_debug.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
 #include "framework/range.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "id"
 
@@ -48,7 +44,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     RangeCheck config;
@@ -60,52 +56,49 @@ private:
 
 uint32_t IpIdOption::hash() const
 {
-    uint32_t a,b,c;
+    uint32_t a = config.op;
+    uint32_t b = config.min;
+    uint32_t c = config.max;
 
-    a = config.op;
-    b = config.min;
-    c = config.max;
+    mix(a,b,c);
+    a += IpsOption::hash();
 
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
-
+    finalize(a,b,c);
     return c;
 }
 
 bool IpIdOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    IpIdOption& rhs = (IpIdOption&)ips;
+    const IpIdOption& rhs = (const IpIdOption&)ips;
     return ( config == rhs.config );
 }
 
-int IpIdOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus IpIdOption::eval(Cursor&, Packet* p)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
-    PROFILE_VARS;
+    RuleProfile profile(ipIdPerfStats);
 
     if (!p->has_ip())
-        return rval;
-
-    MODULE_PROFILE_START(ipIdPerfStats);
+        return NO_MATCH;
 
     if ( config.eval(p->ptrs.ip_api.id()) )
-        rval = DETECTION_OPTION_MATCH;
+        return MATCH;
 
-    MODULE_PROFILE_END(ipIdPerfStats);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
 // module
 //-------------------------------------------------------------------------
 
+#define RANGE "0:"
+
 static const Parameter s_params[] =
 {
-    { "~range", Parameter::PT_STRING, nullptr, nullptr,
-      "check if the IP ID is 'id | min<>max | <max | >min'" },
+    { "~range", Parameter::PT_INTERVAL, RANGE, nullptr,
+      "check if the IP ID is in the given range" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -124,6 +117,10 @@ public:
     ProfileStats* get_profile() const override
     { return &ipIdPerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     RangeCheck data;
 };
 
@@ -138,7 +135,7 @@ bool IpIdModule::set(const char*, Value& v, SnortConfig*)
     if ( !v.is("~range") )
         return false;
 
-    return data.parse(v.get_string());
+    return data.validate(v.get_string(), RANGE);
 }
 
 //-------------------------------------------------------------------------
@@ -197,11 +194,11 @@ static const IpsApi id_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_id[] =
+#endif
 {
     &id_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_id = &id_api.base;
-#endif
 

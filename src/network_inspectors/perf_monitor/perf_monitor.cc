@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -28,315 +28,383 @@
 #include "config.h"
 #endif
 
-#include <stdlib.h>
-#include <ctype.h>
-#include <errno.h>
-#include <unistd.h>
-#include <sys/stat.h>
+#include "perf_monitor.h"
 
-#include <string>
+#include "framework/data_bus.h"
+#include "hash/hash_defs.h"
+#include "hash/xhash.h"
+#include "log/messages.h"
+#include "main/analyzer_command.h"
+#include "main/thread.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
 
-#include "perf.h"
-#include "perf_base.h"
-#include "perf_module.h"
-#include "main/analyzer.h"
-#include "snort_types.h"
-#include "util.h"
-#include "snort_debug.h"
-#include "parser.h"
-#include "packet_io/sfdaq.h"
-#include "profiler.h"
-#include "framework/inspector.h"
-#include "utils/stats.h"
+#ifdef UNIT_TEST
+#include "catch/snort_catch.h"
+#endif
 
-THREAD_LOCAL SFPERF* perfmon_config = nullptr;
+using namespace snort;
 
-THREAD_LOCAL SimpleStats pmstats;
+THREAD_LOCAL PerfPegStats pmstats;
 THREAD_LOCAL ProfileStats perfmonStats;
 
-/* This function changes the perfmon log files permission if exists.
-   It is done in the  PerfMonitorInit() before Snort changed its user & group.
- */
-// FIXIT-L this should be deleted; was added as 1-time workaround to
-// get around the borked perms due to a bug that has been fixed
-static void PerfMonitorChangeLogFilesPermission(void)
-{
-    struct stat pt;
-    mode_t mode =  S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH;
+static THREAD_LOCAL std::vector<PerfTracker*>* trackers;
+static THREAD_LOCAL FlowIPTracker* flow_ip_tracker = nullptr;
 
-    if (perfmon_config == NULL)
-        return;
-
-    if (perfmon_config->file != NULL)
-    {
-        /*Check file before change permission*/
-        if (stat(perfmon_config->file, &pt) == 0)
-        {
-            /*Only change permission for file owned by root*/
-            if ((0 == pt.st_uid) || (0 == pt.st_gid))
-            {
-                if (chmod(perfmon_config->file, mode) != 0)
-                {
-                    ParseError("perfmonitor: Unable to change mode of "
-                        "base stats file '%s' to mode:%d: %s.",
-                        perfmon_config->file, mode, get_error(errno));
-                    return;
-                }
-
-                if (chown(perfmon_config->file, SnortConfig::get_uid(), SnortConfig::get_gid()) != 0)
-                {
-                    ParseError("perfmonitor: Unable to change permissions of "
-                        "base stats file '%s' to user:%d and group:%d: %s.",
-                        perfmon_config->file, SnortConfig::get_uid(), SnortConfig::get_gid(), get_error(errno));
-                    return;
-                }
-            }
-        }
-    }
-
-    if (perfmon_config->flow_file != NULL)
-    {
-        /*Check file before change permission*/
-        if (stat(perfmon_config->flow_file, &pt) == 0)
-        {
-            /*Only change permission for file owned by root*/
-            if ((0 == pt.st_uid) || (0 == pt.st_gid))
-            {
-                if (chmod(perfmon_config->flow_file, mode) != 0)
-                {
-                    ParseError("perfmonitor: Unable to change mode of "
-                        "flow stats file '%s' to mode:%d: %s.",
-                        perfmon_config->flow_file, mode, get_error(errno));
-                    return;
-                }
-
-                if (chown(perfmon_config->flow_file, SnortConfig::get_uid(), SnortConfig::get_gid()) != 0)
-                {
-                    ParseError("perfmonitor: Unable to change permissions of "
-                        "flow stats file '%s' to user:%d and group:%d: %s.",
-                        perfmon_config->flow_file, SnortConfig::get_uid(), SnortConfig::get_gid(), get_error(errno));
-                    return;
-                }
-            }
-        }
-    }
-
-    if (perfmon_config->flowip_file != NULL)
-    {
-        /*Check file before change permission*/
-        if (stat(perfmon_config->flowip_file, &pt) == 0)
-        {
-            /*Only change permission for file owned by root*/
-            if ((0 == pt.st_uid) || (0 == pt.st_gid))
-            {
-                if (chmod(perfmon_config->flowip_file, mode) != 0)
-                {
-                    ParseError("perfmonitor: Unable to change mode of "
-                        "flow-ip stats file '%s' to mode:%d: %s.",
-                        perfmon_config->flowip_file, mode, get_error(errno));
-                    return;
-                }
-
-                if (chown(perfmon_config->flowip_file, SnortConfig::get_uid(), SnortConfig::get_gid()) != 0)
-                {
-                    ParseError("perfmonitor: Unable to change permissions of "
-                        "flow-ip stats file '%s' to user:%d and group:%d: %s.",
-                        perfmon_config->flowip_file, SnortConfig::get_uid(), SnortConfig::get_gid(), get_error(errno));
-                    return;
-                }
-            }
-        }
-    }
-}
-
-static void PrintConfig(SFPERF* pconfig)
-{
-    if ((pconfig->perf_flags & SFPERF_SUMMARY) != SFPERF_SUMMARY)
-        pconfig->perf_flags |= SFPERF_TIME_COUNT;
-
-    LogMessage("PerfMonitor config:\n");
-    LogMessage("  Sample Time:      %d seconds\n", pconfig->sample_interval);
-    LogMessage("  Packet Count:     %d\n", pconfig->pkt_cnt);
-    LogMessage("  Max File Size:    %u\n", pconfig->max_file_size);
-    LogMessage("  Base Stats:       %s%s\n",
-        pconfig->perf_flags & SFPERF_BASE ? "ACTIVE" : "INACTIVE",
-        pconfig->perf_flags & SFPERF_SUMMARY_BASE ? " (SUMMARY)" : "");
-    if (pconfig->perf_flags & SFPERF_BASE)
-    {
-        LogMessage("    Base Stats File:  %s\n",
-            (pconfig->file != NULL) ? pconfig->file : "INACTIVE");
-        LogMessage("    Max Perf Stats:   %s\n",
-            (pconfig->perf_flags & SFPERF_MAX_BASE_STATS) ? "ACTIVE" : "INACTIVE");
-    }
-    LogMessage("  Flow Stats:       %s%s\n",
-        pconfig->perf_flags & SFPERF_FLOW ? "ACTIVE" : "INACTIVE",
-        pconfig->perf_flags & SFPERF_SUMMARY_FLOW ? " (SUMMARY)" : "");
-    if (pconfig->perf_flags & SFPERF_FLOW)
-    {
-        LogMessage("    Max Flow Port:    %u\n", pconfig->flow_max_port_to_track);
-        LogMessage("    Flow File:        %s\n",
-            (pconfig->flow_file != NULL) ? pconfig->flow_file : "INACTIVE");
-    }
-    LogMessage("  Event Stats:      %s%s\n",
-        pconfig->perf_flags & SFPERF_EVENT ? "ACTIVE" : "INACTIVE",
-        pconfig->perf_flags & SFPERF_SUMMARY_EVENT ? " (SUMMARY)" : "");
-    LogMessage("  Flow IP Stats:    %s%s\n",
-        pconfig->perf_flags & SFPERF_FLOWIP ? "ACTIVE" : "INACTIVE",
-        pconfig->perf_flags & SFPERF_SUMMARY_FLOWIP ? " (SUMMARY)" : "");
-    if (pconfig->perf_flags & SFPERF_FLOWIP)
-    {
-        LogMessage("    Flow IP Memcap:   %u\n", pconfig->flowip_memcap);
-        LogMessage("    Flow IP File:     %s\n",
-            (pconfig->flowip_file != NULL) ? pconfig->flowip_file : "INACTIVE");
-    }
-    LogMessage("  Console Mode:     %s\n",
-        (pconfig->perf_flags & SFPERF_CONSOLE) ? "ACTIVE" : "INACTIVE");
-}
+static THREAD_LOCAL PerfConstraints* t_constraints;
 
 //-------------------------------------------------------------------------
 // class stuff
 //-------------------------------------------------------------------------
 
-class PerfMonitor : public Inspector
+class PerfIdleHandler : public DataHandler
 {
 public:
-    PerfMonitor(PerfMonModule*);
-    ~PerfMonitor();
+    PerfIdleHandler(PerfMonitor& p, SnortConfig*& sc) : DataHandler(PERF_NAME), perf_monitor(p)
+    { DataBus::subscribe_global(THREAD_IDLE_EVENT, this, sc); }
 
-    bool configure(SnortConfig*) override;
-    void show(SnortConfig*) override;
-
-    void eval(Packet*) override;
-
-    void tinit() override;
-    void tterm() override;
+    void handle(DataEvent&, Flow*) override
+    { perf_monitor.eval(nullptr); }
 
 private:
-    SFPERF config;
+    PerfMonitor& perf_monitor;
 };
 
-PerfMonitor::PerfMonitor(PerfMonModule* mod)
+class PerfRotateHandler : public DataHandler
 {
-    mod->get_config(config);
-}
+public:
+    PerfRotateHandler(PerfMonitor& p, SnortConfig* sc) : DataHandler(PERF_NAME), perf_monitor(p)
+    { DataBus::subscribe_global(THREAD_ROTATE_EVENT, this, sc); }
 
-PerfMonitor::~PerfMonitor ()
+    void handle(DataEvent&, Flow*) override
+    { perf_monitor.rotate(); }
+
+private:
+    PerfMonitor& perf_monitor;
+};
+
+class FlowIPDataHandler : public DataHandler
 {
-    if ( config.file )
-        free(config.file);
+public:
+    FlowIPDataHandler(PerfMonitor& p, SnortConfig* sc) : DataHandler(PERF_NAME), perf_monitor(p)
+    { DataBus::subscribe_global(FLOW_STATE_EVENT, this, sc); }
 
-    if ( config.flow_file )
-        free(config.flow_file);
-
-    if ( config.flowip_file )
-        free(config.flowip_file);
-}
-
-void PerfMonitor::show(SnortConfig*)
-{
-    PrintConfig(&config);
-}
-
-// FIXIT-L perfmonitor should be logging to one file and writing record type and
-// version fields immediately after timestamp like
-// seconds, usec, type, version#, data1, data2, ...
-bool PerfMonitor::configure(SnortConfig*)
-{
-    PerfMonitorChangeLogFilesPermission();
-    std::string name;
-
-    if ( config.file )
+    void handle(DataEvent&, Flow* flow) override
     {
-        const char* file = get_instance_file(name, config.file);
+        FlowIPTracker* tracker = perf_monitor.get_flow_ip();
 
-        if ( (config.fh = sfOpenBaseStatsFile(file)) == NULL )
+        if (!tracker)
+            return;
+
+        FlowState state = SFS_STATE_MAX;
+
+        if ( flow->pkt_type == PktType::UDP )
+            state = SFS_STATE_UDP_CREATED;
+
+        if ( flow->pkt_type == PktType::TCP )
         {
-            ParseError("perfmonitor: Cannot open base stats file '%s'.", file);
-            return false;
+            if ( flow->get_session_flags() & SSNFLAG_COUNTED_ESTABLISH )
+                state = SFS_STATE_TCP_ESTABLISHED;
+
+            if ( flow->get_session_flags() & SSNFLAG_COUNTED_CLOSED )
+                state = SFS_STATE_TCP_CLOSED;
         }
+
+        if ( state == SFS_STATE_MAX )
+            return;
+
+        tracker->update_state(&flow->client_ip, &flow->server_ip, state);
     }
 
-    if ( config.flow_file )
-    {
-        const char* file = get_instance_file(name, config.flow_file);
+private:
+    PerfMonitor& perf_monitor;
+};
 
-        if ( (config.flow_fh = sfOpenFlowStatsFile(file)) == NULL )
-        {
-            ParseError("perfmonitor: Cannot open flow stats file '%s'.", file);
-            return false;
-        }
+PerfMonitor::PerfMonitor(PerfConfig* pcfg) : config(pcfg)
+{ assert (config != nullptr); }
+
+static const char* to_string(const PerfOutput& po)
+{
+    switch (po)
+    {
+    case PerfOutput::TO_CONSOLE:
+        return "console";
+    case PerfOutput::TO_FILE:
+        return "file";
     }
 
-    if ( config.flowip_file )
-    {
-        const char* file = get_instance_file(name, config.flowip_file);
+    return "";
+}
 
-        if ( (config.flowip_fh = sfOpenFlowIPStatsFile(file)) == NULL )
-        {
-            ParseError("perfmonitor: Cannot open flow-ip stats file '%s'.", file);
-            return false;
-        }
+static const char* to_string(const PerfFormat& pf)
+{
+    switch (pf)
+    {
+    case PerfFormat::TEXT:
+        return "text";
+    case PerfFormat::CSV:
+        return "csv";
+    case PerfFormat::JSON:
+        return "json";
+#ifdef HAVE_FLATBUFFERS
+    case PerfFormat::FBS:
+        return "flatbuffers";
+#endif
+    case PerfFormat::MOCK:
+        return "mock";
     }
-    return true;
+
+    return "";
+}
+
+void PerfMonitor::show(const SnortConfig*) const
+{
+    ConfigLogger::log_flag("base", config->perf_flags & PERF_BASE);
+    ConfigLogger::log_flag("cpu", config->perf_flags & PERF_CPU);
+    ConfigLogger::log_flag("summary", config->perf_flags & PERF_SUMMARY);
+
+    if ( ConfigLogger::log_flag("flow", config->perf_flags & PERF_FLOW) )
+        ConfigLogger::log_value("flow_ports", config->flow_max_port_to_track);
+
+    if ( ConfigLogger::log_flag("flow_ip", config->perf_flags & PERF_FLOWIP) )
+        ConfigLogger::log_value("flow_ip_memcap", static_cast<uint64_t>(config->flowip_memcap));
+
+    ConfigLogger::log_value("packets", config->pkt_cnt);
+    ConfigLogger::log_value("seconds", config->sample_interval);
+    ConfigLogger::log_value("max_file_size", config->max_file_size);
+
+    ConfigLogger::log_value("output", to_string(config->output));
+    ConfigLogger::log_value("format", to_string(config->format));
+}
+
+void PerfMonitor::disable_tracker(size_t i)
+{
+    WarningMessage("Disabling %s\n", (*trackers)[i]->get_name().c_str());
+    auto tracker = trackers->at(i);
+
+    if ( tracker == flow_ip_tracker )
+        flow_ip_tracker = nullptr;
+
+    (*trackers)[i] = (*trackers)[trackers->size() - 1];
+    trackers->pop_back();
+    delete tracker;
+}
+
+// FIXIT-L perfmonitor should be logging to one file and writing record
+// type and version fields immediately after timestamp like seconds, usec,
+// type, version#, data1, data2, ...
+
+bool PerfMonitor::configure(SnortConfig* sc)
+{
+    new PerfIdleHandler(*this, sc);
+    new PerfRotateHandler(*this, sc);
+    new FlowIPDataHandler(*this, sc);
+
+    return config->resolve();
 }
 
 void PerfMonitor::tinit()
 {
-    InitPerfStats(&config);
+    trackers = new std::vector<PerfTracker*>();
+
+    t_constraints = config->constraints;
+
+    if (config->perf_flags & PERF_BASE)
+        trackers->emplace_back(new BaseTracker(config));
+
+    if (config->perf_flags & PERF_FLOW)
+        trackers->emplace_back(new FlowTracker(config));
+
+    flow_ip_tracker = new FlowIPTracker(config);
+    if (config->perf_flags & PERF_FLOWIP)
+        trackers->emplace_back(flow_ip_tracker);
+
+    if (config->perf_flags & PERF_CPU )
+        trackers->emplace_back(new CPUTracker(config));
+
+    for (unsigned i = 0; i < trackers->size(); i++)
+    {
+        if (!(*trackers)[i]->open(true))
+            disable_tracker(i--);
+    }
+
+    for (auto& tracker : *trackers)
+        tracker->reset();
+}
+
+bool PerfMonReloadTuner::tinit()
+{
+    PerfMonitor* pm = (PerfMonitor*)InspectorManager::get_inspector(PERF_NAME, true);
+    auto* new_constraints = pm->get_constraints();
+
+    if (new_constraints->flow_ip_enabled)
+    {
+        pm->enable_profiling(new_constraints);
+        return flow_ip_tracker->initialize(memcap);
+    }
+    else
+        pm->disable_profiling(new_constraints);
+
+    return false;
+}
+
+bool PerfMonReloadTuner::tune_resources(unsigned work_limit)
+{
+    if (t_constraints->flow_ip_enabled)
+    {
+        unsigned num_freed = 0;
+        int result = flow_ip_tracker->get_ip_map()->tune_memory_resources(work_limit, num_freed);
+        pmstats.flow_tracker_reload_deletes += num_freed;
+        return (result == HASH_OK);
+    }
+
+    return true;
 }
 
 void PerfMonitor::tterm()
 {
-    if ( config.perf_flags & SFPERF_SUMMARY )
-        sfPerfStatsSummary(&config);
+    if (trackers)
+    {
+        while (!trackers->empty())
+        {
+            auto back = trackers->back();
+            if ( config->perf_flags & PERF_SUMMARY )
+                back->process(true);
+            if (back == flow_ip_tracker)
+                flow_ip_tracker = nullptr;
+            delete back;
+            trackers->pop_back();
+        }
+        delete trackers;
+        if (flow_ip_tracker)
+        {
+            delete flow_ip_tracker;
+            flow_ip_tracker = nullptr;
+        }
+    }
+}
 
-    sfCloseBaseStatsFile(&config);
-    sfCloseFlowStatsFile(&config);
-    sfCloseFlowIPStatsFile(&config);
+void PerfMonitor::rotate()
+{
+    for ( unsigned i = 0; i < trackers->size(); i++ )
+        if ( !(*trackers)[i]->rotate() )
+            disable_tracker(i--);
+}
 
-    FreeFlowStats(&sfFlow);
-#ifdef LINUX_SMP
-    FreeProcPidStats(&sfBase.sfProcPidStats);
-#endif
+void PerfMonitor::swap_constraints(PerfConstraints* constraints)
+{
+    PerfConstraints* tmp = config->constraints;
+
+    config->constraints = constraints;
+    delete tmp;
+}
+
+PerfConstraints* PerfMonitor::get_original_constraints()
+{
+    auto* new_constraints = new PerfConstraints(false, config->sample_interval,
+        config->pkt_cnt);
+
+    return new_constraints;
+}
+
+void PerfMonitor::enable_profiling(PerfConstraints* constraints)
+{
+    t_constraints = constraints;
+
+    auto itr = std::find(trackers->begin(), trackers->end(), flow_ip_tracker);
+
+    if (itr != trackers->end())
+        return;
+
+    trackers->emplace_back(flow_ip_tracker);
+
+    if (!flow_ip_tracker->is_open())
+        flow_ip_tracker->open(true);
+}
+
+void PerfMonitor::disable_profiling(PerfConstraints* constraints)
+{
+    t_constraints = constraints;
+
+    auto itr = std::find(trackers->begin(), trackers->end(), flow_ip_tracker);
+
+    if (itr != trackers->end())
+    {
+        trackers->erase(itr);
+        flow_ip_tracker->close();
+    }
 }
 
 void PerfMonitor::eval(Packet* p)
 {
-    static THREAD_LOCAL bool first = true;
-    PROFILE_VARS;
-    MODULE_PROFILE_START(perfmonStats);
+    Profile profile(perfmonStats);
 
-    if (first)
+    if (p)
     {
-        if (SnortConfig::read_mode())
+        for (auto& tracker : *trackers)
         {
-            sfBase.pkt_stats.pkts_recv = pc.total_from_daq;
-            sfBase.pkt_stats.pkts_drop = 0;
+            tracker->update(p);
+            tracker->update_time(p->pkth->ts.tv_sec);
         }
-        else
-        {
-            const DAQ_Stats_t* ps = DAQ_GetStats();
-            sfBase.pkt_stats.pkts_recv = ps->hw_packets_received;
-            sfBase.pkt_stats.pkts_drop = ps->hw_packets_dropped;
-        }
-
-        SetSampleTime(&config, p);
-
-        first = false;
     }
 
-    if (IsSetRotatePerfFileFlag())
+    if ( (!p || !p->is_rebuilt()) && !(config->perf_flags & PERF_SUMMARY) )
     {
-        sfRotateBaseStatsFile(&config);
-        sfRotateFlowStatsFile(&config);
-        ClearRotatePerfFileFlag();
+        if (ready_to_process(p))
+        {
+            for (unsigned i = 0; i < trackers->size(); i++)
+            {
+                (*trackers)[i]->process(false);
+                if (!(*trackers)[i]->auto_rotate())
+                    disable_tracker(i--);
+            }
+        }
     }
 
-    sfPerformanceStats(&config, p);
-    ++pmstats.total_packets;
-
-    MODULE_PROFILE_END(perfmonStats);
+    if (p)
+        ++pmstats.total_packets;
 }
+
+bool PerfMonitor::ready_to_process(Packet* p)
+{
+    static THREAD_LOCAL time_t sample_time = 0;
+    static THREAD_LOCAL time_t cur_time = 0;
+    static THREAD_LOCAL uint64_t cnt = 0;
+
+    // FIXIT-M find a more graceful way to handle idle processing being called prior to receiving
+    // packets and issues with more general lack of synchronization between OS time and incoming
+    // packet timestamps.
+    if (p)
+    {
+        cnt++;
+        cur_time = p->pkth->ts.tv_sec;
+    }
+    else if (cur_time)
+        cur_time = time(nullptr);
+    else
+        return false;
+
+    if (!sample_time)
+        sample_time = cur_time;
+
+    if ( cnt >= t_constraints->pkt_cnt )
+    {
+        if ((cur_time - sample_time) >= t_constraints->sample_interval)
+        {
+            if (cnt == 0)
+                for (auto& tracker : *trackers)
+                    tracker->update_time(cur_time);
+
+            cnt = 0;
+            sample_time = cur_time;
+            return true;
+        }
+    }
+    return false;
+}
+
+FlowIPTracker* PerfMonitor::get_flow_ip()
+{ return t_constraints->flow_ip_enabled ? flow_ip_tracker : nullptr; }
 
 //-------------------------------------------------------------------------
 // api stuff
@@ -349,19 +417,10 @@ static void mod_dtor(Module* m)
 { delete m; }
 
 static Inspector* pm_ctor(Module* m)
-{
-    static THREAD_LOCAL unsigned s_init = true;
-
-    if ( !s_init )
-        return nullptr;
-
-    return new PerfMonitor((PerfMonModule*)m);
-}
+{ return new PerfMonitor(((PerfMonModule*)m)->get_config()); }
 
 static void pm_dtor(Inspector* p)
-{
-    delete p;
-}
+{ delete p; }
 
 static const InspectApi pm_api =
 {
@@ -378,7 +437,7 @@ static const InspectApi pm_api =
         mod_dtor
     },
     IT_PROBE,
-    (uint16_t)PktType::ANY,
+    PROTO_BIT__ANY_TYPE,
     nullptr, // buffers
     nullptr, // service
     nullptr, // pinit
@@ -391,5 +450,61 @@ static const InspectApi pm_api =
     nullptr  // reset
 };
 
-const BaseApi* nin_perf_monitor = &pm_api.base;
+#ifdef BUILDING_SO
+SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* nin_perf_monitor[] =
+#endif
+{
+    &pm_api.base,
+    nullptr
+};
 
+#ifdef UNIT_TEST
+TEST_CASE("Process timing logic", "[perfmon]")
+{
+    PerfMonModule mod;
+    PerfConfig* config = new PerfConfig;
+    mod.set_config(config);
+    PerfMonitor perfmon(mod.get_config());
+
+    Packet p(false);
+    DAQ_PktHdr_t pkth;
+    p.pkth = &pkth;
+
+    t_constraints = config->constraints;
+
+    t_constraints->pkt_cnt = 0;
+    t_constraints->sample_interval = 0;
+    pkth.ts.tv_sec = 0;
+    REQUIRE((perfmon.ready_to_process(&p) == true));
+    pkth.ts.tv_sec = 1;
+    REQUIRE((perfmon.ready_to_process(&p) == true));
+
+    t_constraints->pkt_cnt = 2;
+    t_constraints->sample_interval = 0;
+    pkth.ts.tv_sec = 2;
+    REQUIRE((perfmon.ready_to_process(&p) == false));
+    pkth.ts.tv_sec = 3;
+    REQUIRE((perfmon.ready_to_process(&p) == true));
+
+    t_constraints->pkt_cnt = 0;
+    t_constraints->sample_interval = 2;
+    pkth.ts.tv_sec = 4;
+    REQUIRE((perfmon.ready_to_process(&p) == false));
+    pkth.ts.tv_sec = 8;
+    REQUIRE((perfmon.ready_to_process(&p) == true));
+    pkth.ts.tv_sec = 10;
+    REQUIRE((perfmon.ready_to_process(&p) == true));
+
+    t_constraints->pkt_cnt = 5;
+    t_constraints->sample_interval = 4;
+    pkth.ts.tv_sec = 11;
+    REQUIRE((perfmon.ready_to_process(&p) == false));
+    pkth.ts.tv_sec = 14;
+    REQUIRE((perfmon.ready_to_process(&p) == false));
+    REQUIRE((perfmon.ready_to_process(&p) == false));
+    REQUIRE((perfmon.ready_to_process(&p) == false));
+    REQUIRE((perfmon.ready_to_process(&p) == true));
+}
+#endif

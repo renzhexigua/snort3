@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,15 +21,14 @@
 #include "config.h"
 #endif
 
-#include "protocols/packet.h"
-#include "snort_debug.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
 #include "framework/range.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "tos"
 
@@ -45,7 +44,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 public:
     RangeCheck config;
@@ -57,24 +56,23 @@ public:
 
 uint32_t IpTosOption::hash() const
 {
-    uint32_t a,b,c;
+    uint32_t a = config.op;
+    uint32_t b = config.min;
+    uint32_t c = config.max;
 
-    a = config.op;
-    b = config.min;
-    c = config.max;
+    mix(a,b,c);
+    a += IpsOption::hash();
 
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
-
+    finalize(a,b,c);
     return c;
 }
 
 bool IpTosOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    IpTosOption& rhs = (IpTosOption&)ips;
+    const IpTosOption& rhs = (const IpTosOption&)ips;
     return ( config == rhs.config );
 }
 
@@ -82,31 +80,29 @@ bool IpTosOption::operator==(const IpsOption& ips) const
  * value in the rule.  This is useful to detect things like the "bubonic" DoS tool.
  */
 
-int IpTosOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus IpTosOption::eval(Cursor&, Packet* p)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
-    PROFILE_VARS;
+    RuleProfile profile(ipTosPerfStats);
 
     if(!p->ptrs.ip_api.is_ip())
-        return rval;
-
-    MODULE_PROFILE_START(ipTosPerfStats);
+        return NO_MATCH;
 
     if ( config.eval(p->ptrs.ip_api.tos()) )
-        rval = DETECTION_OPTION_MATCH;
+        return MATCH;
 
-    MODULE_PROFILE_END(ipTosPerfStats);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
 // module
 //-------------------------------------------------------------------------
 
+#define RANGE "0:255"
+
 static const Parameter s_params[] =
 {
-    { "~range", Parameter::PT_STRING, nullptr, nullptr,
-      "check if packet payload size is 'size | min<>max | <max | >min'" },
+    { "~range", Parameter::PT_INTERVAL, RANGE, nullptr,
+      "check if IP TOS is in given range" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -125,6 +121,10 @@ public:
     ProfileStats* get_profile() const override
     { return &ipTosPerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     RangeCheck data;
 };
 
@@ -139,7 +139,7 @@ bool TosModule::set(const char*, Value& v, SnortConfig*)
     if ( !v.is("~range") )
         return false;
 
-    return data.parse(v.get_string());
+    return data.validate(v.get_string(), RANGE);
 }
 
 //-------------------------------------------------------------------------
@@ -194,11 +194,11 @@ static const IpsApi tos_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_tos[] =
+#endif
 {
     &tos_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_tos = &tos_api.base;
-#endif
 

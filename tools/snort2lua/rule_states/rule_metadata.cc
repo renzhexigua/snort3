@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -22,8 +22,8 @@
 
 #include "conversion_state.h"
 #include "helpers/converter.h"
-#include "rule_states/rule_api.h"
 #include "helpers/s2l_util.h"
+#include "rule_api.h"
 
 namespace rules
 {
@@ -33,8 +33,7 @@ class Metadata : public ConversionState
 {
 public:
     Metadata(Converter& c) : ConversionState(c) { }
-    virtual ~Metadata() { }
-    virtual bool convert(std::istringstream& data);
+    bool convert(std::istringstream& data) override;
 };
 } // namespace
 
@@ -43,9 +42,10 @@ bool Metadata::convert(std::istringstream& data_stream)
     std::string keyword;
     std::string tmp;
     std::string value;
-    std::string soid_val = "";
+    std::string soid_val;
+    std::string service;
 
-    rule_api.add_option("metadata");
+    bool add_opt = true;
 
     tmp = util::get_rule_option_args(data_stream);
     std::istringstream metadata_stream(util::trim(tmp));
@@ -72,22 +72,37 @@ bool Metadata::convert(std::istringstream& data_stream)
         if (value.back() == ',')
             value.pop_back();
 
-        if (!keyword.compare("rule-flushing"))
+        if (keyword == "rule-flushing")
             rule_api.add_comment("metadata: rule-flushing - deprecated");
 
-        else if (!keyword.compare("soid"))
+        else if (keyword == "soid")
             soid_val = value;  // add this after metadata to keep ordering
 
-        else if (!keyword.compare("engine"))
+        else if (keyword == "service")
+        {
+            if ( service.length() )
+                service += ", ";
+            service += value;  // add this after metadata to keep ordering
+        }
+        else if (keyword == "engine")
         {
             rule_api.make_rule_a_comment();
             rule_api.add_comment("metadata: engine - deprecated");
         }
         else
         {
+            if ( add_opt )
+            {
+                // this is to avoid empty metadata (ie "metadata;")
+                rule_api.add_option("metadata");
+                add_opt = false;
+            }
             rule_api.add_suboption(keyword, value);
         }
     }
+
+    if (!service.empty())
+        rule_api.add_option("service", service);
 
     if (!soid_val.empty())
         rule_api.add_option("soid", soid_val);

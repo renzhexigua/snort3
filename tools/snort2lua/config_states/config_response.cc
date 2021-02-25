@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class Response : public ConversionState
 {
 public:
     Response(Converter& c) : ConversionState(c) { }
-    virtual ~Response() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -52,13 +51,13 @@ bool Response::convert(std::istringstream& data_stream)
         if (!util::get_string(data_stream, val, ", "))
             tmpval = false;
 
-        else if (!keyword.compare("attempts"))
+        else if (keyword == "attempts")
             tmpval = table_api.add_option("attempts", std::stoi(val));
 
-        else if (!keyword.compare("device"))
+        else if (keyword == "device")
             tmpval = table_api.add_option("device", val);
 
-        else if (!keyword.compare("dst_mac"))
+        else if (keyword == "dst_mac")
             tmpval = table_api.add_option("dst_mac", val);
 
         else

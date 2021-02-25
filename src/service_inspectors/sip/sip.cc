@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -15,171 +15,88 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-//
-
-/*
- * SIP preprocessor
- *
- *
- */
-
-#include "sip.h"
+// sip.cc author Hui Cao <huica@cisco.com>
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <assert.h>
-#include <string.h>
-#include <stdio.h>
-#include <sys/types.h>
+#include "sip.h"
 
-#include "snort_types.h"
-#include "snort_debug.h"
-
-#include "sip_utils.h"
-#include "sip_module.h"
-#include "profiler.h"
-#include "stream/stream_api.h"
-#include "file_api/file_api.h"
-#include "parser.h"
-#include "framework/inspector.h"
-#include "utils/sfsnprintfappend.h"
-#include "target_based/snort_protocols.h"
-#include "service_inspectors/http_inspect/hi_main.h"
-#include "main/snort_config.h"
+#include "detection/detection_engine.h"
+#include "events/event_queue.h"
+#include "log/messages.h"
 #include "managers/inspector_manager.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+#include "stream/stream_splitter.h"
+
+#include "sip_module.h"
+#include "sip_splitter.h"
+#include "sip_utils.h"
+
+using namespace snort;
 
 THREAD_LOCAL ProfileStats sipPerfStats;
-THREAD_LOCAL SimpleStats sipstats;
 
-/*
- * Function prototype(s)
- */
 static void snort_sip(SIP_PROTO_CONF* GlobalConf, Packet* p);
 static void FreeSipData(void*);
 
-unsigned SipFlowData::flow_id = 0;
-THREAD_LOCAL uint32_t numSessions = 0;
+unsigned SipFlowData::inspector_id = 0;
+
+SipFlowData::SipFlowData() : FlowData(inspector_id)
+{
+    memset(&session, 0, sizeof(session));
+    sip_stats.sessions++;
+    sip_stats.concurrent_sessions++;
+    if(sip_stats.max_concurrent_sessions < sip_stats.concurrent_sessions)
+        sip_stats.max_concurrent_sessions = sip_stats.concurrent_sessions;
+}
 
 SipFlowData::~SipFlowData()
 {
     FreeSipData(&session);
+    assert(sip_stats.concurrent_sessions > 0);
+    sip_stats.concurrent_sessions--;
 }
 
-SIPData* SetNewSIPData(Packet* p, SIP_PROTO_CONF* config)
+static SIPData* SetNewSIPData(Packet* p)
 {
-    static int MaxSessionsAlerted = 0;
-    if (numSessions > config->maxNumSessions)
-    {
-        if (!MaxSessionsAlerted)
-            SnortEventqAdd(GID_SIP, SIP_EVENT_MAX_SESSIONS);
-        MaxSessionsAlerted = 1;
-        return NULL;
-    }
-    else
-    {
-        MaxSessionsAlerted = 0;
-    }
     SipFlowData* fd = new SipFlowData;
-    p->flow->set_application_data(fd);
-    numSessions++;
+    p->flow->set_flow_data(fd);
     return &fd->session;
 }
 
-SIPData* get_sip_session_data(Flow* flow)
+SIPData* get_sip_session_data(const Flow* flow)
 {
-    SipFlowData* fd = (SipFlowData*)flow->get_application_data(
-        SipFlowData::flow_id);
-
-    return fd ? &fd->session : NULL;
+    SipFlowData* fd = (SipFlowData*)flow->get_flow_data(SipFlowData::inspector_id);
+    return fd ? &fd->session : nullptr;
 }
 
 static void FreeSipData(void* data)
 {
     SIPData* ssn = (SIPData*)data;
 
-    if (numSessions > 0)
-        numSessions--;
-
     /*Free all the dialog data*/
     sip_freeDialogs(&ssn->dialogs);
 }
 
-static void PrintSipConf(SIP_PROTO_CONF* config)
+static std::string GetSIPMethods(SIPMethodNode* method)
 {
-    SIPMethodNode* method;
-    if (config == NULL)
-        return;
-    LogMessage("SIP config: \n");
-    LogMessage("    Max number of sessions: %d %s \n",
-        config->maxNumSessions,
-        config->maxNumSessions
-        == SIP_DEFAULT_MAX_SESSIONS ?
-        "(Default)" : "");
-    LogMessage("    Max number of dialogs in a session: %d %s \n",
-        config->maxNumDialogsInSession,
-        config->maxNumDialogsInSession
-        == SIP_DEFAULT_MAX_DIALOGS_IN_SESSION ?
-        "(Default)" : "");
+    std::string cmds;
 
-    LogMessage("    Ignore media channel: %s\n",
-        config->ignoreChannel ?
-        "ENABLED" : "DISABLED");
-    LogMessage("    Max URI length: %d %s \n",
-        config->maxUriLen,
-        config->maxUriLen
-        == SIP_DEFAULT_MAX_URI_LEN ?
-        "(Default)" : "");
-    LogMessage("    Max Call ID length: %d %s \n",
-        config->maxCallIdLen,
-        config->maxCallIdLen
-        == SIP_DEFAULT_MAX_CALL_ID_LEN ?
-        "(Default)" : "");
-    LogMessage("    Max Request name length: %d %s \n",
-        config->maxRequestNameLen,
-        config->maxRequestNameLen
-        == SIP_DEFAULT_MAX_REQUEST_NAME_LEN ?
-        "(Default)" : "");
-    LogMessage("    Max From length: %d %s \n",
-        config->maxFromLen,
-        config->maxFromLen
-        == SIP_DEFAULT_MAX_FROM_LEN ?
-        "(Default)" : "");
-    LogMessage("    Max To length: %d %s \n",
-        config->maxToLen,
-        config->maxToLen
-        == SIP_DEFAULT_MAX_TO_LEN ?
-        "(Default)" : "");
-    LogMessage("    Max Via length: %d %s \n",
-        config->maxViaLen,
-        config->maxViaLen
-        == SIP_DEFAULT_MAX_VIA_LEN ?
-        "(Default)" : "");
-    LogMessage("    Max Contact length: %d %s \n",
-        config->maxContactLen,
-        config->maxContactLen
-        == SIP_DEFAULT_MAX_CONTACT_LEN ?
-        "(Default)" : "");
-    LogMessage("    Max Content length: %d %s \n",
-        config->maxContentLen,
-        config->maxContentLen
-        == SIP_DEFAULT_MAX_CONTENT_LEN ?
-        "(Default)" : "");
-    LogMessage("\n");
-    LogMessage("    Methods:\n");
-    LogMessage("\t%s ",
-        config->methodsConfig
-        == SIP_METHOD_DEFAULT ?
-        "(Default)" : "");
-    method = config->methods;
-    while (NULL != method)
+    for (; method; method = method->nextm)
     {
-        LogMessage(" %s", method->methodName);
-        method = method->nextm;
+        cmds += method->methodName;
+        cmds += " ";
     }
 
-    LogMessage("\n");
+    if ( !cmds.empty() )
+        cmds.pop_back();
+    else
+        cmds += "none";
+
+    return cmds;
 }
 
 /*********************************************************************
@@ -195,9 +112,9 @@ static void PrintSipConf(SIP_PROTO_CONF* config)
  *********************************************************************/
 static inline int SIP_Process(Packet* p, SIPData* sessp, SIP_PROTO_CONF* config)
 {
-    int status;
-    char* sip_buff = (char*)p->data;
-    char* end;
+    bool status;
+    const char* sip_buff = (const char*)p->data;
+    const char* end;
     SIP_Roptions* pRopts;
     SIPMsg sipMsg;
 
@@ -217,23 +134,13 @@ static inline int SIP_Process(Packet* p, SIPData* sessp, SIP_PROTO_CONF* config)
     }
     /*Update the session data*/
     pRopts = &(sessp->ropts);
-    pRopts->methodFlag = sipMsg.methodFlag;
+    pRopts->method_data = sipMsg.method;
+    pRopts->method_len = sipMsg.methodLen;
     pRopts->header_data = sipMsg.header;
     pRopts->header_len = sipMsg.headerLen;
     pRopts->body_len = sipMsg.bodyLen;
     pRopts->body_data = sipMsg.body_data;
     pRopts->status_code = sipMsg.status_code;
-
-    DEBUG_WRAP(DebugMessage(DEBUG_SIP, "SIP message header length: %d\n",
-        sipMsg.headerLen));
-    DEBUG_WRAP(DebugMessage(DEBUG_SIP, "Parsed method: %.*s, Flag: 0x%x\n",
-        sipMsg.methodLen, sipMsg.method, sipMsg.methodFlag));
-    DEBUG_WRAP(DebugMessage(DEBUG_SIP, "Parsed status code:  %d\n",
-        sipMsg.status_code));
-    DEBUG_WRAP(DebugMessage(DEBUG_SIP, "Parsed header address: %p.\n",
-        sipMsg.header));
-    DEBUG_WRAP(DebugMessage(DEBUG_SIP, "Parsed body address: %p.\n",
-        sipMsg.body_data));
 
     sip_freeMsg(&sipMsg);
     return status;
@@ -251,39 +158,28 @@ static inline int SIP_Process(Packet* p, SIPData* sessp, SIP_PROTO_CONF* config)
  */
 static void snort_sip(SIP_PROTO_CONF* config, Packet* p)
 {
-    SIPData* sessp = NULL;
-    PROFILE_VARS;
-
-    MODULE_PROFILE_START(sipPerfStats);
+    Profile profile(sipPerfStats);
 
     /* Attempt to get a previously allocated SIP block. */
-    sessp = get_sip_session_data(p->flow);
+    SIPData* sessp = get_sip_session_data(p->flow);
 
-    if (sessp == NULL)
+    if (sessp == nullptr)
     {
         /* Check the stream session. If it does not currently
          * have our SIP data-block attached, create one.
          */
-        sessp = SetNewSIPData(p, config);
+        sessp = SetNewSIPData(p);
 
         if ( !sessp )
-        {
-            /* Could not get/create the session data for this packet. */
-            MODULE_PROFILE_END(sipPerfStats);
+            // Could not get/create the session data for this packet.
             return;
-        }
     }
 
     /* Don't process if we've missed packets */
     if (sessp->state_flags & SIP_FLG_MISSED_PACKETS)
-    {
-        MODULE_PROFILE_END(sipPerfStats);
         return;
-    }
 
     SIP_Process(p,sessp, config);
-
-    MODULE_PROFILE_END(sipPerfStats);
 }
 
 //-------------------------------------------------------------------------
@@ -294,12 +190,17 @@ class Sip : public Inspector
 {
 public:
     Sip(SIP_PROTO_CONF*);
-    ~Sip();
+    ~Sip() override;
 
-    void show(SnortConfig*) override;
+    void show(const SnortConfig*) const override;
     void eval(Packet*) override;
     bool get_buf(InspectionBuffer::Type, Packet*, InspectionBuffer&) override;
-    SIPMethodNode *add_method(char* tok);
+
+    class StreamSplitter* get_splitter(bool to_server) override
+    { return new SipSplitter(to_server); }
+
+    bool is_control_channel() const override
+    { return true; }
 
 private:
     SIP_PROTO_CONF* config;
@@ -319,31 +220,33 @@ Sip::~Sip()
     }
 }
 
-void Sip::show(SnortConfig*)
+void Sip::show(const SnortConfig*) const
 {
-    PrintSipConf(config);
-}
+    if ( !config )
+        return;
 
-SIPMethodNode *Sip::add_method(char* tok)
-{
-    SIPMethodNode *method;
-    method = SIP_FindMethod (config->methods, tok, strlen (tok));
+    auto methods = GetSIPMethods(config->methods);
 
-    /*if method is not found, add it as a user defined method*/
-    if (method == NULL)
-    {
-        method = SIP_AddUserDefinedMethod(tok, &config->methodsConfig, &config->methods );
-    }
-
-    return method;
+    ConfigLogger::log_flag("ignore_call_channel", config->ignoreChannel);
+    ConfigLogger::log_value("max_call_id_len", config->maxCallIdLen);
+    ConfigLogger::log_value("max_contact_len", config->maxContactLen);
+    ConfigLogger::log_value("max_content_len", config->maxContentLen);
+    ConfigLogger::log_value("max_dialogs", config->maxNumDialogsInSession);
+    ConfigLogger::log_value("max_from_len", config->maxFromLen);
+    ConfigLogger::log_value("max_requestName_len", config->maxRequestNameLen);
+    ConfigLogger::log_value("max_to_len", config->maxToLen);
+    ConfigLogger::log_value("max_uri_len", config->maxUriLen);
+    ConfigLogger::log_value("max_via_len", config->maxViaLen);
+    ConfigLogger::log_list("methods", methods.c_str());
 }
 
 void Sip::eval(Packet* p)
 {
     // precondition - what we registered for
     assert((p->is_udp() and p->dsize and p->data) or p->has_tcp_data());
+    assert(p->flow);
 
-    ++sipstats.total_packets;
+    sip_stats.packets++;
     snort_sip(config, p);
 }
 
@@ -352,7 +255,7 @@ bool Sip::get_buf(
 {
     SIPData* sd;
     SIP_Roptions* ropts;
-    const uint8_t* data = NULL;
+    const uint8_t* data = nullptr;
     unsigned len = 0;
 
     sd = get_sip_session_data(p->flow);
@@ -379,6 +282,8 @@ bool Sip::get_buf(
 
     if (!len)
         return false;
+
+    assert(data);
 
     b.data = data;
     b.len = len;
@@ -412,14 +317,6 @@ static void sip_dtor(Inspector* p)
     delete p;
 }
 
-SIPMethodNode *add_sip_method(char *tok)
-{
-    Sip *sip_ins = (Sip*)InspectorManager::get_inspector("sip");
-    assert(sip_ins);
-
-    return(sip_ins->add_method(tok));
-}
-
 const InspectApi sip_api =
 {
     {
@@ -435,7 +332,7 @@ const InspectApi sip_api =
         mod_dtor
     },
     IT_SERVICE,
-    (uint16_t)PktType::PDU | (uint16_t)PktType::UDP,
+    PROTO_BIT__UDP | PROTO_BIT__PDU,
     nullptr, // buffers
     "sip",
     sip_init,
@@ -448,13 +345,22 @@ const InspectApi sip_api =
     nullptr  // reset
 };
 
+extern const BaseApi* ips_sip_header;
+extern const BaseApi* ips_sip_body;
+extern const BaseApi* ips_sip_method;
+extern const BaseApi* ips_sip_stat_code;
+
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* sin_sip[] =
+#endif
 {
     &sip_api.base,
+    ips_sip_header,
+    ips_sip_body,
+    ips_sip_method,
+    ips_sip_stat_code,
     nullptr
 };
-#else
-const BaseApi* sin_sip = &sip_api.base;
-#endif
 

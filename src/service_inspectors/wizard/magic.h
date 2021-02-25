@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,11 +17,11 @@
 //--------------------------------------------------------------------------
 // magic.h author Russ Combs <rucombs@cisco.com>
 
-#include <string>
-#include <vector>
-
 #ifndef MAGIC_H
 #define MAGIC_H
+
+#include <string>
+#include <vector>
 
 class MagicBook;
 
@@ -41,12 +41,17 @@ struct MagicPage
 
 typedef std::vector<uint16_t> HexVector;
 
+// MagicBook is a set of MagicPages implementing a trie
+
 class MagicBook
 {
 public:
     virtual ~MagicBook();
 
-    virtual bool add_spell(const char* key, const char* val) = 0;
+    MagicBook(const MagicBook&) = delete;
+    MagicBook& operator=(const MagicBook&) = delete;
+
+    virtual bool add_spell(const char* key, const char*& val) = 0;
     virtual const char* find_spell(const uint8_t*, unsigned len, const MagicPage*&) const = 0;
 
     const MagicPage* page1()
@@ -66,10 +71,9 @@ class SpellBook : public MagicBook
 {
 public:
     SpellBook();
-    ~SpellBook() { }
 
-    bool add_spell(const char*, const char*);
-    const char* find_spell(const uint8_t*, unsigned len, const MagicPage*&) const;
+    bool add_spell(const char*, const char*&) override;
+    const char* find_spell(const uint8_t*, unsigned len, const MagicPage*&) const override;
 
 private:
     bool translate(const char*, HexVector&);
@@ -85,11 +89,10 @@ private:
 class HexBook : public MagicBook
 {
 public:
-    HexBook() { }
-    ~HexBook() { }
+    HexBook() = default;
 
-    bool add_spell(const char*, const char*);
-    const char* find_spell(const uint8_t*, unsigned len, const MagicPage*&) const;
+    bool add_spell(const char*, const char*&) override;
+    const char* find_spell(const uint8_t*, unsigned len, const MagicPage*&) const override;
 
 private:
     bool translate(const char*, HexVector&);

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -21,59 +21,87 @@
 #ifndef RULES_H
 #define RULES_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+// misc rule and rule list support
+// FIXIT-L refactor this header
 
-#include "main/snort_types.h"
+#include <map>
+#include <string>
+
 #include "actions/actions.h"
+#include "main/policy.h"
 
-#define EXCEPT_SRC_IP   0x0001
-#define EXCEPT_DST_IP   0x0002
-#define ANY_SRC_PORT    0x0004
-#define ANY_DST_PORT    0x0008
-#define ANY_FLAGS       0x0010
-#define EXCEPT_SRC_PORT 0x0020
-#define EXCEPT_DST_PORT 0x0040
-#define BIDIRECTIONAL   0x0080
-#define ANY_SRC_IP      0x0100
-#define ANY_DST_IP      0x0200
+#define GID_DEFAULT          1
+#define GID_SESSION        135
 
-#define GENERATOR_SNORT_ENGINE        1
-#define GENERATOR_SNORT_SHARED        3
+#define GID_BUILTIN_MIN    100
+#define GID_BUILTIN_MAX    999
 
-#define GENERATOR_INTERNAL          135
-#define INTERNAL_EVENT_SYN_RECEIVED   1
-#define INTERNAL_EVENT_SESSION_ADD    2
-#define INTERNAL_EVENT_SESSION_DEL    3
+// should be revoked in the future
+#define GID_EXCEPTION_SDF  138
 
-#define EventIsInternal(gid) (gid == GENERATOR_INTERNAL)
+#define SESSION_EVENT_SYN_RX 1
+#define SESSION_EVENT_SETUP  2
+#define SESSION_EVENT_CLEAR  3
 
+#define EventIsInternal(gid) ((gid) == GID_SESSION)
+
+namespace snort
+{
+    class IpsAction;
+    struct SnortConfig;
+}
 struct OutputSet;
+struct RuleTreeNode;
 
 struct ListHead
 {
     OutputSet* LogList;
     OutputSet* AlertList;
-    class IpsAction* action;
     struct RuleListNode* ruleListNode;
+    bool is_plugin_action = false;
 };
 
+// for top-level rule lists by type (alert, drop, etc.)
 struct RuleListNode
 {
     ListHead* RuleList;   /* The rule list associated with this node */
-    RuleType mode;        /* the rule mode */
-    int evalIndex;        /* eval index for this rule set */
+    snort::Actions::Type mode;        /* the rule mode */
+    unsigned evalIndex;        /* eval index for this rule set */
     char* name;           /* name of this rule list */
     RuleListNode* next;   /* the next RuleListNode */
 };
 
+struct RuleKey
+{
+    unsigned policy_id;
+    unsigned gid;
+    unsigned sid;
+
+    friend bool operator< (const RuleKey&, const RuleKey&);
+};
+
 struct RuleState
 {
-    uint32_t sid;
-    uint32_t gid;
-    int state;
-    RuleState* next;
+    std::string rule_action;
+    snort::Actions::Type action;
+    IpsPolicy::Enable enable;
+};
+
+class RuleStateMap
+{
+public:
+    void add(const RuleKey& key, const RuleState& state)
+    { map[key] = state; }
+
+    void apply(snort::SnortConfig*);
+
+private:
+    RuleTreeNode* dup_rtn(RuleTreeNode*);
+    void update_rtn(RuleTreeNode*, const RuleState&);
+    void apply(snort::SnortConfig*, OptTreeNode*, unsigned ips_num, const RuleState&);
+
+private:
+    std::map<RuleKey, RuleState> map;
 };
 
 #endif

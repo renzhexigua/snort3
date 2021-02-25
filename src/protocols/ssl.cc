@@ -1,43 +1,33 @@
-/*
- * Copyright (C) 2015 Cisco and/or its affiliates. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License Version 2 as
- * published by the Free Software Foundation.  You may not use, modify or
- * distribute this program under any other version of the GNU General
- * Public License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
- *
-*/
+//--------------------------------------------------------------------------
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2007-2013 Sourcefire, Inc.
+//
+// This program is free software; you can redistribute it and/or modify it
+// under the terms of the GNU General Public License Version 2 as published
+// by the Free Software Foundation.  You may not use, modify or distribute
+// this program under any other version of the GNU General Public License.
+//
+// This program is distributed in the hope that it will be useful, but
+// WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+//--------------------------------------------------------------------------
 
-/*
- * Adam Keeton
- * ssl.c
- * 10/09/07
-*/
+// ssl.h author Adam Keeton
+
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
 
-#ifndef WIN32
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#endif
 #include "ssl.h"
-#include "snort_types.h"
+
 #include "packet.h"
 
-#define THREE_BYTE_LEN(x) (x[2] | x[1] << 8 | x[0] << 16)
+#define THREE_BYTE_LEN(x) ((x)[2] | (x)[1] << 8 | (x)[0] << 16)
 
 #define SSL_ERROR_FLAGS \
     (SSL_BOGUS_HS_DIR_FLAG | \
@@ -50,65 +40,6 @@
 #define SSL2_CHELLO_BYTE 0x01
 #define SSL2_SHELLO_BYTE 0x04
 
-/* very simplistic - just enough to say this is binary data - the rules will make a final
-* judgement.  Should maybe add an option to the imap configuration to enable the
-* continuing of command inspection like ftptelnet. */
-bool IsTlsClientHello(const uint8_t* ptr, const uint8_t* end)
-{
-    /* at least 3 bytes of data - see below */
-    if ((end - ptr) < 3)
-        return false;
-
-    if ((ptr[0] == SSL3_FIRST_BYTE) && (ptr[1] == SSL3_SECOND_BYTE))
-    {
-        /* TLS v1 or SSLv3 */
-        return true;
-    }
-    else if ((ptr[2] == SSL2_CHELLO_BYTE) || (ptr[3] == SSL2_CHELLO_BYTE))
-    {
-        /* SSLv2 */
-        return true;
-    }
-
-    return false;
-}
-
-/* this may at least tell us whether the server accepted the client hello by the presence
- * of binary data */
-
-bool IsTlsServerHello(const uint8_t* ptr, const uint8_t* end)
-{
-    /* at least 3 bytes of data - see below */
-    if ((end - ptr) < 3)
-        return false;
-
-    if ((ptr[0] == SSL3_FIRST_BYTE) && (ptr[1] == SSL3_SECOND_BYTE))
-    {
-        /* TLS v1 or SSLv3 */
-        return true;
-    }
-    else if (ptr[2] == SSL2_SHELLO_BYTE)
-    {
-        /* SSLv2 */
-        return true;
-    }
-
-    return false;
-}
-
-bool IsSSL(const uint8_t* ptr, int len, int pkt_flags)
-{
-    uint32_t ssl_flags = SSL_decode(ptr, len, pkt_flags, 0, NULL, NULL, 0);
-
-    if ((ssl_flags != SSL_ARG_ERROR_FLAG) &&
-        !(ssl_flags & SSL_ERROR_FLAGS))
-    {
-        return true;
-    }
-
-    return false;
-}
-
 static uint32_t SSL_decode_version_v3(uint8_t major, uint8_t minor)
 {
     /* Should only be called internally and by functions which have previously
@@ -119,20 +50,11 @@ static uint32_t SSL_decode_version_v3(uint8_t major, uint8_t minor)
         /* Minor version */
         switch (minor)
         {
-        case 0:
-            return SSL_VER_SSLV3_FLAG;
-            break;
-        case 1:
-            return SSL_VER_TLS10_FLAG;
-            break;
-        case 2:
-            return SSL_VER_TLS11_FLAG;
-            break;
-        case 3:
-            return SSL_VER_TLS12_FLAG;
-            break;
-        default:
-            return SSL_BAD_VER_FLAG;
+        case 0: return SSL_VER_SSLV3_FLAG;
+        case 1: return SSL_VER_TLS10_FLAG;
+        case 2: return SSL_VER_TLS11_FLAG;
+        case 3: return SSL_VER_TLS12_FLAG;
+        default: return SSL_BAD_VER_FLAG;
         }
     }
     /* This is a special case. Technically, major == 0, minor == 2 is SSLv2.
@@ -149,9 +71,7 @@ static uint32_t SSL_decode_version_v3(uint8_t major, uint8_t minor)
 static uint32_t SSL_decode_handshake_v3(const uint8_t* pkt, int size,
     uint32_t cur_flags, uint32_t pkt_flags)
 {
-    SSL_handshake_t* handshake;
-    SSL_handshake_hello_t* hello;
-    uint32_t hs_len;
+    const SSL_handshake_hello_t* hello;
     uint32_t retval = 0;
 
     while (size > 0)
@@ -164,7 +84,7 @@ static uint32_t SSL_decode_handshake_v3(const uint8_t* pkt, int size,
 
         /* Note, handhshake version field is optional depending on type
            Will recast to different type as necessary. */
-        handshake = (SSL_handshake_t*)pkt;
+        const SSL_handshake_t* handshake = (const SSL_handshake_t*)pkt;
         pkt += SSL_HS_PAYLOAD_OFFSET;
         size -= SSL_HS_PAYLOAD_OFFSET;
 
@@ -173,7 +93,7 @@ static uint32_t SSL_decode_handshake_v3(const uint8_t* pkt, int size,
          *      memcpy(&hs_len, handshake->length, 3);
          *      hs_len = ntohl(hs_len);
          * It was written this way for performance */
-        hs_len = THREE_BYTE_LEN(handshake->length);
+        uint32_t hs_len = THREE_BYTE_LEN(handshake->length);
 
         switch (handshake->type)
         {
@@ -191,12 +111,8 @@ static uint32_t SSL_decode_handshake_v3(const uint8_t* pkt, int size,
                 break;
             }
 
-            hello = (SSL_handshake_hello_t*)handshake;
+            hello = (const SSL_handshake_hello_t*)handshake;
             retval |= SSL_decode_version_v3(hello->major, hello->minor);
-
-            /* Compare version of record with version of handshake */
-            if ((cur_flags & SSL_VERFLAGS) != (retval & SSL_VERFLAGS))
-                retval |= SSL_BAD_VER_FLAG;
 
             break;
 
@@ -213,7 +129,7 @@ static uint32_t SSL_decode_handshake_v3(const uint8_t* pkt, int size,
                 break;
             }
 
-            hello = (SSL_handshake_hello_t*)handshake;
+            hello = (const SSL_handshake_hello_t*)handshake;
             retval |= SSL_decode_version_v3(hello->major, hello->minor);
 
             /* Compare version of record with version of handshake */
@@ -276,12 +192,10 @@ static uint32_t SSL_decode_handshake_v3(const uint8_t* pkt, int size,
 static uint32_t SSL_decode_v3(const uint8_t* pkt, int size, uint32_t pkt_flags,
     uint8_t* alert_flags, uint16_t* partial_rec_len, int max_hb_len)
 {
-    SSL_record_t* record;
     uint32_t retval = 0;
-    uint16_t reclen;
     uint16_t hblen;
     int ccs = 0;   /* Set if we see a Change Cipher Spec and reset after the next record */
-    SSL_heartbeat* heartbeat;
+    const SSL_heartbeat* heartbeat;
     uint16_t psize = 0;
 
     if ( size && partial_rec_len && *partial_rec_len > 0)
@@ -308,13 +222,13 @@ static uint32_t SSL_decode_v3(const uint8_t* pkt, int size, uint32_t pkt_flags,
             break;
         }
 
-        record = (SSL_record_t*)pkt;
+        const SSL_record_t* record = (const SSL_record_t*)pkt;
         pkt += SSL_REC_PAYLOAD_OFFSET;
         size -= SSL_REC_PAYLOAD_OFFSET;
 
         retval |= SSL_decode_version_v3(record->major, record->minor);
 
-        reclen = ntohs(record->length);
+        uint16_t reclen = ntohs(record->length);
 
         psize = (size < reclen) ? (reclen - size) : 0;
 
@@ -337,9 +251,9 @@ static uint32_t SSL_decode_v3(const uint8_t* pkt, int size, uint32_t pkt_flags,
         case SSL_HEARTBEAT_REC:
             retval |= SSL_HEARTBEAT_SEEN;
             ccs = 0;
-            if ((size < (int)sizeof(SSL_heartbeat)) || !max_hb_len || !alert_flags)
+            if( size < 0 || (unsigned int)size < sizeof(SSL_heartbeat) || !max_hb_len || !alert_flags )
                 break;
-            heartbeat = (SSL_heartbeat*)pkt;
+            heartbeat = (const SSL_heartbeat*)pkt;
             if ((heartbeat->type) == SSL_HEARTBEAT_REQUEST)
             {
                 hblen = ntohs(heartbeat->length);
@@ -413,7 +327,7 @@ static uint32_t SSL_decode_v3(const uint8_t* pkt, int size, uint32_t pkt_flags,
 
 // See RFCs 6101, 2246, 4346 and 5246 for SSL 3.0, TLS 1.0, 1.1 and 1.2 respectively
 // Appendix E. Backward Compatibility With SSL
-static inline bool SSL_v3_back_compat_v2(SSLv2_chello_t* chello)
+static inline bool SSL_v3_back_compat_v2(const SSLv2_chello_t* chello)
 {
     if ((chello->major == 3) && (chello->minor <= 3))
         return true;
@@ -422,11 +336,10 @@ static inline bool SSL_v3_back_compat_v2(SSLv2_chello_t* chello)
 
 static uint32_t SSL_decode_v2(const uint8_t* pkt, int size, uint32_t pkt_flags)
 {
-    uint16_t reclen;
-    SSLv2_chello_t* chello;
-    SSLv2_shello_t* shello;
+    const SSLv2_chello_t* chello;
+    const SSLv2_shello_t* shello;
     uint32_t retval = 0;
-    SSLv2_record_t* record = (SSLv2_record_t*)pkt;
+    const SSLv2_record_t* record = (const SSLv2_record_t*)pkt;
 
     while (size > 0)
     {
@@ -438,7 +351,7 @@ static uint32_t SSL_decode_v2(const uint8_t* pkt, int size, uint32_t pkt_flags)
 
         /* Note: top bit has special meaning and is not included
          * with the length */
-        reclen = ntohs(record->length) & 0x7fff;
+        uint16_t reclen = ntohs(record->length) & 0x7fff;
 
         switch (record->type)
         {
@@ -454,7 +367,7 @@ static uint32_t SSL_decode_v2(const uint8_t* pkt, int size, uint32_t pkt_flags)
                 break;
             }
 
-            chello = (SSLv2_chello_t*)pkt;
+            chello = (const SSLv2_chello_t*)pkt;
 
             // Check for SSLv3/TLS backward compatibility
             if (SSL_v3_back_compat_v2(chello))
@@ -476,7 +389,7 @@ static uint32_t SSL_decode_v2(const uint8_t* pkt, int size, uint32_t pkt_flags)
                 break;
             }
 
-            shello = (SSLv2_shello_t*)pkt;
+            shello = (const SSLv2_shello_t*)pkt;
 
             if (shello->minor != 2)
             {
@@ -504,13 +417,12 @@ static uint32_t SSL_decode_v2(const uint8_t* pkt, int size, uint32_t pkt_flags)
     return retval | SSL_VER_SSLV2_FLAG;
 }
 
-uint32_t SSL_decode(const uint8_t* pkt, int size, uint32_t pkt_flags, uint32_t prev_flags,
+namespace snort
+{
+uint32_t SSL_decode(
+    const uint8_t* pkt, int size, uint32_t pkt_flags, uint32_t prev_flags,
     uint8_t* alert_flags, uint16_t* partial_rec_len, int max_hb_len)
 {
-    SSL_record_t* record;
-    uint16_t reclen;
-    uint32_t datalen;
-
     if (!pkt || !size)
         return SSL_ARG_ERROR_FLAG;
 
@@ -544,12 +456,12 @@ uint32_t SSL_decode(const uint8_t* pkt, int size, uint32_t pkt_flags, uint32_t p
                 if (pkt[9] == 3)
                 {
                     /* Saw a TLS version, but this could also be an SSHv2 length.
-                      * If it is, check if a hypothetical TLS record-data length agress
+                      * If it is, check if a hypothetical TLS record-data length agrees
                       * with its record length */
-                    datalen = THREE_BYTE_LEN( (pkt+6) );
+                    uint32_t datalen = THREE_BYTE_LEN( (pkt+6) );
 
-                    record = (SSL_record_t*)pkt;
-                    reclen = ntohs(record->length);
+                    const SSL_record_t* record = (const SSL_record_t*)pkt;
+                    uint16_t reclen = ntohs(record->length);
 
                     /* If these lengths match, it's v3
                        Otherwise, it's v2 */
@@ -563,12 +475,12 @@ uint32_t SSL_decode(const uint8_t* pkt, int size, uint32_t pkt_flags, uint32_t p
         else if (size >= 8 && pkt[7] == 2)
         {
             /* A version of '2' at byte 7 overlaps with TLS record-data length.
-             * Check if a hypothetical TLS record-data length agress with its
+             * Check if a hypothetical TLS record-data length agrees with its
              * record length */
-            datalen = THREE_BYTE_LEN( (pkt+6) );
+            uint32_t datalen = THREE_BYTE_LEN( (pkt+6) );
 
-            record = (SSL_record_t*)pkt;
-            reclen = ntohs(record->length);
+            const SSL_record_t* record = (const SSL_record_t*)pkt;
+            uint16_t reclen = ntohs(record->length);
 
             /* If these lengths match, it's v3
                Otherwise, it's v2 */
@@ -580,3 +492,63 @@ uint32_t SSL_decode(const uint8_t* pkt, int size, uint32_t pkt_flags, uint32_t p
     return SSL_decode_v3(pkt, size, pkt_flags, alert_flags, partial_rec_len, max_hb_len);
 }
 
+/* very simplistic - just enough to say this is binary data - the rules will make a final
+* judgement.  Should maybe add an option to the imap configuration to enable the
+* continuing of command inspection like ftptelnet. */
+bool IsTlsClientHello(const uint8_t* ptr, const uint8_t* end)
+{
+    /* at least 3 bytes of data - see below */
+    if ((end - ptr) < 3)
+        return false;
+
+    if ((ptr[0] == SSL3_FIRST_BYTE) && (ptr[1] == SSL3_SECOND_BYTE))
+    {
+        /* TLS v1 or SSLv3 */
+        return true;
+    }
+    else if ((ptr[2] == SSL2_CHELLO_BYTE) || (ptr[3] == SSL2_CHELLO_BYTE))
+    {
+        /* SSLv2 */
+        return true;
+    }
+
+    return false;
+}
+
+/* this may at least tell us whether the server accepted the client hello by the presence
+ * of binary data */
+
+bool IsTlsServerHello(const uint8_t* ptr, const uint8_t* end)
+{
+    /* at least 3 bytes of data - see below */
+    if ((end - ptr) < 3)
+        return false;
+
+    if ((ptr[0] == SSL3_FIRST_BYTE) && (ptr[1] == SSL3_SECOND_BYTE))
+    {
+        /* TLS v1 or SSLv3 */
+        return true;
+    }
+    else if (ptr[2] == SSL2_SHELLO_BYTE)
+    {
+        /* SSLv2 */
+        return true;
+    }
+
+    return false;
+}
+
+bool IsSSL(const uint8_t* ptr, int len, int pkt_flags)
+{
+    uint32_t ssl_flags = SSL_decode(ptr, len, pkt_flags, 0, nullptr, nullptr, 0);
+
+    if ((ssl_flags != SSL_ARG_ERROR_FLAG) &&
+        !(ssl_flags & SSL_ERROR_FLAGS))
+    {
+        return true;
+    }
+
+    return false;
+}
+
+} // namespace snort

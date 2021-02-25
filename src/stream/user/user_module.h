@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,16 +20,16 @@
 #ifndef USER_MODULE_H
 #define USER_MODULE_H
 
-#include "snort_types.h"
 #include "framework/module.h"
-#include "main/thread.h"
-#include "stream/stream.h"
 
+namespace snort
+{
+class Trace;
 struct SnortConfig;
+}
 
-extern const PegInfo user_pegs[];
-extern THREAD_LOCAL struct UserStats user_stats;
-extern THREAD_LOCAL ProfileStats user_perf_stats;
+extern THREAD_LOCAL const snort::Trace* stream_user_trace;
+extern THREAD_LOCAL snort::ProfileStats user_perf_stats;
 
 //-------------------------------------------------------------------------
 // stream_user module
@@ -40,22 +40,25 @@ extern THREAD_LOCAL ProfileStats user_perf_stats;
 
 struct StreamUserConfig;
 
-class StreamUserModule : public Module
+class StreamUserModule : public snort::Module
 {
 public:
     StreamUserModule();
-    ~StreamUserModule();
+    ~StreamUserModule() override;
 
-    bool set(const char*, Value&, SnortConfig*) override;
-    bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
+    bool begin(const char*, int, snort::SnortConfig*) override;
 
-#if 0
-    const PegInfo* get_pegs() const override;
-    PegCount* get_counts() const override;
-#endif
+    Usage get_usage() const override
+    { return INSPECT; }
+
+    bool is_bindable() const override
+    { return true; }
 
     StreamUserConfig* get_data();
+
+    void set_trace(const snort::Trace*) const override;
+    const snort::TraceOption* get_trace_options() const override;
 
 private:
     StreamUserConfig* config;

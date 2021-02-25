@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -42,20 +42,38 @@
  * Marc A. Norton <mnorton@sourcefire.com>
  * Kevin Liu <kliu@sourcefire.com>
  */
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "ftpp_si.h"
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-# include <ctype.h>
+#include "protocols/packet.h"
+#include "stream/stream.h"
+#include "utils/util.h"
 
-#include "ftpp_return_codes.h"
-#include "ftpp_ui_config.h"
-#include "stream/stream_api.h"
 #include "ft_main.h"
+#include "ftpp_return_codes.h"
 
-unsigned FtpFlowData::flow_id = 0;
-unsigned TelnetFlowData::flow_id = 0;
+using namespace snort;
+
+unsigned FtpFlowData::inspector_id = 0;
+unsigned TelnetFlowData::inspector_id = 0;
+
+TelnetFlowData::TelnetFlowData() : FlowData(inspector_id)
+{
+    memset(&session, 0, sizeof(session));
+    tnstats.concurrent_sessions++;
+    if(tnstats.max_concurrent_sessions < tnstats.concurrent_sessions)
+        tnstats.max_concurrent_sessions = tnstats.concurrent_sessions;
+}
+
+TelnetFlowData::~TelnetFlowData()
+{
+    assert(tnstats.concurrent_sessions > 0);
+    tnstats.concurrent_sessions--;
+}
 
 /*
  * Function: TelnetResetsession(TELNET_SESSION *session)
@@ -73,7 +91,7 @@ unsigned TelnetFlowData::flow_id = 0;
 static inline int TelnetResetsession(TELNET_SESSION* session)
 {
     session->ft_ssn.proto = FTPP_SI_PROTO_TELNET;
-    session->telnet_conf = NULL;
+    session->telnet_conf = nullptr;
 
     session->consec_ayt = 0;
     session->encr_state = NO_STATE;
@@ -102,10 +120,8 @@ static int TelnetStatefulsessionInspection(Packet* p,
         TelnetResetsession(Newsession);
         Newsession->ft_ssn.proto = FTPP_SI_PROTO_TELNET;
         Newsession->telnet_conf = GlobalConf;
-
         SiInput->pproto = FTPP_SI_PROTO_TELNET;
-
-        p->flow->set_application_data(fd);
+        p->flow->set_flow_data(fd);
 
         *Telnetsession = Newsession;
         return FTPP_SUCCESS;
@@ -223,15 +239,15 @@ static int FTPInitConf(
      * session, so we can still assume that the initial packet is the client
      * talking.
      */
-    iServerDip = (p->packet_flags & PKT_FROM_CLIENT);
-    iServerSip = (p->packet_flags & PKT_FROM_SERVER);
+    iServerDip = (p->is_from_client());
+    iServerSip = (p->is_from_server());
 
     /*
      * We default to the no FTP traffic case
      */
     *piInspectMode = FTPP_SI_NO_MODE;
-    *ClientConf = NULL;
-    *ServerConf = NULL;
+    *ClientConf = nullptr;
+    *ServerConf = nullptr;
 
     /*
      * Depending on the type of packet direction we get from the
@@ -313,8 +329,8 @@ static int FTPInitConf(
 
     default:
         *piInspectMode = FTPP_SI_NO_MODE;
-        *ClientConf = NULL;
-        *ServerConf = NULL;
+        *ClientConf = nullptr;
+        *ServerConf = nullptr;
         break;
     }
 
@@ -333,7 +349,7 @@ static int FTPInitConf(
 void FTPFreesession(FTP_SESSION* ssn)
 {
     if (ssn->filename)
-        free(ssn->filename);
+        snort_free(ssn->filename);
 }
 
 /* Function: FTPDataDirection
@@ -344,7 +360,7 @@ void FTPFreesession(FTP_SESSION* ssn)
 bool FTPDataDirection(Packet* p, FTP_DATA_SESSION* ftpdata)
 {
     uint32_t direction;
-    uint32_t pktdir = stream.get_packet_direction(p);
+    uint32_t pktdir = Stream::get_packet_direction(p);
 
     if (ftpdata->mode == FTPP_XFER_ACTIVE)
         direction = ftpdata->direction ?  PKT_FROM_SERVER : PKT_FROM_CLIENT;
@@ -372,24 +388,39 @@ static inline int FTPResetsession(FTP_SESSION* Ftpsession)
 {
     Ftpsession->ft_ssn.proto = FTPP_SI_PROTO_FTP;
 
-    Ftpsession->server.response.pipeline_req = 0;
+    Ftpsession->server.response.pipeline_req = nullptr;
     Ftpsession->server.response.state = 0;
-    Ftpsession->client.request.pipeline_req = 0;
-    Ftpsession->client.state = 0;
+    Ftpsession->client.request.pipeline_req = nullptr;
+    Ftpsession->client.state = nullptr;
 
-    Ftpsession->client_conf = NULL;
-    Ftpsession->server_conf = NULL;
+    Ftpsession->client_conf = nullptr;
+    Ftpsession->server_conf = nullptr;
 
     Ftpsession->encr_state = NO_STATE;
-    sfip_clear(Ftpsession->clientIP);
+    Ftpsession->clientIP.clear();
     Ftpsession->clientPort = 0;
-    sfip_clear(Ftpsession->serverIP);
+    Ftpsession->serverIP.clear();
     Ftpsession->serverPort = 0;
     Ftpsession->data_chan_state = NO_STATE;
     Ftpsession->data_chan_index = -1;
     Ftpsession->data_xfer_index = -1;
 
     return FTPP_SUCCESS;
+}
+
+FtpFlowData::FtpFlowData() : FlowData(inspector_id)
+{
+    memset(&session, 0, sizeof(session));
+    ftstats.concurrent_sessions++;
+    if(ftstats.max_concurrent_sessions < ftstats.concurrent_sessions)
+        ftstats.max_concurrent_sessions = ftstats.concurrent_sessions;
+}
+
+FtpFlowData::~FtpFlowData()
+{
+    FTPFreesession(&session);
+    assert(ftstats.concurrent_sessions > 0);
+    ftstats.concurrent_sessions--;
 }
 
 /*
@@ -424,8 +455,7 @@ static int FTPStatefulsessionInspection(
             Newsession->ft_ssn.proto = FTPP_SI_PROTO_FTP;
             Newsession->client_conf = ClientConf;
             Newsession->server_conf = ServerConf;
-
-            p->flow->set_application_data(fd);
+            p->flow->set_flow_data(fd);
 
             *Ftpsession = Newsession;
             SiInput->pproto = FTPP_SI_PROTO_FTP;
@@ -489,23 +519,23 @@ int FTPsessionInspection(
  */
 int SetSiInput(FTPP_SI_INPUT* SiInput, Packet* p)
 {
-    sfip_copy(SiInput->sip, p->ptrs.ip_api.get_src());
-    sfip_copy(SiInput->dip, p->ptrs.ip_api.get_dst());
+    SiInput->sip = *p->ptrs.ip_api.get_src();
+    SiInput->dip = *p->ptrs.ip_api.get_dst();
     SiInput->sport = p->ptrs.sp;
     SiInput->dport = p->ptrs.dp;
 
     /*
      * We now set the packet direction
      */
-    if (p->flow && stream.is_midstream(p->flow))
+    if (p->flow && Stream::is_midstream(p->flow))
     {
         SiInput->pdir = FTPP_SI_NO_MODE;
     }
-    else if (p->packet_flags & PKT_FROM_SERVER)
+    else if (p->is_from_server())
     {
         SiInput->pdir = FTPP_SI_SERVER_MODE;
     }
-    else if (p->packet_flags & PKT_FROM_CLIENT)
+    else if (p->is_from_client())
     {
         SiInput->pdir = FTPP_SI_CLIENT_MODE;
     }

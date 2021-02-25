@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,15 +17,15 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "acsmx.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include "framework/mpse.h"
+
 #include "acsmx2.h"
 
-#include "snort_debug.h"
-#include "snort_types.h"
-#include "util.h"
-#include "profiler.h"
-#include "snort_config.h"
-#include "framework/mpse.h"
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // "ac_sparse_bands"
@@ -37,54 +37,39 @@ private:
     ACSM_STRUCT2* obj;
 
 public:
-    AcsbMpse(
-        SnortConfig*,
-        bool use_gc,
-        void (* user_free)(void*),
-        void (* tree_free)(void**),
-        void (* list_free)(void**))
-        : Mpse("ac_sparse_bands", use_gc)
-    {
-        obj = acsmNew2(user_free, tree_free, list_free);
-        if ( obj ) acsmSelectFormat2(obj, ACF_SPARSEBANDS);
-    }
+    AcsbMpse(const MpseAgent* agent) : Mpse("ac_sparse_bands")
+    { obj = acsmNew2(agent, ACF_SPARSE_BANDS); }
 
-    ~AcsbMpse()
-    {
-        if (obj)
-            acsmFree2(obj);
-    }
+    ~AcsbMpse() override
+    { acsmFree2(obj); }
+
+    void set_opt(int) override
+    { obj->enable_dfa(); }
 
     int add_pattern(
-        SnortConfig*, const uint8_t* P, unsigned m,
-        bool noCase, bool negative, void* ID, int IID) override
+        const uint8_t* P, unsigned m, const PatternDescriptor& desc, void* user) override
     {
-        return acsmAddPattern2(obj, P, m, noCase, negative, ID, IID);
+        return acsmAddPattern2(obj, P, m, desc.no_case, desc.negated, user);
     }
 
-    int prep_patterns(
-        SnortConfig* sc, mpse_build_f build_tree, mpse_negate_f neg_list) override
-    {
-        return acsmCompile2(sc, obj, build_tree, neg_list);
-    }
+    int prep_patterns(SnortConfig* sc) override
+    { return acsmCompile2(sc, obj); }
 
     int _search(
-        const unsigned char* T, int n, mpse_action_f action,
-        void* data, int* current_state) override
+        const uint8_t* T, int n, MpseMatch match,
+        void* context, int* current_state) override
     {
-        return acsmSearchSparseNFA(
-            obj, (unsigned char*)T, n, action, data, current_state);
+        if ( obj->dfa_enabled() )
+            return acsm_search_dfa_sparse(obj, T, n, match, context, current_state);
+
+        return acsm_search_nfa(obj, T, n, match, context, current_state);
     }
 
     int print_info() override
-    {
-        return acsmPrintDetailInfo2(obj);
-    }
+    { return acsmPrintDetailInfo2(obj); }
 
-    int get_pattern_count() override
-    {
-        return acsmPatternCount2(obj);
-    }
+    int get_pattern_count() const override
+    { return acsmPatternCount2(obj); }
 };
 
 //-------------------------------------------------------------------------
@@ -92,14 +77,9 @@ public:
 //-------------------------------------------------------------------------
 
 static Mpse* acsb_ctor(
-    SnortConfig* sc,
-    class Module*,
-    bool use_gc,
-    void (* user_free)(void*),
-    void (* tree_free)(void**),
-    void (* list_free)(void**))
+    const SnortConfig*, class Module*, const MpseAgent* agent)
 {
-    return new AcsbMpse(sc, use_gc, user_free, tree_free, list_free);
+    return new AcsbMpse(agent);
 }
 
 static void acsb_dtor(Mpse* p)
@@ -132,7 +112,7 @@ static const MpseApi acsb_api =
         nullptr,
         nullptr
     },
-    false,
+    MPSE_BASE,
     nullptr,
     nullptr,
     nullptr,
@@ -141,6 +121,7 @@ static const MpseApi acsb_api =
     acsb_dtor,
     acsb_init,
     acsb_print,
+    nullptr,
 };
 
 const BaseApi* se_ac_sparse_bands = &acsb_api.base;

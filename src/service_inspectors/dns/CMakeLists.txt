@@ -7,9 +7,9 @@ set( FILE_LIST
 )
 
 if (STATIC_INSPECTORS)
-    add_library( dns STATIC ${FILE_LIST})
+    add_library( dns OBJECT ${FILE_LIST})
 
 else (STATIC_INSPECTORS)
-    add_shared_library(dns inspectors ${FILE_LIST})
+    add_dynamic_module(dns inspectors ${FILE_LIST})
 
 endif (STATIC_INSPECTORS)

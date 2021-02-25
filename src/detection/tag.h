@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -21,13 +21,19 @@
 #ifndef TAG_H
 #define TAG_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+// rule option tag causes logging of some number of subsequent packets
+// following an alert.  this module is use by the tag option to implement
+// that functionality.  uses its own hash table.
+//
+// FIXIT-L convert tags to use flow instead of hash table.
 
 #include <cstdint>
 
+namespace snort
+{
 struct Packet;
+}
+
 struct OptTreeNode;
 struct Event;
 
@@ -45,18 +51,18 @@ struct Event;
 struct TagData
 {
     int tag_type;       /* tag type (session/host) */
-    int tag_seconds;    /* number of "seconds" units to tag for */
-    int tag_packets;    /* number of "packets" units to tag for */
-    int tag_bytes;      /* number of "type" units to tag for */
     int tag_metric;     /* (packets | seconds | bytes) units */
     int tag_direction;  /* source or dest, used for host tagging */
+
+    uint32_t tag_seconds;    /* number of "seconds" units to tag for */
+    uint32_t tag_packets;    /* number of "packets" units to tag for */
+    uint32_t tag_bytes;      /* number of "type" units to tag for */
 };
 
-void InitTag(void);
-void CleanupTag(void);
-int CheckTagList(Packet*, Event*, void**);
-void SetTags(Packet*, OptTreeNode*, uint16_t);
-void TagCacheReset(void);
+void InitTag();
+void CleanupTag();
+int CheckTagList(snort::Packet*, Event&, void**);
+void SetTags(const snort::Packet*, const OptTreeNode*, uint16_t);
 
-#endif /* TAG_H */
+#endif
 

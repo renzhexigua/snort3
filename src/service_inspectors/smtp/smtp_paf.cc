@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -16,20 +16,28 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "smtp_paf.h"
-#include <sys/types.h>
-#include "snort_types.h"
-#include "snort_debug.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
-#include "smtp.h"
+#include "smtp_paf.h"
+
+#include "detection/detection_engine.h"
+#include "events/event_queue.h"
+#include "protocols/packet.h"
+#include "stream/stream.h"
+
+#include "smtp_module.h"
+
+using namespace snort;
 
 /* State tracker for MIME PAF */
 enum SmtpDataCMD
 {
+    SMTP_PAF_AUTH_CMD,
     SMTP_PAF_BDAT_CMD,
     SMTP_PAF_DATA_CMD,
-    SMTP_PAF_XEXCH50_CMD,
-    SMTP_PAF_STRARTTLS_CMD
+    SMTP_PAF_XEXCH50_CMD
 };
 
 struct SmtpPAFToken
@@ -42,11 +50,11 @@ struct SmtpPAFToken
 
 const SmtpPAFToken smtp_paf_tokens[] =
 {
+    { "AUTH",         4, SMTP_PAF_AUTH_CMD, false },
     { "BDAT",         4, SMTP_PAF_BDAT_CMD, true },
     { "DATA",         4, SMTP_PAF_DATA_CMD, true },
     { "XEXCH50",      7, SMTP_PAF_XEXCH50_CMD, true },
-    { "STRARTTLS",    9, SMTP_PAF_STRARTTLS_CMD, false },
-    { NULL,           0, 0, false }
+    { nullptr,           0, 0, false }
 };
 
 /* State tracker for SMTP PAF */
@@ -62,8 +70,8 @@ static inline SmtpPafData* get_state(Flow* flow, bool c2s)
     if ( !flow )
         return nullptr;
 
-    SmtpSplitter* s = (SmtpSplitter*)stream.get_splitter(flow, c2s);
-    return s ? &s->state : nullptr;
+    SmtpSplitter* s = (SmtpSplitter*)Stream::get_splitter(flow, c2s);
+    return (s and s->is_paf()) ? &s->state : nullptr;
 }
 
 /* Process responses from server, flushed at EOL*/
@@ -71,7 +79,7 @@ static inline SmtpPafData* get_state(Flow* flow, bool c2s)
 static inline void reset_data_states(SmtpPafData* pfdata)
 {
     // reset MIME info
-    file_api->reset_mime_paf_state(&(pfdata->data_info));
+    reset_mime_paf_state(&(pfdata->data_info));
 
     pfdata->length = 0;
 }
@@ -84,9 +92,8 @@ static inline StreamSplitter::Status smtp_paf_server(SmtpPafData* pfdata,
     pfdata->smtp_state = SMTP_PAF_CMD_STATE;
     pch = (const char*)memchr (data, '\n', len);
 
-    if (pch != NULL)
+    if (pch != nullptr)
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_SMTP, "Find end of line!\n"); );
         *fp = (uint32_t)(pch - (const char*)data) + 1;
         return StreamSplitter::FLUSH;
     }
@@ -94,11 +101,16 @@ static inline StreamSplitter::Status smtp_paf_server(SmtpPafData* pfdata,
 }
 
 /* Initialize command search based on first byte of command*/
-static inline char* init_cmd_search(SmtpCmdSearchInfo* search_info,  uint8_t ch)
+static inline const char* init_cmd_search(SmtpCmdSearchInfo* search_info,  uint8_t ch)
 {
     /* Use the first byte to choose data command)*/
     switch (ch)
     {
+    case 'a':
+    case 'A':
+        search_info->search_state = &smtp_paf_tokens[SMTP_PAF_AUTH_CMD].name[1];
+        search_info->search_id = SMTP_PAF_AUTH_CMD;
+        break;
     case 'b':
     case 'B':
         search_info->search_state = &smtp_paf_tokens[SMTP_PAF_BDAT_CMD].name[1];
@@ -114,16 +126,11 @@ static inline char* init_cmd_search(SmtpCmdSearchInfo* search_info,  uint8_t ch)
         search_info->search_state = &smtp_paf_tokens[SMTP_PAF_XEXCH50_CMD].name[1];
         search_info->search_id = SMTP_PAF_XEXCH50_CMD;
         break;
-    case 's':
-    case 'S':
-        search_info->search_state = &smtp_paf_tokens[SMTP_PAF_STRARTTLS_CMD].name[1];
-        search_info->search_id = SMTP_PAF_STRARTTLS_CMD;
-        break;
     default:
-        search_info->search_state = NULL;
+        search_info->search_state = nullptr;
         break;
     }
-    return (char *)search_info->search_state;
+    return search_info->search_state;
 }
 
 /* Validate whether the command is a data command*/
@@ -139,14 +146,14 @@ static inline void validate_command(SmtpCmdSearchInfo* search_info,  uint8_t val
             /* Found data command, change to SMTP_PAF_CMD_DATA_LENGTH_STATE */
             if (*(search_info->search_state) == '\0')
             {
-                search_info->search_state = NULL;
+                search_info->search_state = nullptr;
                 search_info->cmd_state = SMTP_PAF_CMD_DATA_LENGTH_STATE;
                 return;
             }
         }
         else
         {
-            search_info->search_state = NULL;
+            search_info->search_state = nullptr;
             search_info->cmd_state = SMTP_PAF_CMD_UNKNOWN;
             return;
         }
@@ -188,7 +195,7 @@ static SmtpPafDataLenStatus get_length(char c, uint32_t* len)
     return SMTP_PAF_LENGTH_CONTINUE;
 }
 
-/* Currently, we support "BDAT", "DATA", "XEXCH50", "STRARTTLS"
+/* Currently, we support "BDAT", "DATA", "XEXCH50", "AUTH"
  *  * Each data command should start from offset 0,
  *   * since previous data have been flushed
  *    */
@@ -205,7 +212,7 @@ static inline bool process_command(SmtpPafData* pfdata,  uint8_t val)
         }
 
         pfdata->cmd_info.cmd_state = SMTP_PAF_CMD_START;
-        return 1;
+        return true;
     }
 
     switch (pfdata->cmd_info.cmd_state)
@@ -226,8 +233,6 @@ static inline bool process_command(SmtpPafData* pfdata,  uint8_t val)
         /* Continue finding the data length ...*/
         if (get_length(val, &pfdata->length) != SMTP_PAF_LENGTH_CONTINUE)
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_SMTP, "Find data length: %d\n",
-                pfdata->length); );
             pfdata->cmd_info.cmd_state = SMTP_PAF_CMD_DATA_END_STATE;
         }
         break;
@@ -238,7 +243,7 @@ static inline bool process_command(SmtpPafData* pfdata,  uint8_t val)
         break;
     }
 
-    return 0;
+    return false;
 }
 
 /* Flush based on data length*/
@@ -258,9 +263,8 @@ static inline bool flush_based_length(SmtpPafData* pfdata)
  *   * Process data boundary and flush each file based on boundary*/
 static inline bool process_data(SmtpPafData* pfdata,  uint8_t data)
 {
-    if (flush_based_length(pfdata)|| file_api->check_data_end(&(pfdata->data_end_state), data))
+    if (flush_based_length(pfdata)|| check_data_end(&(pfdata->data_end_state), data))
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_SMTP, "End of data\n"); );
         /*Clean up states*/
         pfdata->smtp_state = SMTP_PAF_CMD_STATE;
         pfdata->end_of_data = true;
@@ -268,7 +272,7 @@ static inline bool process_data(SmtpPafData* pfdata,  uint8_t data)
         return true;
     }
 
-    return file_api->process_mime_paf_data(&(pfdata->data_info), data);
+    return process_mime_paf_data(&(pfdata->data_info), data);
 }
 
 /* Process commands/data from client
@@ -276,12 +280,12 @@ static inline bool process_data(SmtpPafData* pfdata,  uint8_t data)
  *   * For data, flush at boundary
  *    */
 static inline StreamSplitter::Status smtp_paf_client(SmtpPafData* pfdata,
-    const uint8_t* data, uint32_t len, uint32_t* fp)
+    const uint8_t* data, uint32_t len, uint32_t* fp, int max_auth_command_line_len)
 {
     uint32_t i;
     uint32_t boundary_start = 0;
+    bool alert_generated = false;
 
-    DEBUG_WRAP(DebugMessage(DEBUG_SMTP, "From client: %s \n", data); );
     for (i = 0; i < len; i++)
     {
         uint8_t ch = data[i];
@@ -290,15 +294,31 @@ static inline StreamSplitter::Status smtp_paf_client(SmtpPafData* pfdata,
         case SMTP_PAF_CMD_STATE:
             if (process_command(pfdata, ch))
             {
-                DEBUG_WRAP(DebugMessage(DEBUG_SMTP, "Flush command: %s \n", data); );
                 *fp = i + 1;
                 return StreamSplitter::FLUSH;
             }
             break;
         case SMTP_PAF_DATA_STATE:
-            if (process_data(pfdata, ch))
+            if (pfdata->cmd_info.search_id == SMTP_PAF_AUTH_CMD)
             {
-                DEBUG_WRAP(DebugMessage(DEBUG_SMTP, "Flush data!\n"); );
+                if ( max_auth_command_line_len &&
+                        (((int)i + pfdata->data_info.boundary_len) > max_auth_command_line_len) &&
+                        !alert_generated)
+                {
+                    DetectionEngine::queue_event(GID_SMTP, SMTP_AUTH_COMMAND_OVERFLOW);
+                    alert_generated = true;
+                }
+                if (ch == '\n')
+                {
+                    pfdata->smtp_state = SMTP_PAF_CMD_STATE;
+                    pfdata->end_of_data = true;
+                    reset_data_states(pfdata);
+                }
+                if ( (i == len-1) && (pfdata->smtp_state != SMTP_PAF_CMD_STATE) )
+                    pfdata->data_info.boundary_len += len;
+            }
+            else if (process_data(pfdata, ch))
+            {
                 *fp = i + 1;
                 return StreamSplitter::FLUSH;
             }
@@ -321,13 +341,13 @@ static inline StreamSplitter::Status smtp_paf_client(SmtpPafData* pfdata,
 // callback for stateful scanning of in-order raw payload
 //--------------------------------------------------------------------
 
-SmtpSplitter::SmtpSplitter(bool c2s) : StreamSplitter(c2s)
+SmtpSplitter::SmtpSplitter(bool c2s, int len) : StreamSplitter(c2s)
 {
     memset(&state, 0, sizeof(state));
     reset_data_states(&state);
+    max_auth_command_line_len = len;
 }
 
-SmtpSplitter::~SmtpSplitter() { }
 
 /* Function: smtp_paf()
 
@@ -350,27 +370,24 @@ SmtpSplitter::~SmtpSplitter() { }
 */
 
 StreamSplitter::Status SmtpSplitter::scan(
-    Flow* , const uint8_t* data, uint32_t len,
+    Packet*, const uint8_t* data, uint32_t len,
     uint32_t flags, uint32_t* fp)
 {
     SmtpPafData* pfdata = &state;
 
     if (flags & PKT_FROM_SERVER)
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_SMTP, "PAF: From server.\n"); );
         return smtp_paf_server(pfdata, data, len, fp);
     }
     else
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_SMTP, "PAF: From client.\n"); );
-        return smtp_paf_client(pfdata, data, len, fp);
+        return smtp_paf_client(pfdata, data, len, fp, max_auth_command_line_len);
     }
 }
 
-bool smtp_is_data_end(void* session)
+bool smtp_is_data_end(Flow* ssn)
 {
-    Flow* ssn = (Flow*)session;
     SmtpPafData* s = get_state(ssn, true);
-    return s->end_of_data;
+    return s ? s->end_of_data : false;
 }
 

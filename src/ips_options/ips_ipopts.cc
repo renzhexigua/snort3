@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -18,29 +18,18 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <ctype.h>
-#include <string.h>
 
-#include "snort_types.h"
-#include "treenodes.h"
-#include "protocols/packet.h"
-#include "protocols/ipv4.h"
-#include "protocols/ipv4_options.h"
-#include "parser.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
+#include "protocols/ipv4_options.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "ipopts"
 
@@ -49,7 +38,7 @@ static THREAD_LOCAL ProfileStats ipOptionPerfStats;
 struct IpOptionData
 {
     ip::IPOptionCodes ip_option;
-    u_char any_flag;
+    uint8_t any_flag;
 };
 
 class IpOptOption : public IpsOption
@@ -62,7 +51,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
     IpOptionData* get_data()
     { return &config; }
@@ -77,27 +66,24 @@ private:
 
 uint32_t IpOptOption::hash() const
 {
-    uint32_t a,b,c;
-    const IpOptionData* data = &config;
+    uint32_t a = (uint32_t)config.ip_option;
+    uint32_t b = config.any_flag;
+    uint32_t c = IpsOption::hash();
 
-    a = (uint32_t)data->ip_option;
-    b = data->any_flag;
-    c = 0;
-
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool IpOptOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    IpOptOption& rhs = (IpOptOption&)ips;
-    IpOptionData* left = (IpOptionData*)&config;
-    IpOptionData* right = (IpOptionData*)&rhs.config;
+    const IpOptOption& rhs = (const IpOptOption&)ips;
+    const IpOptionData* left = &config;
+    const IpOptionData* right = &rhs.config;
 
     if ((left->ip_option == right->ip_option) &&
         (left->any_flag == right->any_flag))
@@ -108,48 +94,33 @@ bool IpOptOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int IpOptOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus IpOptOption::eval(Cursor&, Packet* p)
 {
-    IpOptionData* ipOptionData = &config;
-    int rval = DETECTION_OPTION_NO_MATCH;
-    PROFILE_VARS;
+    RuleProfile profile(ipOptionPerfStats);
 
-    DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "CheckIpOptions:"); );
-    if (!p->ptrs.ip_api.is_ip4())
-        return rval; /* if error occured while ip header
-                   * was processed, return 0 automatically.  */
-
-    MODULE_PROFILE_START(ipOptionPerfStats);
+    if ( !p->is_ip4() )
+        // if error occurred while ip header
+        // was processed, return 0 automatically.
+        return NO_MATCH;
 
     const ip::IP4Hdr* const ip4h = p->ptrs.ip_api.get_ip4h();
     const uint8_t option_len = ip4h->get_opt_len();
 
-    if ((ipOptionData->any_flag == 1) && (option_len > 0))
+    if ((config.any_flag == 1) && (option_len > 0))
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "Matched any ip options!\n"); );
-        rval = DETECTION_OPTION_MATCH;
-        MODULE_PROFILE_END(ipOptionPerfStats);
-        return rval;
+        return MATCH;
     }
 
     ip::IpOptionIterator iter(ip4h, p);
+
     for ( const ip::IpOptions& opt : iter)
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "testing pkt(%d):rule(%d)\n",
-            ipOptionData->ip_option,
-            static_cast<int>(opt.code)); );
+        if (config.ip_option == opt.code)
+            return MATCH;
 
-        if (ipOptionData->ip_option == opt.code)
-        {
-            rval = DETECTION_OPTION_MATCH;
-            MODULE_PROFILE_END(ipOptionPerfStats);
-            return rval;
-        }
     }
 
-    /* if the test isn't successful, return 0 */
-    MODULE_PROFILE_END(ipOptionPerfStats);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -234,7 +205,11 @@ public:
     ProfileStats* get_profile() const override
     { return &ipOptionPerfStats; }
 
-    IpOptionData data;
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    IpOptionData data = {};
 };
 
 bool IpOptModule::begin(const char*, int, SnortConfig*)
@@ -306,11 +281,11 @@ static const IpsApi ipopts_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_ipopts[] =
+#endif
 {
     &ipopts_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_ipopts = &ipopts_api.base;
-#endif
 

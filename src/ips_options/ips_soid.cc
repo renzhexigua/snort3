@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,23 +17,17 @@
 //--------------------------------------------------------------------------
 // ips_soid.cc author Russ Combs <rucombs@cisco.com>
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <string>
-
-#include "main/snort_types.h"
-#include "main/snort_debug.h"
 #include "detection/treenodes.h"
-#include "detection/detection_defines.h"
+#include "framework/decode_data.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
-#include "protocols/packet.h"
 #include "utils/util.h"
+
+using namespace snort;
 
 #define s_name "soid"
 
@@ -44,7 +38,7 @@
 static const Parameter s_params[] =
 {
     { "~", Parameter::PT_STRING, nullptr, nullptr,
-      "SO rule ID has <gid>|<sid> format, like 3|12345" },
+      "SO rule ID is unique key, eg <gid>_<sid>_<rev> like 3_45678_9" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -57,6 +51,11 @@ class SoidModule : public Module
 public:
     SoidModule() : Module(s_name, s_help, s_params) { }
     bool set(const char*, Value&, SnortConfig*) override;
+
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     std::string soid;
 };
 
@@ -86,7 +85,7 @@ static void mod_dtor(Module* m)
 static IpsOption* soid_ctor(Module* p, OptTreeNode* otn)
 {
     SoidModule* m = (SoidModule*)p;
-    otn->soid = SnortStrdup(m->soid.c_str());
+    otn->soid = snort_strdup(m->soid.c_str());
     return nullptr;
 }
 
@@ -117,11 +116,11 @@ static const IpsApi soid_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_soid[] =
+#endif
 {
     &soid_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_soid = &soid_api.base;
-#endif
 

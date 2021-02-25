@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -36,16 +36,14 @@
 #ifndef FTPP_SI_H
 #define FTPP_SI_H
 
-#include <stdint.h>
+#include "file_api/file_api.h"
+#include "flow/flow.h"
+#include "flow/flow_key.h"
+#include "framework/counts.h"
 
-#include "ftpp_include.h"
-#include "ftpp_ui_config.h"
 #include "ftp_client.h"
 #include "ftp_server.h"
-#include "protocols/packet.h"
-#include "file_api/file_api.h"
-#include "stream/stream_api.h"
-#include "flow/flow.h"
+#include "ftpp_ui_config.h"
 
 /*
  * These are the defines for the different types of
@@ -60,7 +58,7 @@
 #define FTPP_SI_PROTO_FTP       2
 #define FTPP_SI_PROTO_FTP_DATA  3
 
-#define FTPP_FILE_IGNORE    -1
+#define FTPP_FILE_IGNORE    (-1)
 #define FTPP_FILE_UNKNOWN    0
 
 /* Macros for testing the type of FTP_TELNET_SESSION */
@@ -68,6 +66,11 @@
 #define PROTO_IS_FTP(ssn)               FTPP_SI_IS_PROTO(ssn, FTPP_SI_PROTO_FTP)
 #define PROTO_IS_FTP_DATA(ssn)          FTPP_SI_IS_PROTO(ssn, FTPP_SI_PROTO_FTP_DATA)
 #define PROTO_IS_TELNET(ssn)            FTPP_SI_IS_PROTO(ssn, FTPP_SI_PROTO_TELNET)
+
+#define FTP_FLG_MALWARE                 0x01
+#define FTP_FLG_SEARCH_ABANDONED        0x02
+#define FTP_PROTP_CMD_ISSUED            0x04
+#define FTP_PROTP_CMD_ACCEPT            0x08
 
 typedef struct s_FTP_TELNET_SESSION
 {
@@ -93,19 +96,20 @@ struct TELNET_SESSION
     int encr_state;
 };
 
-class TelnetFlowData : public FlowData
+class TelnetFlowData : public snort::FlowData
 {
 public:
-    TelnetFlowData() : FlowData(flow_id)
-    { memset(&session, 0, sizeof(session)); }
-
-    ~TelnetFlowData() { }
+    TelnetFlowData();
+    ~TelnetFlowData() override;
 
     static void init()
-    { flow_id = FlowData::get_flow_id(); }
+    { inspector_id = snort::FlowData::create_flow_data_id(); }
+
+    size_t size_of() override
+    { return sizeof(*this); }
 
 public:
-    static unsigned flow_id;
+    static unsigned inspector_id;
     TELNET_SESSION session;
 };
 
@@ -115,19 +119,21 @@ public:
 #define NO_STATE                  0x00
 #define LOST_STATE                0xFFFFFFFF
 
-#define DATA_CHAN_PORT_CMD_ISSUED 0x01
-#define DATA_CHAN_PORT_CMD_ACCEPT 0x02
-#define DATA_CHAN_PASV_CMD_ISSUED 0x04
-#define DATA_CHAN_PASV_CMD_ACCEPT 0x08
-#define DATA_CHAN_XFER_CMD_ISSUED 0x10
-#define DATA_CHAN_XFER_STARTED    0x20
+#define DATA_CHAN_PORT_CMD_ISSUED   0x01
+#define DATA_CHAN_PORT_CMD_ACCEPT   0x02
+#define DATA_CHAN_PASV_CMD_ISSUED   0x04
+#define DATA_CHAN_PASV_CMD_ACCEPT   0x08
+#define DATA_CHAN_XFER_CMD_ISSUED   0x10
+#define DATA_CHAN_XFER_STARTED      0x20
+#define DATA_CHAN_CLIENT_HELLO_SEEN 0x40
+#define DATA_CHAN_REST_CMD_ISSUED   0x80
 
-#define AUTH_TLS_CMD_ISSUED       0x01
-#define AUTH_SSL_CMD_ISSUED       0x02
-#define AUTH_UNKNOWN_CMD_ISSUED   0x04
-#define AUTH_TLS_ENCRYPTED        0x08
-#define AUTH_SSL_ENCRYPTED        0x10
-#define AUTH_UNKNOWN_ENCRYPTED    0x20
+#define AUTH_TLS_CMD_ISSUED         0x01
+#define AUTH_SSL_CMD_ISSUED         0x02
+#define AUTH_UNKNOWN_CMD_ISSUED     0x04
+#define AUTH_TLS_ENCRYPTED          0x08
+#define AUTH_SSL_ENCRYPTED          0x10
+#define AUTH_UNKNOWN_ENCRYPTED      0x20
 
 /*
  * The FTP_SESSION structure contains the complete FTP session, both the
@@ -159,35 +165,38 @@ struct FTP_SESSION
     int data_chan_index;
     int data_xfer_index;
     bool data_xfer_dir;
-    sfip_t clientIP;
+    snort::SfIp clientIP;
     uint16_t clientPort;
-    sfip_t serverIP;
+    snort::SfIp serverIP;
     uint16_t serverPort;
 
-    /* A file is being transfered on ftp-data channel */
+    /* A file is being transferred on ftp-data channel */
     char* filename;
+    size_t path_hash;
     int file_xfer_info; /* -1: ignore, 0: unknown, >0: filename length */
+    unsigned char flags;
 
     /* Command/data channel encryption */
     int encr_state;
+    void *datassn;
 };
 
 void FTPFreesession(FTP_SESSION*);
 
-class FtpFlowData : public FlowData
+class FtpFlowData : public snort::FlowData
 {
 public:
-    FtpFlowData() : FlowData(flow_id)
-    { memset(&session, 0, sizeof(session)); }
-
-    ~FtpFlowData()
-    { FTPFreesession(&session); }
+    FtpFlowData();
+    ~FtpFlowData() override;
 
     static void init()
-    { flow_id = FlowData::get_flow_id(); }
+    { inspector_id = snort::FlowData::create_flow_data_id(); }
+
+    size_t size_of() override
+    { return sizeof(*this); }
 
 public:
-    static unsigned flow_id;
+    static unsigned inspector_id;
     FTP_SESSION session;
 };
 
@@ -201,35 +210,44 @@ enum
 struct FTP_DATA_SESSION
 {
     FTP_TELNET_SESSION ft_ssn;
-    FlowKey ftp_key;
+    snort::FlowKey ftp_key;
     char* filename;
+    size_t path_hash;
     int data_chan;
     int file_xfer_info;
     FilePosition position;
-    bool direction;
     unsigned char mode;
     unsigned char packet_flags;
+    bool direction;
+    bool mss_changed;
 };
 
-class FtpDataFlowData : public FlowData
+class FtpDataFlowData : public snort::FlowData
 {
 public:
-    FtpDataFlowData(Packet*);
-    ~FtpDataFlowData();
+    FtpDataFlowData(snort::Packet*);
+    ~FtpDataFlowData() override;
 
     static void init()
-    { flow_id = FlowData::get_flow_id(); }
+    { inspector_id = snort::FlowData::create_flow_data_id(); }
 
-    void handle_eof(Packet*) override;
+    void handle_expected(snort::Packet*) override;
+    void handle_eof(snort::Packet*) override;
+    size_t size_of() override
+    { return sizeof(*this); }
 
 public:
-    static unsigned flow_id;
+    static unsigned inspector_id;
     FTP_DATA_SESSION session;
+    bool eof_handled = false;
+    bool in_tls = false;
 };
 
 #define FTPDATA_FLG_REASSEMBLY_SET  (1<<0)
 #define FTPDATA_FLG_FILENAME_SET    (1<<1)
 #define FTPDATA_FLG_STOP            (1<<2)
+#define FTPDATA_FLG_REST            (1<<3)
+#define FTPDATA_FLG_FLUSH           (1<<4)
 
 /*
  * The FTPP_SI_INPUT structure holds the information that the session
@@ -243,29 +261,51 @@ public:
  */
 struct FTPP_SI_INPUT
 {
-    sfip_t sip;
-    sfip_t dip;
+    snort::SfIp sip;
+    snort::SfIp dip;
     unsigned short sport;
     unsigned short dport;
     unsigned char pdir;
     unsigned char pproto;
 };
 
-int FTPGetPacketDir(Packet*);
+int FTPGetPacketDir(snort::Packet*);
 
 /* FTP-Data file processing */
-FTP_DATA_SESSION* FTPDatasessionNew(Packet* p);
+FTP_DATA_SESSION* FTPDatasessionNew(snort::Packet* p);
 void FTPDatasessionFree(void* p_ssn);
 
-bool FTPDataDirection(Packet* p, FTP_DATA_SESSION* ftpdata);
+bool FTPDataDirection(snort::Packet* p, FTP_DATA_SESSION* ftpdata);
 
-int TelnetsessionInspection(
-    Packet*, TELNET_PROTO_CONF*, TELNET_SESSION**, FTPP_SI_INPUT*, int* piInspectMode);
+int TelnetsessionInspection(snort::Packet*, TELNET_PROTO_CONF*, TELNET_SESSION**,
+    FTPP_SI_INPUT*, int* piInspectMode);
 
-int FTPsessionInspection(
-    Packet*, FTP_SESSION**, FTPP_SI_INPUT*, int* piInspectMode);
+int FTPsessionInspection(snort::Packet*, FTP_SESSION**, FTPP_SI_INPUT*, int* piInspectMode);
 
-int SetSiInput(FTPP_SI_INPUT*, Packet*);
+int SetSiInput(FTPP_SI_INPUT*, snort::Packet*);
+
+struct FtpStats
+{
+    PegCount total_packets;
+    PegCount total_bytes;
+    PegCount concurrent_sessions;
+    PegCount max_concurrent_sessions;
+    PegCount starttls;
+    PegCount ssl_search_abandoned;
+    PegCount ssl_search_abandoned_too_soon;
+    PegCount total_packets_mss_changed;
+    PegCount total_sessions_mss_changed;
+};
+
+struct TelnetStats
+{
+    PegCount total_packets;
+    PegCount concurrent_sessions;
+    PegCount max_concurrent_sessions;
+};
+
+extern THREAD_LOCAL FtpStats ftstats;
+extern THREAD_LOCAL TelnetStats tnstats;
 
 #endif
 

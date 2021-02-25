@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,11 +17,16 @@
 //--------------------------------------------------------------------------
 // cd_default.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "framework/codec.h"
-#include "protocols/protocol_ids.h"
+
+using namespace snort;
 
 #define CD_DEFAULT_NAME "unknown"
-#define CD_DEFAULT_HELP "support for unkown protocols"
+#define CD_DEFAULT_HELP "support for unknown protocols"
 
 namespace
 {
@@ -29,10 +34,9 @@ class DefaultCodec : public Codec
 {
 public:
     DefaultCodec() : Codec(CD_DEFAULT_NAME) { }
-    ~DefaultCodec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override
-    { v.push_back(FINISHED_DECODE); }
+    void get_protocol_ids(std::vector<ProtocolId>& v) override
+    { v.emplace_back(ProtocolId::FINISHED_DECODE); }
 
     bool decode(const RawData&, CodecData&, DecodeData&) override
     { return false; }
@@ -71,5 +75,9 @@ static const CodecApi default_api =
     dtor, // dtor
 };
 
-const CodecApi* default_codec = &default_api;
+const CodecApi* default_codec[] =
+{
+    &default_api,
+    nullptr
+};
 

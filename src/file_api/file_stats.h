@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,54 +16,64 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-/*
- **
- **  Author(s):  Hui Cao <huica@cisco.com>
- **
- **  NOTES
- **  5.25.13 - Initial Source Code. Hui Cao
- */
+
+// file_stats.h author Hui Cao <huica@cisco.com>
 
 #ifndef FILE_STATS_H
 #define FILE_STATS_H
 
-#include "target_based/snort_protocols.h"
-#include "target_based/sftarget_reader.h"
+#include "framework/counts.h"
+#include "main/thread.h"
 
-#include "main/snort_debug.h"
-#include "libs/file_config.h"
 #include "file_api.h"
-#include <stdio.h>
-#include <stdlib.h>
+#include "file_config.h"
 
 #define MAX_PROTOCOL_ORDINAL 8192  // FIXIT-L use std::vector and get_protocol_count()
 
-typedef struct _File_Stats
+struct FileCounts
 {
-    uint64_t files_total;
-    uint64_t files_processed[FILE_ID_MAX + 1][2];
-    uint64_t signatures_processed[FILE_ID_MAX + 1][2];
-    uint64_t verdicts_type[FILE_VERDICT_MAX];
-    uint64_t verdicts_signature[FILE_VERDICT_MAX];
-    uint64_t files_by_proto[MAX_PROTOCOL_ORDINAL + 1];
-    uint64_t signatures_by_proto[MAX_PROTOCOL_ORDINAL + 1];
-    uint64_t data_processed[FILE_ID_MAX + 1][2];
-    uint64_t file_data_total;
-    uint64_t files_sig_depth;
-} FileStats;
+    PegCount files_total;
+    PegCount file_data_total;
+    PegCount cache_add_fails;
+    PegCount files_over_flow_limit_not_processed;
+    PegCount max_concurrent_files_per_flow;
+    PegCount files_buffered_total;
+    PegCount files_released_total;
+    PegCount files_freed_total;
+    PegCount files_captured_total;
+    PegCount file_memcap_failures_total;
+    PegCount file_memcap_failures_reserve;  // This happens during reserve
+    PegCount file_reserve_failures;         // This happens during reserve
+    PegCount file_size_min;                 // This happens during reserve
+    PegCount file_size_max;                 // This happens during reserve
+    PegCount file_within_packet;
+    PegCount file_buffers_used_max;         // maximum buffers used simultaneously
+    PegCount file_buffers_allocated_total;
+    PegCount file_buffers_freed_total;
+    PegCount file_buffers_released_total;
+    PegCount file_buffers_free_errors;
+    PegCount file_buffers_release_errors;
+};
 
-extern FileStats file_stats;
+struct FileStats
+{
+    PegCount files_processed[FILE_ID_MAX + 1][2];
+    PegCount signatures_processed[FILE_ID_MAX + 1][2];
+    PegCount verdicts_type[FILE_VERDICT_MAX];
+    PegCount verdicts_signature[FILE_VERDICT_MAX];
+    PegCount files_by_proto[MAX_PROTOCOL_ORDINAL + 1];
+    PegCount signatures_by_proto[MAX_PROTOCOL_ORDINAL + 1];
+    PegCount data_processed[FILE_ID_MAX + 1][2];
+};
 
-#define FILE_DEBUG_MSGS(msg) DEBUG_WRAP(DebugMessage(DEBUG_FILE, msg); )
+extern THREAD_LOCAL FileCounts file_counts;
+extern THREAD_LOCAL FileStats* file_stats;
 
-void printFileContext(FileContext* context);
+void file_stats_init();
+void file_stats_term();
 
-void print_file_stats();
-
-/*
- * Print out file statistics
- */
-void print_file_stats(int exiting);
+void file_stats_sum();
+void file_stats_print();
 
 #endif
 

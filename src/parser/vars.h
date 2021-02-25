@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,25 +20,14 @@
 #ifndef VARS_H
 #define VARS_H
 
-#include "main/snort_types.h"
+#include <cstdint>
+
 #include "sfip/sf_vartable.h"
 
-struct SnortConfig;
-
-//-------------------------------------------------------------------------
-// var node stuff
-//-------------------------------------------------------------------------
-
-struct VarNode
+namespace snort
 {
-    char* name;
-    char* value;
-    char* line;
-    VarNode* next;
-};
-
-void config_set_var(SnortConfig*, const char*);
-void FreeVarList(VarNode*);
+struct SnortConfig;
+}
 
 //-------------------------------------------------------------------------
 // var table stuff
@@ -57,13 +46,11 @@ struct VarEntry
     VarEntry* next;
 };
 
-VarEntry* VarDefine(SnortConfig*, const char* name, const char* value);
-int PortVarDefine(SnortConfig*, const char* name, const char* s);
-void ParseIpVar(SnortConfig*, const char* name, const char* s);  // FIXIT-L actually in
-                                                                    // parse_conf.cc
+void ParsePathVar(const char* name, const char* value);
+void ParsePortVar(const char* name, const char* value);
+
 VarEntry* VarAlloc();
 void DeleteVars(VarEntry* var_table);
-void AddVarToTable(SnortConfig*, const char*, const char*);
 
 enum VarType
 {
@@ -74,14 +61,10 @@ enum VarType
 
 int VarIsIpAddr(vartable_t* ip_vartable, const char* value);
 int VarIsIpList(vartable_t* ip_vartable, const char* value);
-void DisallowCrossTableDuplicateVars(SnortConfig*, const char* name, VarType var_type);
-const char* VarGet(SnortConfig*, const char* name);
-/*
- * Same as VarGet - but this does not Fatal out if a var is not found
- */
-const char* VarSearch(SnortConfig*, const char* name);
+void DisallowCrossTableDuplicateVars(const char* name, VarType var_type);
 
-const char* ExpandVars(SnortConfig*, const char* string);
+const char* VarSearch(const char* name);
+const char* ExpandVars(const char* string);
 
 #endif
 

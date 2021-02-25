@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2008-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,19 +20,7 @@
 #ifndef DYN_ARRAY_H
 #define DYN_ARRAY_H
 
-/* Dynamic array bound checks:
- * If index is greater than maxElement then realloc like operation is performed.
- *
- * @param dynArray - dynamic array
- *
- * @param index - 0 based. Index of element that will be accessed by application
- *    either as rvalue or lvalue.
- *
- * @param maxElements - Number of elements already allocated in dynArray.
- *     0 value means no elements are allocated
- *     and therefore dynArray[0] will cause memory allocation.
- */
-int sfDynArrayCheckBounds(
+int sfDynArrayCheckBounds(  // FIXIT-L change return type to bool
     void** dynArray, unsigned int index, unsigned int* maxElements);
 
 #endif

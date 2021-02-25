@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,40 +22,37 @@
 #ifndef PORT_OBJECT_H
 #define PORT_OBJECT_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
-#include "framework/bits.h"
 #include "utils/sflsq.h"
 
 //-------------------------------------------------------------------------
 // PortObject supports a set of PortObjectItems
+// associates rules with a PortGroup.
 //-------------------------------------------------------------------------
 
+struct PortGroup;
 struct PortObjectItem;
 
 struct PortObject
 {
-    char* name;                 /* user name - always use strdup or malloc for this*/
+    // FIXIT-L convert char* to C++ string
+    char* name;                 /* user name */
     int id;                     /* internal tracking - compiling sets this value */
 
     SF_LIST* item_list;         /* list of port and port-range items */
     SF_LIST* rule_list;         /* list of rules  */
 
-    void* data;                 /* user data, PortGroup based on rule_list - only used by any-any
-                                  ports */
-    void (* data_free)(void*);
+    PortGroup* group;           // based on rule_list - only used by any-any ports
 };
 
 PortObject* PortObjectNew();
-void PortObjectFree(void* p);
+void PortObjectFree(void*);
+void PortObjectFinalize(PortObject*);
 
 int PortObjectSetName(PortObject*, const char* name);
 int PortObjectAddItem(PortObject*, PortObjectItem*, int* errflag);
 int PortObjectAddPortObject(PortObject* podst, PortObject* posrc, int* errflag);
-int PortObjectAddPort(PortObject*, int port, int not_flag);
-int PortObjectAddRange(PortObject*, int lport, int hport, int not_flag);
+int PortObjectAddPort(PortObject*, int port);
+int PortObjectAddRange(PortObject*, int lport, int hport);
 int PortObjectAddRule(PortObject*, int rule);
 int PortObjectAddPortAny(PortObject*);
 
@@ -63,27 +60,22 @@ PortObject* PortObjectDup(PortObject*);
 PortObject* PortObjectDupPorts(PortObject*);
 
 int PortObjectNormalize(PortObject*);
-int PortObjectNegate(PortObject*);
 void PortObjectToggle(PortObject*);
-int PortObjectEqual(PortObject* poa, PortObject* bob);
+bool PortObjectEqual(PortObject* poa, PortObject* pob);
 
 int PortObjectPortCount(PortObject*);
 int PortObjectHasPort(PortObject*, int port);
-int PortObjectHasNot(PortObject*);
 int PortObjectIsPureNot(PortObject*);
 int PortObjectHasAny(PortObject*);
-int PortObjectIncludesPort(PortObject*, int port);
 
 int PortObjectRemovePorts(PortObject* a,  PortObject* b);
 PortObject* PortObjectAppend(PortObject* poa, PortObject* pob);
-PortObject* PortObjectAppendPortObject(PortObject* poa, PortObject* pob);
-PortObject* PortObjectAppendEx(PortObject* poa, PortObject* pob);
 
 void PortObjectPrint(PortObject*);
 void PortObjectPrintPortsRaw(PortObject*);
 
-void PortObjectPrintEx(PortObject*,
-    void (* print_index_map)(int index, char* buf, int bufsize) );
+typedef void (*po_print_f)(int index, char* buf, int bufsize);
+void PortObjectPrintEx(PortObject*, po_print_f);
 
 #endif
 

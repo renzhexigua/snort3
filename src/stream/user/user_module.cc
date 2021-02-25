@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,14 +17,19 @@
 //--------------------------------------------------------------------------
 // user_module.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "user_module.h"
 
-#include <string>
+#include "stream_user.h"
+#include "trace/trace.h"
+
+using namespace snort;
 using namespace std;
 
-#include "stream_user.h"
-#include "main/snort_config.h"
-#include "stream/stream.h"
+THREAD_LOCAL const Trace* stream_user_trace = nullptr;
 
 //-------------------------------------------------------------------------
 // stream_user module
@@ -32,14 +37,13 @@ using namespace std;
 
 static const Parameter s_params[] =
 {
-    { "session_timeout", Parameter::PT_INT, "1:86400", "30",
+    { "session_timeout", Parameter::PT_INT, "1:max31", "30",
       "session tracking timeout" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
 
-StreamUserModule::StreamUserModule() :
-    Module(MOD_NAME, MOD_HELP, s_params)
+StreamUserModule::StreamUserModule() : Module(MOD_NAME, MOD_HELP, s_params)
 {
     config = nullptr;
 }
@@ -57,13 +61,19 @@ StreamUserConfig* StreamUserModule::get_data()
     return temp;
 }
 
+void StreamUserModule::set_trace(const Trace* trace) const
+{ stream_user_trace = trace; }
+
+const TraceOption* StreamUserModule::get_trace_options() const
+{
+    static const TraceOption stream_user_trace_options(nullptr, 0, nullptr);
+    return &stream_user_trace_options;
+}
+
 bool StreamUserModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("session_timeout") )
-        config->session_timeout = v.get_long();
-
-    else
-        return false;
+        config->session_timeout = v.get_uint32();
 
     return true;
 }
@@ -75,17 +85,4 @@ bool StreamUserModule::begin(const char*, int, SnortConfig*)
 
     return true;
 }
-
-bool StreamUserModule::end(const char*, int, SnortConfig*)
-{
-    return true;
-}
-
-#if 0
-const PegInfo* StreamUserModule::get_pegs() const
-{ return user_pegs; }
-
-PegCount* StreamUserModule::get_counts() const
-{ return (PegCount*)&user_stats; }
-#endif
 

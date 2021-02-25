@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,24 +20,21 @@
 #ifndef FRAMEWORK_CODEC_H
 #define FRAMEWORK_CODEC_H
 
-#include <vector>
+// Codec is a type of plugin that provides protocol-specific encoding and
+// decoding.
+
 #include <cstdint>
-#include <cstddef>
-#include <type_traits> // static_assert
+#include <vector>
 
-#include "main/snort_types.h"
 #include "framework/base_api.h"
-
-// unfortunately necessary due to use of Ipapi in struct
-#include "protocols/ip.h"
-#include "protocols/mpls.h"  // FIXIT-M remove MPLS from Convenience pointers
-#include "protocols/layer.h"
 #include "framework/decode_data.h"
+#include "utils/cpp_macros.h"
 
 struct TextLog;
-struct _daq_pkthdr;
-struct Packet;
-struct Layer;
+struct _daq_msg;
+
+namespace snort
+{
 enum CodecSid : uint32_t;
 
 namespace ip
@@ -57,21 +54,23 @@ namespace icmp
 struct ICMPHdr;
 }
 
+class Flow;
+struct Layer;
+
 // Used by root codecs to add their DLT to their HELP string
-#define STRINGIFY(x) #x
-#define ARG_STRINGIFY(x) STRINGIFY(x)
-#define ADD_DLT(help, x) help " (DLT " ARG_STRINGIFY(x) ")"
+#define ADD_DLT(help, x) help " (DLT " STRINGIFY_MX(x) ")"
 
 constexpr uint8_t MIN_TTL = 64;
 constexpr uint8_t MAX_TTL = 255;
 
 struct RawData
 {
-    const _daq_pkthdr* pkth;
+    const struct _daq_msg* daq_msg;
     const uint8_t* data;
     uint32_t len;
 
-    RawData(const _daq_pkthdr*, const uint8_t*);
+    RawData(const struct _daq_msg* daq_msg, const uint8_t* data, uint32_t len) :
+        daq_msg(daq_msg), data(data), len(len) { }
 };
 
 /*  Decode Flags */
@@ -91,7 +90,7 @@ constexpr uint16_t CODEC_SAVE_LAYER = 0x0004;
 // DECODE_ENCAP_LAYER for the next layer (and only the next layer).
 constexpr uint16_t CODEC_ENCAP_LAYER = (CODEC_SAVE_LAYER | CODEC_UNSURE_ENCAP );
 
-// used to check ip6 extensino order
+// used to check ip6 extension order
 constexpr uint16_t CODEC_ROUTING_SEEN = 0x0008;
 
 // used by icmp4 for alerting
@@ -109,31 +108,39 @@ constexpr uint16_t CODEC_TEREDO_SEEN = 0x0080;
 constexpr uint16_t CODEC_STREAM_REBUILT = 0x0100;
 constexpr uint16_t CODEC_NON_IP_TUNNEL = 0x0200;
 
+constexpr uint16_t CODEC_IP6_EXT_OOO = 0x0400;
+constexpr uint16_t CODEC_IP6_BAD_OPT = 0x0800;
+
+constexpr uint16_t CODEC_ETHER_NEXT = 0x1000;
+
 constexpr uint16_t CODEC_IPOPT_FLAGS = (CODEC_IPOPT_RR_SEEN |
     CODEC_IPOPT_RTRALT_SEEN | CODEC_IPOPT_LEN_THREE);
 
+struct SnortConfig;
+
 struct CodecData
 {
+    const SnortConfig* conf;
+
     /* This section will get reset before every decode() function call */
-    uint16_t next_prot_id;      /* protocol type of the next layer */
-    uint16_t lyr_len;           /* The length of the valid part layer */
-    uint16_t invalid_bytes;     /* the length of the INVALID part of this layer */
+    ProtocolId next_prot_id;      /* protocol type of the next layer */
+    uint16_t lyr_len = 0;           /* The length of the valid part layer */
+    uint16_t invalid_bytes = 0;     /* the length of the INVALID part of this layer */
 
     /* Reset before each decode of packet begins */
 
-    /*  Codec specific fields.  These fields are only relevent to codecs. */
-    uint16_t proto_bits;    /* protocols contained within this packet
+    /*  Codec specific fields.  These fields are only relevant to codecs. */
+    uint32_t proto_bits = 0;    /* protocols contained within this packet
                                  -- will be propogated to Snort++ Packet struct*/
-    uint16_t codec_flags;   /* flags used while decoding */
-    uint8_t ip_layer_cnt;
+    uint16_t codec_flags = 0;   /* flags used while decoding */
+    uint8_t ip_layer_cnt = 0;
 
-    /*  The following values have junk values after initialization */
-    uint8_t ip6_extension_count; /* initialized in cd_ipv6.cc */
-    uint8_t curr_ip6_extension;  /* initialized in cd_ipv6.cc */
-    uint8_t ip6_csum_proto;      /* initalized in cd_ipv6.cc.  Used for IPv6 checksums */
+    uint8_t ip6_extension_count = 0;
+    uint8_t curr_ip6_extension = 0;
+    IpProtocol ip6_csum_proto = IpProtocol::IP;   /* Used for IPv6 checksums */
+    bool tunnel_bypass = false;
 
-    CodecData(uint16_t init_prot) : next_prot_id(init_prot), lyr_len(0),
-        invalid_bytes(0), proto_bits(0), codec_flags(0), ip_layer_cnt(0)
+    CodecData(const SnortConfig* sc, ProtocolId init_prot) : conf(sc), next_prot_id(init_prot)
     { }
 
     bool inline is_cooked() const
@@ -170,18 +177,18 @@ struct SO_PUBLIC EncState
     const ip::IpApi& ip_api; /* IP related information. Good for checksums */
     EncodeFlags flags;
     const uint16_t dsize; /* for non-inline, TCP sequence numbers */
-    uint16_t next_ethertype; /*  set the next encoder 'proto' field to this value. */
-    uint8_t next_proto; /*  set the next encoder 'proto' field to this value. */
+    ProtocolId next_ethertype; /*  set the next encoder 'proto' field to this value. */
+    IpProtocol next_proto; /*  set the next encoder 'proto' field to this value. */
     const uint8_t ttl;
 
-    EncState(const ip::IpApi& api, EncodeFlags f, uint8_t pr,
+    EncState(const ip::IpApi& api, EncodeFlags f, IpProtocol pr,
         uint8_t t, uint16_t data_size);
 
     inline bool next_proto_set() const
-    { return (next_proto != ENC_PROTO_UNSET); }
+    { return (next_proto != IpProtocol::PROTO_NOT_SET); }
 
     inline bool ethertype_set() const
-    { return next_ethertype != 0; }
+    { return next_ethertype != ProtocolId::ETHERTYPE_NOT_SET; }
 
     inline bool forward() const
     { return flags & ENC_FLAG_FWD; }
@@ -233,7 +240,7 @@ constexpr UpdateFlags UPD_REBUILT_FRAG = 0x08;
 class SO_PUBLIC Codec
 {
 public:
-    virtual ~Codec() { }
+    virtual ~Codec() = default;
 
     // PKT_MAX = ETHERNET_HEADER_LEN + VLAN_HEADER + ETHERNET_MTU + IP_MAXPACKET
 
@@ -253,11 +260,11 @@ public:
     inline const char* get_name() const
     { return name; }
     // Registers this Codec's data link type (as defined by libpcap)
-    virtual void get_data_link_type(std::vector<int>&) // FIXIT-M J return a vector == efficient in
+    virtual void get_data_link_type(std::vector<int>&) // FIXIT-M return a vector == efficient in
                                                        // c++11
     { }
     // Register the code's protocol ID's and Ethertypes
-    virtual void get_protocol_ids(std::vector<uint16_t>&)  // FIXIT-M J return a vector ==
+    virtual void get_protocol_ids(std::vector<ProtocolId>&)  // FIXIT-M return a vector ==
                                                            // efficient in c++11
     { }
 
@@ -265,7 +272,7 @@ public:
      * Main decoding function!  Will get called when decoding a packet.
      *
      * PARAMS:
-     *      const RawData& = struct containing informatin about the
+     *      const RawData& = struct containing information about the
      *                      current packet's raw data
      *
      *      CodecData& = Pass information the PacketManager and other
@@ -312,18 +319,18 @@ public:
      *              like IPv4 (original ipv4 header may contain invalid options
      *              which we don't want to copy) and GTP have dynamic lengths.
      *              So, this parameter ensure the encode() function doesn't
-     *              need to revalidatae and recalculate the length.
+     *              need to revalidate and recalculate the length.
      *        EncState& = The current EncState struct
      *        Buffer& = the packet which will be sent. All inward layers will already
      *              be set.
      *
-     * NOTE:  all funtions MUST call the Buffer.allocate() function before
+     * NOTE:  all functions MUST call the Buffer.allocate() function before
      *          manipulating memory.
      */
     virtual bool encode(const uint8_t* const /*raw_in */,
         const uint16_t /*raw_len*/,
         EncState&,
-        Buffer&)
+        Buffer&, Flow*)
     { return true; }
 
     /*
@@ -351,9 +358,9 @@ protected:
     // Create an event with the Codec GID
     void codec_event(const CodecData &, CodecSid);
     // Check the Hop and DST IPv6 extension
-    bool CheckIPV6HopOptions(const RawData&, const CodecData&);
+    bool CheckIPV6HopOptions(const RawData&, CodecData&);
     // NOTE:: data.next_prot_id MUST be set before calling this!!
-    void CheckIPv6ExtensionOrder(CodecData&, const uint8_t proto);
+    void CheckIPv6ExtensionOrder(CodecData&, const IpProtocol);
 
 private:
     const char* name;
@@ -364,7 +371,7 @@ private:
 //-------------------------------------------------------------------------
 
 // this is the current version of the api
-#define CDAPI_VERSION ((BASE_API_VERSION << 16) | 0)
+#define CDAPI_VERSION ((BASE_API_VERSION << 16) | 1)
 
 typedef Codec* (* CdNewFunc)(Module*);
 typedef void (* CdDelFunc)(Codec*);
@@ -385,6 +392,6 @@ struct CodecApi
     CdNewFunc ctor;   // get eval optional instance data
     CdDelFunc dtor;   // clean up instance data
 };
-
+}
 #endif /* FRAMEWORK_CODEC_H */
 

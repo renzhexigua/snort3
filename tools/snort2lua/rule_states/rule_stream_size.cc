@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -23,8 +23,8 @@
 
 #include "conversion_state.h"
 #include "helpers/converter.h"
-#include "rule_states/rule_api.h"
 #include "helpers/s2l_util.h"
+#include "rule_api.h"
 
 namespace rules
 {
@@ -34,8 +34,7 @@ class StreamSize : public ConversionState
 {
 public:
     StreamSize(Converter& c) : ConversionState(c) { }
-    virtual ~StreamSize() { }
-    virtual bool convert(std::istringstream& data);
+    bool convert(std::istringstream& data) override;
 };
 } // namespace
 
@@ -46,9 +45,9 @@ bool StreamSize::convert(std::istringstream& data_stream)
     args = util::get_rule_option_args(data_stream);
     std::istringstream arg_stream(args);
 
-    std::string dir = "";
-    std::string op = "";
-    std::string size = "";
+    std::string dir;
+    std::string op;
+    std::string size;
 
     if (!util::get_string(arg_stream, dir, ",") ||
         !util::get_string(arg_stream, op, ",") ||
@@ -59,8 +58,7 @@ bool StreamSize::convert(std::istringstream& data_stream)
         return set_next_rule_state(data_stream);
     }
 
-    if (!(!op.compare("=")  || !op.compare("<")  || !op.compare(">") ||
-        !op.compare("!=") || !op.compare("<=") || !op.compare(">=")))
+    if (!(op == "=" || op == "<" || op == ">" || op == "!=" || op == "<=" || op == ">="))
     {
         rule_api.bad_rule(data_stream, "'" + op + "' in an invalid stream_size operator.");
     }
@@ -72,45 +70,43 @@ bool StreamSize::convert(std::istringstream& data_stream)
         std::strtoul(size.c_str(), &end, 10);
         rule_api.add_option("stream_size", op + size);
     }
-    catch (const std::invalid_argument& e)
+    catch (const std::invalid_argument&)
     {
         rule_api.bad_rule(data_stream, "stream_size <size> '" + size + "' is too large.");
         rule_api.add_option("stream_size", op + size);
     }
-    catch (const std::out_of_range& e)
+    catch (const std::out_of_range&)
     {
         rule_api.bad_rule(data_stream, "stream_size <size> '" + size + "' is too large.");
         rule_api.add_option("stream_size", op + size);
     }
 
-    if (!dir.compare("either"))
+    if (dir == "either")
         rule_api.add_suboption("either");
 
-    else if (!dir.compare("both"))
+    else if (dir == "both")
         rule_api.add_suboption("both");
 
-    else if (!dir.compare("client"))
+    else if (dir == "client")
     {
-        rule_api.add_suboption("to_client");
+        rule_api.add_suboption("to_server");
 
         static bool printed_client = false;
         if (!printed_client)
         {
             printed_client = true;
-            rule_api.add_comment("stream_size: option change: 'client'"
-                " --> 'to_client'");
+            rule_api.add_comment("stream_size: option change: 'client' --> 'to_server'");
         }
     }
-    else if (!dir.compare("server"))
+    else if (dir == "server")
     {
-        rule_api.add_suboption("to_server");
+        rule_api.add_suboption("to_client");
 
         static bool printed_server = false;
         if (!printed_server)
         {
             printed_server = true;
-            rule_api.add_comment("stream_size: option change: 'server'"
-                " --> 'to_server'");
+            rule_api.add_comment("stream_size: option change: 'server' --> 'to_client'");
         }
     }
     else

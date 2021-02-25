@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,70 +17,88 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "flow.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
+#include "flow.h"
+
+#include "detection/detection_engine.h"
+#include "flow/ha.h"
 #include "flow/session.h"
+#include "framework/data_bus.h"
+#include "helpers/bitop.h"
 #include "ips_options/ips_flowbits.h"
-#include "utils/bitop.h"
-#include "utils/util.h"
+#include "memory/memory_cap.h"
 #include "protocols/packet.h"
+#include "protocols/tcp.h"
 #include "sfip/sf_ip.h"
+#include "utils/stats.h"
+#include "utils/util.h"
 
-unsigned FlowData:: flow_id = 0;
-
-FlowData::FlowData(unsigned u, Inspector* ph)
-{
-    assert(u > 0);
-    id = u;  handler = ph;
-    if ( handler )
-        handler->add_ref();
-}
-
-FlowData::~FlowData()
-{
-    if ( handler )
-        handler->rem_ref();
-}
+using namespace snort;
 
 Flow::Flow()
 {
-    memset(this, 0, sizeof(*this));
+    memory::MemoryCap::update_allocations(sizeof(*this) + sizeof(FlowStash));
+    constexpr size_t offset = offsetof(Flow, key);
+    // FIXIT-L need a struct to zero here to make future proof
+    memset((uint8_t*)this+offset, 0, sizeof(*this)-offset);
 }
 
 Flow::~Flow()
-{ }
-
-void Flow::init(PktType proto)
 {
-    protocol = proto;
+    memory::MemoryCap::update_deallocations(sizeof(*this) + sizeof(FlowStash));
+    term();
+}
 
-    // FIXIT-M this should just use C++11 bitset.
-    // FIXIT-M getFlowbitSizeInBytes() should be attribute of ??? (or eliminate)
-    /* use giFlowbitSize - 1, since there is already 1 byte in the
-    * StreamFlowData structure */
-    size_t sz = sizeof(StreamFlowData) + getFlowbitSizeInBytes() - 1;
-    flowdata = (StreamFlowData*)calloc(sz, 1);
+void Flow::init(PktType type)
+{
+    pkt_type = type;
+    bitop = nullptr;
 
-    if ( flowdata )
-        boInitStaticBITOP(&(flowdata->boFlowbits), getFlowbitSizeInBytes(), flowdata->flowb);
+    if ( HighAvailabilityManager::active() )
+    {
+        ha_state = new FlowHAState;
+        previous_ssn_state = ssn_state;
+    }
+    mpls_client.length = 0;
+    mpls_server.length = 0;
+
+    stash = new FlowStash;
 }
 
 void Flow::term()
 {
-    if ( session )
-        delete session;
+    if ( !session )
+        return;
 
-    free_application_data();
+    delete session;
+    session = nullptr;
+
+    if ( flow_data )
+        free_flow_data();
+
+    if ( mpls_client.length )
+        delete[] mpls_client.start;
+
+    if ( mpls_server.length )
+        delete[] mpls_server.start;
+
+    if ( bitop )
+        delete bitop;
 
     if ( ssn_client )
+    {
         ssn_client->rem_ref();
+        ssn_client = nullptr;
+    }
 
     if ( ssn_server )
+    {
         ssn_server->rem_ref();
+        ssn_server = nullptr;
+    }
 
     if ( clouseau )
         clouseau->rem_ref();
@@ -88,16 +106,85 @@ void Flow::term()
     if ( gadget )
         gadget->rem_ref();
 
-    if ( flowdata )
-        free(flowdata);
+    if (assistant_gadget)
+        assistant_gadget->rem_ref();
+
+    if ( data )
+        clear_data();
+
+    if ( ha_state )
+        delete ha_state;
+
+    if (stash)
+    {
+        delete stash;
+        stash = nullptr;
+    }
 }
 
-void Flow::reset()
+inline void Flow::clean()
+{
+    if ( mpls_client.length )
+    {
+        delete[] mpls_client.start;
+        mpls_client.length = 0;
+    }
+    if ( mpls_server.length )
+    {
+        delete[] mpls_server.start;
+        mpls_server.length = 0;
+    }
+    if ( bitop )
+    {
+        delete bitop;
+        bitop = nullptr;
+    }
+    filtering_state.clear();
+}
+
+void Flow::flush(bool do_cleanup)
 {
     if ( session )
-        session->cleanup();
+    {
+        DetectionEngine::onload(this);
 
-    free_application_data();
+        if ( do_cleanup )
+        {
+            DetectionEngine::set_next_packet();
+            DetectionEngine de;
+
+            session->flush();
+            de.get_context()->clear_callbacks();
+        }
+        else
+            session->clear();
+    }
+
+    if ( was_blocked() )
+        free_flow_data();
+}
+
+void Flow::reset(bool do_cleanup)
+{
+    if ( session )
+    {
+        DetectionEngine::onload(this);
+
+        if ( do_cleanup )
+        {
+            DetectionEngine::set_next_packet();
+            DetectionEngine de;
+
+            session->cleanup();
+
+            de.get_context()->clear_callbacks();
+        }
+        else
+            session->clear();
+    }
+
+    free_flow_data();
+    clean();
 
     // FIXIT-M cleanup() winds up calling clear()
     if ( ssn_client )
@@ -119,31 +206,40 @@ void Flow::reset()
     if ( data )
         clear_data();
 
-    constexpr size_t offset = offsetof(Flow, appDataList);
+    if ( ha_state )
+        ha_state->reset();
+
+    if ( stash )
+        stash->reset();
+
+    deferred_trust.clear();
+
+    constexpr size_t offset = offsetof(Flow, context_chain);
     // FIXIT-L need a struct to zero here to make future proof
     memset((uint8_t*)this+offset, 0, sizeof(Flow)-offset);
-
-    boResetBITOP(&(flowdata->boFlowbits));
 }
 
-void Flow::restart(bool freeAppData)
+void Flow::restart(bool dump_flow_data)
 {
-    if ( freeAppData )
-        free_application_data();
+    DetectionEngine::onload(this);
 
-    boResetBITOP(&(flowdata->boFlowbits));
+    if ( dump_flow_data )
+        free_flow_data();
+
+    clean();
 
     ssn_state.ignore_direction = 0;
     ssn_state.session_flags = SSNFLAG_NONE;
 
     session_state = STREAM_STATE_NONE;
     expire_time = 0;
+    previous_ssn_state = ssn_state;
 }
 
-void Flow::clear(bool freeAppData)
+void Flow::clear(bool dump_flow_data)
 {
-    restart(freeAppData);
-    set_state(SETUP);
+    restart(dump_flow_data);
+    set_state(FlowState::SETUP);
 
     if ( ssn_client )
     {
@@ -162,45 +258,59 @@ void Flow::clear(bool freeAppData)
         clear_gadget();
 }
 
-int Flow::set_application_data(FlowData* fd)
+void Flow::trust()
 {
-    FlowData* appData = get_application_data(fd->get_id());
-    assert(appData != fd);
+    set_ignore_direction(SSN_DIR_BOTH);
+    set_state(Flow::FlowState::ALLOW);
+    disable_inspection();
+}
 
-    if (appData)
-        free_application_data(appData);
+int Flow::set_flow_data(FlowData* fd)
+{
+    FlowData* old = get_flow_data(fd->get_id());
+    assert(old != fd);
+
+    if (old)
+        free_flow_data(old);
 
     fd->prev = nullptr;
-    fd->next = appDataList;
+    fd->next = flow_data;
 
-    if ( appDataList )
-        appDataList->prev = fd;
+    if ( flow_data )
+        flow_data->prev = fd;
 
-    appDataList = fd;
+    flow_data = fd;
+
+    // this is after actual allocation so we can't prune beforehand
+    // but if we are that close to the edge we are in trouble anyway
+    // large allocations can be accounted for directly
+    fd->update_allocations(fd->size_of());
+
     return 0;
 }
 
-FlowData* Flow::get_application_data(unsigned id)
+FlowData* Flow::get_flow_data(unsigned id) const
 {
-    FlowData* appData = appDataList;
+    FlowData* fd = flow_data;
 
-    while (appData)
+    while (fd)
     {
-        if (appData->get_id() == id)
-            return appData;
+        if (fd->get_id() == id)
+            return fd;
 
-        appData = appData->next;
+        fd = fd->next;
     }
     return nullptr;
 }
 
-void Flow::free_application_data(FlowData* fd)
+// FIXIT-L: implement doubly linked list with STL to cut down on code we maintain
+void Flow::free_flow_data(FlowData* fd)
 {
-    if ( fd == appDataList )
+    if ( fd == flow_data )
     {
-        appDataList = fd->next;
-        if ( appDataList )
-            appDataList->prev = nullptr;
+        flow_data = fd->next;
+        if ( flow_data )
+            flow_data->prev = nullptr;
     }
     else if ( !fd->next )
     {
@@ -211,42 +321,41 @@ void Flow::free_application_data(FlowData* fd)
         fd->prev->next = fd->next;
         fd->next->prev = fd->prev;
     }
+    fd->update_deallocations(fd->size_of());
     delete fd;
 }
 
-void Flow::free_application_data(uint32_t proto)
+void Flow::free_flow_data(uint32_t proto)
 {
-    FlowData* fd = get_application_data(proto);
+    FlowData* fd = get_flow_data(proto);
 
     if ( fd )
-        free_application_data(fd);
+        free_flow_data(fd);
 }
 
-void Flow::free_application_data()
+void Flow::free_flow_data()
 {
-    FlowData* appData = appDataList;
-
-    while (appData)
+    while (flow_data)
     {
-        FlowData* tmp = appData;
-        appData = appData->next;
+        FlowData* tmp = flow_data;
+        flow_data = flow_data->next;
+        tmp->update_deallocations(tmp->size_of());
         delete tmp;
     }
-    appDataList = nullptr;
 }
 
 void Flow::call_handlers(Packet* p, bool eof)
 {
-    FlowData* appData = appDataList;
+    FlowData* fd = flow_data;
 
-    while (appData)
+    while (fd)
     {
         if ( eof )
-            appData->handle_eof(p);
+            fd->handle_eof(p);
         else
-            appData->handle_retransmit(p);
+            fd->handle_retransmit(p);
 
-        appData = appData->next;
+        fd = fd->next;
     }
 }
 
@@ -267,19 +376,35 @@ void Flow::markup_packet_flags(Packet* p)
         if ( p->packet_flags & PKT_STREAM_UNEST_UNI )
             p->packet_flags ^= PKT_STREAM_UNEST_UNI;
     }
-    if ( ssn_state.session_flags & SSNFLAG_STREAM_ORDER_BAD )
-        p->packet_flags |= PKT_STREAM_ORDER_BAD;
+}
+
+void Flow::set_client_initiate(Packet* p)
+{
+    if (p->pkth->flags & DAQ_PKT_FLAG_REV_FLOW)
+        flags.client_initiated = p->is_from_server();
+    // If we are tracking on syn, client initiated follows from client
+    else if (p->context->conf->track_on_syn())
+        flags.client_initiated = p->is_from_client();
+    // If not tracking on SYN and the packet is a SYN-ACK, assume the SYN did not create a
+    // session and client initiated follows from server
+    else if (p->is_tcp() and p->ptrs.tcph->is_syn_ack())
+        flags.client_initiated = p->is_from_server();
+    // Otherwise, client initiated follows from client
+    else
+        flags.client_initiated = p->is_from_client();
 }
 
 void Flow::set_direction(Packet* p)
 {
     ip::IpApi* ip_api = &p->ptrs.ip_api;
 
+    // FIXIT-M This does not work properly for NAT "real" v6 addresses on top of v4 packet data
+    //  (it will only compare a portion of the address)
     if (ip_api->is_ip4())
     {
-        if (sfip_fast_eq4(ip_api->get_src(), &client_ip))
+        if (ip_api->get_src()->fast_eq4(client_ip))
         {
-            if ( !(p->proto_bits & (PROTO_BIT__TCP | PROTO_BIT__UDP)) )
+            if ( p->type() != PktType::TCP and p->type() != PktType::UDP )
                 p->packet_flags |= PKT_FROM_CLIENT;
 
             else if (p->ptrs.sp == client_port)
@@ -288,9 +413,9 @@ void Flow::set_direction(Packet* p)
             else
                 p->packet_flags |= PKT_FROM_SERVER;
         }
-        else if (sfip_fast_eq4(ip_api->get_dst(), &client_ip))
+        else if (ip_api->get_dst()->fast_eq4(client_ip))
         {
-            if ( !(p->proto_bits & (PROTO_BIT__TCP | PROTO_BIT__UDP)) )
+            if ( p->type() != PktType::TCP and p->type() != PktType::UDP )
                 p->packet_flags |= PKT_FROM_SERVER;
 
             else if (p->ptrs.dp == client_port)
@@ -302,9 +427,9 @@ void Flow::set_direction(Packet* p)
     }
     else /* IS_IP6(p) */
     {
-        if (sfip_fast_eq6(ip_api->get_src(), &client_ip))
+        if (ip_api->get_src()->fast_eq6(client_ip))
         {
-            if ( !(p->proto_bits & (PROTO_BIT__TCP | PROTO_BIT__UDP)) )
+            if ( p->type() != PktType::TCP and p->type() != PktType::UDP )
                 p->packet_flags |= PKT_FROM_CLIENT;
 
             else if (p->ptrs.sp == client_port)
@@ -313,9 +438,9 @@ void Flow::set_direction(Packet* p)
             else
                 p->packet_flags |= PKT_FROM_SERVER;
         }
-        else if (sfip_fast_eq6(ip_api->get_dst(), &client_ip))
+        else if (ip_api->get_dst()->fast_eq6(client_ip))
         {
-            if ( !(p->proto_bits & (PROTO_BIT__TCP | PROTO_BIT__UDP)) )
+            if ( p->type() != PktType::TCP and p->type() != PktType::UDP )
                 p->packet_flags |= PKT_FROM_SERVER;
 
             else if (p->ptrs.dp == client_port)
@@ -327,27 +452,9 @@ void Flow::set_direction(Packet* p)
     }
 }
 
-static constexpr int TCP_HZ = 100;
-
-static inline uint64_t CalcJiffies(const Packet* p)
-{
-    uint64_t ret = 0;
-    uint64_t sec = (uint64_t)p->pkth->ts.tv_sec * TCP_HZ;
-    uint64_t usec = (p->pkth->ts.tv_usec / (1000000UL/TCP_HZ));
-
-    ret = sec + usec;
-
-    return ret;
-}
-
 void Flow::set_expire(const Packet* p, uint32_t timeout)
 {
-    expire_time = CalcJiffies(p) + (timeout * TCP_HZ);
-}
-
-int Flow::get_expire(const Packet* p)
-{
-    return ( CalcJiffies(p) > expire_time );
+    expire_time = (uint64_t)p->pkth->ts.tv_sec + timeout;
 }
 
 bool Flow::expired(const Packet* p)
@@ -355,9 +462,7 @@ bool Flow::expired(const Packet* p)
     if ( !expire_time )
         return false;
 
-    uint64_t pkttime = CalcJiffies(p);
-
-    if ( (int)(pkttime - expire_time) > 0 )
+    if ( (uint64_t)p->pkth->ts.tv_sec > expire_time )
         return true;
 
     return false;
@@ -380,8 +485,7 @@ void Flow::set_ttl(Packet* p, bool client)
      */
     if (outer_ip_api.is_ip())
     {
-        // FIXIT-J!! -- Do we want more than just the outermost
-        //            and innermost ttl()?
+        // FIXIT-L do we want more than just the outermost and innermost ttl()?
         outer_ttl = outer_ip_api.ttl();
         inner_ttl = p->ptrs.ip_api.ttl();
     }
@@ -398,3 +502,66 @@ void Flow::set_ttl(Packet* p, bool client)
     }
 }
 
+void Flow::set_mpls_layer_per_dir(Packet* p)
+{
+    const Layer* mpls_lyr = layer::get_mpls_layer(p);
+
+    if ( !mpls_lyr || !(mpls_lyr->start) )
+        return;
+
+    if ( p->packet_flags & PKT_FROM_CLIENT )
+    {
+        if ( !mpls_client.length )
+        {
+            mpls_client.length = mpls_lyr->length;
+            mpls_client.prot_id = mpls_lyr->prot_id;
+            mpls_client.start = new uint8_t[mpls_lyr->length];
+            memcpy((void *)mpls_client.start, mpls_lyr->start, mpls_lyr->length);
+        }
+    }
+    else
+    {
+        if ( !mpls_server.length )
+        {
+            mpls_server.length = mpls_lyr->length;
+            mpls_server.prot_id = mpls_lyr->prot_id;
+            mpls_server.start = new uint8_t[mpls_lyr->length];
+            memcpy((void *)mpls_server.start, mpls_lyr->start, mpls_lyr->length);
+        }
+    }
+}
+
+Layer Flow::get_mpls_layer_per_dir(bool client)
+{
+    if ( client )
+        return mpls_client;
+    else
+        return mpls_server;
+}
+
+bool Flow::is_pdu_inorder(uint8_t dir)
+{
+    return ( (session != nullptr) && session->is_sequenced(dir)
+            && (session->missing_in_reassembled(dir) == SSN_MISSING_NONE)
+            && !(ssn_state.session_flags & SSNFLAG_MIDSTREAM));
+}
+
+void Flow::set_service(Packet* pkt, const char* new_service)
+{
+    service = new_service;
+    DataBus::publish(FLOW_SERVICE_CHANGE_EVENT, pkt);
+}
+
+void Flow::swap_roles()
+{
+    std::swap(flowstats.client_pkts, flowstats.server_pkts);
+    std::swap(flowstats.client_bytes, flowstats.server_bytes);
+    std::swap(mpls_client, mpls_server);
+    std::swap(client_ip, server_ip);
+    std::swap(client_intf, server_intf);
+    std::swap(client_group, server_group);
+    std::swap(client_port, server_port);
+    std::swap(inner_client_ttl, inner_server_ttl);
+    std::swap(outer_client_ttl, outer_server_ttl);
+    flags.client_initiated = !flags.client_initiated;
+}

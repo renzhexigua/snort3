@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2011-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,35 +16,38 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-//
-// sip_common.h
-// Author: Hui Cao <huica@cisco.com>
+
+// sip_common.h author Hui Cao <huica@cisco.com>
 
 #ifndef SIP_COMMON_H
 #define SIP_COMMON_H
 
-typedef enum _SIP_method
-{
-    SIP_METHOD_NULL        = 0, //0x0000,
-    SIP_METHOD_INVITE      = 1, //0x0001,
-    SIP_METHOD_CANCEL      = 2, //0x0002,
-    SIP_METHOD_ACK         = 3, //0x0004,
-    SIP_METHOD_BYE         = 4, //0x0008,
-    SIP_METHOD_REGISTER    = 5, //0x0010,
-    SIP_METHOD_OPTIONS     = 6, //0x0020,
-    SIP_METHOD_REFER       = 7, //0x0040,
-    SIP_METHOD_SUBSCRIBE   = 8, //0x0080,
-    SIP_METHOD_UPDATE      = 9, //0x0100,
-    SIP_METHOD_JOIN        = 10,//0x0200,
-    SIP_METHOD_INFO        = 11,//0x0400,
-    SIP_METHOD_MESSAGE     = 12,//0x0800,
-    SIP_METHOD_NOTIFY      = 13,//0x1000,
-    SIP_METHOD_PRACK       = 14,//0x2000,
-    SIP_METHOD_USER_DEFINE = 15,//0x4000,
-    SIP_METHOD_USER_DEFINE_MAX = 32//0x80000000,
-} SIPMethodsFlag;
+#include "sfip/sf_ip.h"
 
-typedef struct _SipHeaders
+// Header containing datatypes/definitions shared by SIP inspector files.
+
+enum SIPMethodsFlag
+{
+    SIP_METHOD_NULL        = 0,    // 0x0000,
+    SIP_METHOD_INVITE      = 1,    // 0x0001,
+    SIP_METHOD_CANCEL      = 2,    // 0x0002,
+    SIP_METHOD_ACK         = 3,    // 0x0004,
+    SIP_METHOD_BYE         = 4,    // 0x0008,
+    SIP_METHOD_REGISTER    = 5,    // 0x0010,
+    SIP_METHOD_OPTIONS     = 6,    // 0x0020,
+    SIP_METHOD_REFER       = 7,    // 0x0040,
+    SIP_METHOD_SUBSCRIBE   = 8,    // 0x0080,
+    SIP_METHOD_UPDATE      = 9,    // 0x0100,
+    SIP_METHOD_JOIN        = 10,   // 0x0200,
+    SIP_METHOD_INFO        = 11,   // 0x0400,
+    SIP_METHOD_MESSAGE     = 12,   // 0x0800,
+    SIP_METHOD_NOTIFY      = 13,   // 0x1000,
+    SIP_METHOD_PRACK       = 14,   // 0x2000,
+    SIP_METHOD_USER_DEFINE = 15,   // 0x4000,
+    SIP_METHOD_USER_DEFINE_MAX = 32// 0x80000000,
+};
+
+struct SipHeaders
 {
     const char* callid;
     const char* from;
@@ -58,61 +61,49 @@ typedef struct _SipHeaders
     uint16_t userNameLen;
 
     SIPMethodsFlag methodFlag;
-} SipHeaders;
+};
 
-typedef enum _SIP_DialogState
+enum SIP_DialogState
 {
-    SIP_DLG_CREATE = 1,   //1
-    SIP_DLG_INVITING,     //2
-    SIP_DLG_EARLY,        //3
-    SIP_DLG_AUTHENCATING, //4
-    SIP_DLG_ESTABLISHED,  //5
-    SIP_DLG_REINVITING,   //6
-    SIP_DLG_TERMINATING,  //7
-    SIP_DLG_TERMINATED    //8
-} SIP_DialogState;
+    SIP_DLG_CREATE = 1,   // 1
+    SIP_DLG_INVITING,     // 2
+    SIP_DLG_EARLY,        // 3
+    SIP_DLG_AUTHENCATING, // 4
+    SIP_DLG_ESTABLISHED,  // 5
+    SIP_DLG_REINVITING,   // 6
+    SIP_DLG_TERMINATING,  // 7
+    SIP_DLG_TERMINATED    // 8
+};
 
-typedef struct _SIP_MediaData
+struct SIP_MediaData
 {
-    sfip_t maddress;  // media IP
+    snort::SfIp maddress;  // media IP
     uint16_t mport;   // media port
     uint8_t numPort;   // number of media ports
-    struct _SIP_MediaData* nextM;
-} SIP_MediaData;
+    SIP_MediaData* nextM;
+} ;
 
 typedef SIP_MediaData* SIP_MediaDataList;
 
-typedef struct _SIP_MediaSession
+struct SIP_MediaSession
 {
     uint32_t sessionID; // a hash value of the session
     int savedFlag;      // whether this data has been saved by a dialog,
                         // if savedFlag = 1, this session will be deleted after sip message is
                         // processed.
-    sfip_t maddress_default;  //Default media IP
-    SIP_MediaDataList medias; //Media list in the session
-    struct _SIP_MediaSession* nextS; // Next media session
-} SIP_MediaSession;
+    snort::SfIp maddress_default;  // Default media IP
+    SIP_MediaDataList medias; // Media list in the session
+    SIP_MediaSession* nextS; // Next media session
+};
 
 typedef SIP_MediaSession* SIP_MediaList;
 
-typedef struct _SipDialog
+struct SipDialog
 {
     SIP_DialogState state;
     SIP_MediaList mediaSessions;
     bool mediaUpdated;
-} SipDialog;
+};
 
-typedef struct _SipEventData
-{
-    const Packet* packet;
-    const SipHeaders* headers;
-    const SipDialog* dialog;
-} SipEventData;
-
-typedef enum _SipEventType
-{
-    SIP_EVENT_TYPE_SIP_DIALOG
-} SipEventType;
-
-#endif /* SIP_COMMON_H */
+#endif
 

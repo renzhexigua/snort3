@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2008-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,39 +17,34 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "dyn_array.h"
 
-#include "stdlib.h"
-#include "stdio.h"
-#include "string.h"
-#include "snort_debug.h"
-#include "sfrt/sfrt.h"
+#include "util.h"
 
-/**Number of additional policies allocated with each re-alloc operation. */
+// number of additional policies allocated with each re-alloc operation
 #define POLICY_ALLOCATION_CHUNK 10
 
-// FIXIT-L replace with vector
-int sfDynArrayCheckBounds(
+int sfDynArrayCheckBounds(  // FIXIT-L replace with vector
     void** dynArray,
     unsigned int index,
     unsigned int* maxElements
     )
 {
-    void* ppTmp = NULL;
+    void* ppTmp = nullptr;
 
     if (index >= *maxElements)
     {
         //expand the array
-        ppTmp = calloc(index+POLICY_ALLOCATION_CHUNK, sizeof(void*));
-        if (!(ppTmp))
-        {
-            return -1;
-        }
+        ppTmp = snort_calloc(index+POLICY_ALLOCATION_CHUNK, sizeof(void*));
 
         if (*maxElements)
         {
             memcpy(ppTmp, *dynArray, sizeof(void*)*(*maxElements));
-            free(*dynArray);
+            snort_free(*dynArray);
         }
 
         *dynArray = ppTmp;

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,15 +21,16 @@
 #include "config.h"
 #endif
 
-#include "ssl_inspector.h"
-#include "protocols/ssl.h"
 #include "framework/ips_option.h"
 #include "framework/module.h"
-#include "framework/parameter.h"
-#include "detection/detect.h"
-#include "detection/detection_defines.h"
-#include "hash/sfhashfcn.h"
-#include "time/profiler.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+#include "protocols/ssl.h"
+
+#include "ssl_inspector.h"
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // ssl_version
@@ -57,10 +58,10 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
-    SslVersionRuleOptionData svod;
+    SslVersionRuleOptionData svod = {};
 };
 
 //-------------------------------------------------------------------------
@@ -69,24 +70,20 @@ private:
 
 uint32_t SslVersionOption::hash() const
 {
-    uint32_t a,b,c;
+    uint32_t a = svod.flags;
+    uint32_t b = svod.mask;
+    uint32_t c = IpsOption::hash();
 
-    a = svod.flags;
-    b = svod.mask;
-    c = 0;
-
-    mix_str(a,b,c,get_name());
-    final (a,b,c);
-
+    finalize(a,b,c);
     return c;
 }
 
 bool SslVersionOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    const SslVersionOption& rhs = (SslVersionOption&)ips;
+    const SslVersionOption& rhs = (const SslVersionOption&)ips;
 
     if ( (svod.flags == rhs.svod.flags) &&
         (svod.mask == rhs.svod.mask) )
@@ -95,42 +92,25 @@ bool SslVersionOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int SslVersionOption::eval(Cursor&, Packet* pkt)
+IpsOption::EvalStatus SslVersionOption::eval(Cursor&, Packet* pkt)
 {
-    SSLData* sd;
-
-    PROFILE_VARS;
-    MODULE_PROFILE_START(sslVersionRuleOptionPerfStats);
+    RuleProfile profile(sslVersionRuleOptionPerfStats);
 
     if ( !(pkt->packet_flags & PKT_REBUILT_STREAM) && !pkt->is_full_pdu() )
-    {
-        MODULE_PROFILE_END(sslVersionRuleOptionPerfStats);
-        return DETECTION_OPTION_NO_MATCH;
-    }
+        return NO_MATCH;
 
     if (!pkt->flow)
-    {
-        MODULE_PROFILE_END(sslVersionRuleOptionPerfStats);
-        return DETECTION_OPTION_NO_MATCH;
-    }
+        return NO_MATCH;
 
-    sd = get_ssl_session_data(pkt->flow);
+    SSLData* sd = get_ssl_session_data(pkt->flow);
 
     if (!sd)
-    {
-        MODULE_PROFILE_END(sslVersionRuleOptionPerfStats);
-        return DETECTION_OPTION_NO_MATCH;
-    }
+        return NO_MATCH;
 
     if ((svod.flags & sd->ssn_flags) ^ svod.mask)
-    {
-        MODULE_PROFILE_END(sslVersionRuleOptionPerfStats);
-        return DETECTION_OPTION_MATCH;
-    }
+        return MATCH;
 
-    MODULE_PROFILE_END(sslVersionRuleOptionPerfStats);
-
-    return DETECTION_OPTION_NO_MATCH;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -183,7 +163,11 @@ public:
     ProfileStats* get_profile() const override
     { return &sslVersionRuleOptionPerfStats; }
 
-    SslVersionRuleOptionData svod;
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    SslVersionRuleOptionData svod = {};
 };
 
 bool SslVersionModule::begin(const char*, int, SnortConfig*)

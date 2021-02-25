@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,7 +20,12 @@
 #ifndef STREAM_USER_H
 #define STREAM_USER_H
 
-#include "flow/flow.h"
+#include <cstdint>
+
+namespace snort
+{
+class Inspector;
+}
 
 struct StreamUserConfig
 {
@@ -29,6 +34,6 @@ struct StreamUserConfig
     StreamUserConfig();
 };
 
-StreamUserConfig* get_user_cfg(Inspector*);
+StreamUserConfig* get_user_cfg(snort::Inspector*);
 
 #endif

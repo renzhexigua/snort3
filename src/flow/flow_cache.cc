@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -18,75 +18,81 @@
 //--------------------------------------------------------------------------
 // flow_cache.cc author Russ Combs <rucombs@cisco.com>
 
-#include "flow/flow_cache.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include "packet_io/active.h"
-#include "packet_time.h"
-#include "ips_options/ips_flowbits.h"
+#include "flow/flow_cache.h"
+
+#include "detection/detection_engine.h"
+#include "hash/hash_defs.h"
 #include "hash/zhash.h"
-#include "main/snort_debug.h"
+#include "helpers/flag_context.h"
+#include "ips_options/ips_flowbits.h"
+#include "memory/memory_cap.h"
+#include "packet_io/active.h"
+#include "packet_tracer/packet_tracer.h"
+#include "time/packet_time.h"
+#include "utils/stats.h"
+
+#include "flow.h"
+#include "flow_key.h"
+#include "flow_uni_list.h"
+#include "ha.h"
+#include "session.h"
+
+using namespace snort;
 
 #define SESSION_CACHE_FLAG_PURGING  0x01
+
+static const unsigned ALLOWED_FLOWS_ONLY = 1;
+static const unsigned OFFLOADED_FLOWS_TOO = 2;
+static const unsigned ALL_FLOWS = 3;
 
 //-------------------------------------------------------------------------
 // FlowCache stuff
 //-------------------------------------------------------------------------
 
-FlowCache::FlowCache (
-    const FlowConfig& cfg, uint32_t cleanup_count, uint32_t cleanup_percent) :
-    config(cfg), memcap(cfg.mem_cap)
+FlowCache::FlowCache(const FlowCacheConfig& cfg) : config(cfg)
 {
-    if (cleanup_percent)
-        cleanup_flows = config.max_sessions * cleanup_percent/100;
-
-    else
-        cleanup_flows = cleanup_count;
-
-    if ( !cleanup_flows )
-        cleanup_flows = 1;
-
-    hash_table = new ZHash(config.max_sessions, sizeof(FlowKey));
-    hash_table->set_keyops(FlowKey::hash, FlowKey::compare);
-
-    uni_head = new Flow;
-    uni_tail = new Flow;
-
-    uni_head->next = uni_tail;
-    uni_tail->prev = uni_head;
-
-    prunes = uni_count = 0;
+    hash_table = new ZHash(config.max_flows, sizeof(FlowKey));
+    uni_flows = new FlowUniList;
+    uni_ip_flows = new FlowUniList;
     flags = 0x0;
+
+    assert(prune_stats.get_total() == 0);
 }
 
-FlowCache::~FlowCache ()
+FlowCache::~FlowCache()
 {
-    while ( Flow* flow = (Flow*)hash_table->pop() )
-        flow->term();
-
-    delete uni_head;
-    delete uni_tail;
-
     delete hash_table;
+    delete_uni();
+}
+
+void FlowCache::delete_uni()
+{
+    delete uni_flows;
+    delete uni_ip_flows;
+
+    uni_flows = nullptr;
+    uni_ip_flows = nullptr;
 }
 
 void FlowCache::push(Flow* flow)
 {
     void* key = hash_table->push(flow);
     flow->key = (FlowKey*)key;
+    ++flows_allocated;
 }
 
-int FlowCache::get_count()
+unsigned FlowCache::get_count()
 {
-    return hash_table ? hash_table->get_count() : 0;
+    return hash_table ? hash_table->get_num_nodes() : 0;
 }
 
 Flow* FlowCache::find(const FlowKey* key)
 {
-    Flow* flow = (Flow*)hash_table->find(key);
+    Flow* flow = (Flow*)hash_table->get_user_data(key);
 
     if ( flow )
     {
@@ -95,234 +101,403 @@ Flow* FlowCache::find(const FlowKey* key)
         if ( flow->last_data_seen < t )
             flow->last_data_seen = t;
     }
+
     return flow;
 }
 
 // always prepend
 void FlowCache::link_uni(Flow* flow)
 {
-    flow->next = uni_head->next;
-    flow->prev = uni_head;
-
-    uni_head->next->prev = flow;
-    uni_head->next = flow;
-
-    ++uni_count;
+    if ( flow->pkt_type == PktType::IP )
+        uni_ip_flows->link_uni(flow);
+    else
+        uni_flows->link_uni(flow);
 }
 
 // but remove from any point
 void FlowCache::unlink_uni(Flow* flow)
 {
-    if ( !flow->next )
-        return;
-
-    --uni_count;
-
-    flow->next->prev = flow->prev;
-    flow->prev->next = flow->next;
-
-    flow->next = flow->prev = nullptr;
+    if ( flow->pkt_type == PktType::IP )
+        uni_ip_flows->unlink_uni(flow);
+    else
+        uni_flows->unlink_uni(flow);
 }
 
-Flow* FlowCache::get(const FlowKey* key)
+Flow* FlowCache::allocate(const FlowKey* key)
 {
     time_t timestamp = packet_time();
     Flow* flow = (Flow*)hash_table->get(key);
-
     if ( !flow )
     {
-        if ( !prune_stale(timestamp, nullptr) )
+        if ( flows_allocated < config.max_flows )
         {
-            if ( !prune_unis() )
-                prune_excess(false, nullptr);
+            Flow* new_flow = new Flow();
+            push(new_flow);
+            memory::MemoryCap::update_allocations(sizeof(HashNode) + sizeof(FlowKey));
         }
-        flow = (Flow*)hash_table->get(key);
+        else if ( !prune_stale(timestamp, nullptr) )
+        {
+            if ( !prune_unis(key->pkt_type) )
+                prune_excess(nullptr);
+        }
 
+        flow = (Flow*)hash_table->get(key);
         assert(flow);
-        flow->reset();
-        link_uni(flow);
+
+        if ( flow->session && flow->pkt_type != key->pkt_type )
+            flow->term();
+        else
+            flow->reset();
     }
+
+    link_uni(flow);
+    if ( flow->session && flow->pkt_type != key->pkt_type )
+        flow->term();
+
+    memory::MemoryCap::update_allocations(config.proto[to_utype(key->pkt_type)].cap_weight);
     flow->last_data_seen = timestamp;
 
     return flow;
 }
 
-int FlowCache::release(Flow* flow, const char*)
-{
-    flow->reset();
-    return remove(flow);
-}
-
-int FlowCache::remove(Flow* flow)
+void FlowCache::remove(Flow* flow)
 {
     if ( flow->next )
         unlink_uni(flow);
 
-    return hash_table->remove(flow->key);
+    // FIXIT-M This check is added for offload case where both Flow::reset
+    // and Flow::retire try remove the flow from hash. Flow::reset should
+    // just mark the flow as pending instead of trying to remove it.
+    if ( !hash_table->release_node(flow->key) )
+        memory::MemoryCap::update_deallocations(config.proto[to_utype(flow->key->pkt_type)].cap_weight);
 }
 
-uint32_t FlowCache::prune_stale(uint32_t thetime, Flow* save_me)
+bool FlowCache::release(Flow* flow, PruneReason reason, bool do_cleanup)
 {
-    Flow* flow;
-    uint32_t pruned = 0;
-    Active::suspend();
-
-    /* Pruning, look for flows that have time'd out */
-    flow = (Flow*)hash_table->first();
-
-    while ( flow )
+    if ( !flow->was_blocked() )
     {
-        // FIXIT-L this loops forever if 1 flow in cache
-        if (flow == save_me)
+        flow->flush(do_cleanup);
+        if ( flow->ssn_state.session_flags & SSNFLAG_KEEP_FLOW )
         {
-            if ( hash_table->get_count() == 1 )
+            flow->ssn_state.session_flags &= ~SSNFLAG_KEEP_FLOW;
+            return false;
+        }
+    }
+
+    flow->reset(do_cleanup);
+    prune_stats.update(reason);
+    remove(flow);
+    return true;
+}
+
+void FlowCache::retire(Flow* flow)
+{
+    flow->reset(true);
+    flow->term();
+    prune_stats.update(PruneReason::NONE);
+    remove(flow);
+}
+
+unsigned FlowCache::prune_stale(uint32_t thetime, const Flow* save_me)
+{
+    ActiveSuspendContext act_susp(Active::ASP_PRUNE);
+
+    unsigned pruned = 0;
+    auto flow = static_cast<Flow*>(hash_table->lru_first());
+
+    {
+        PacketTracerSuspend pt_susp;
+
+        while ( flow and pruned <= cleanup_flows )
+        {
+#if 0
+            // FIXIT-RC this loops forever if 1 flow in cache
+            if (flow == save_me)
+            {
+                break;
+                if ( hash_table->get_count() == 1 )
+                    break;
+
+                hash_table->lru_touch();
+            }
+#else
+            // Reached the current flow. This *should* be the newest flow
+            if ( flow == save_me )
+                break;
+#endif
+            if ( flow->is_suspended() )
                 break;
 
-            hash_table->touch();
-        }
+            if ( flow->last_data_seen + config.pruning_timeout >= thetime )
+                break;
 
-        else if ((flow->last_data_seen + config.pruning_timeout) < thetime)
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_STREAM, "pruning stale flow\n"); );
             flow->ssn_state.session_flags |= SSNFLAG_TIMEDOUT;
-            release(flow, "stale/timeout");
-            pruned++;
+            if ( release(flow, PruneReason::IDLE) )
+                ++pruned;
+
+            flow = static_cast<Flow*>(hash_table->lru_first());
         }
-        else
-            break;
-
-        if (pruned > cleanup_flows)
-            break;
-
-        flow = (Flow*)hash_table->first();
     }
 
-    prunes += pruned;
-    Active::resume();
+    if ( PacketTracer::is_active() and pruned )
+        PacketTracer::log("Flow: Pruned %u flows\n", pruned);
+
     return pruned;
 }
 
-uint32_t FlowCache::prune_unis()
+unsigned FlowCache::prune_unis(PktType pkt_type)
 {
+    ActiveSuspendContext act_susp(Active::ASP_PRUNE);
+
     // we may have many or few unis; need to find reasonable ratio
-    // FIXIT-L max_uni should be based on typical ratios seen in perfmon
-    const uint32_t max_uni = (config.max_sessions >> 2) + 1;
+    // FIXIT-M max_uni should be based on typical ratios seen in perfmon
+    const unsigned max_uni = (config.max_flows >> 2) + 1;
+    unsigned pruned = 0;
+    FlowUniList* uni_list;
 
-    Flow* curr = uni_tail->prev;
-    uint32_t pruned = 0;
-    Active::suspend();
-
-    while ( (uni_count > max_uni) && curr && (pruned < cleanup_flows) )
     {
-        Flow* flow = curr;
-        curr = curr->prev;
+        PacketTracerSuspend pt_susp;
 
-        if ( flow->was_blocked() )
-            continue;
+        if ( pkt_type == PktType::IP )
+            uni_list = uni_ip_flows;
+        else
+            uni_list = uni_flows;
 
-        release(flow, "unidirectional");
-        ++pruned;
+        Flow* flow = uni_list->get_oldest_uni();
+        while ( (uni_list->get_count() > max_uni) && flow && (pruned < cleanup_flows) )
+        {
+            Flow* prune_me = flow;
+            flow = uni_list->get_prev(prune_me);
+
+            if ( prune_me->was_blocked() )
+                continue;
+
+            if ( release(prune_me, PruneReason::UNI) )
+                ++pruned;
+        }
     }
-    prunes += pruned;
-    Active::resume();
+
+    if ( PacketTracer::is_active() and pruned )
+        PacketTracer::log("Flow: Pruned %u flows\n", pruned);
+
     return pruned;
 }
 
-uint32_t FlowCache::prune_excess(bool memCheck, Flow* save_me)
+unsigned FlowCache::prune_excess(const Flow* save_me)
 {
-    /* Free up 'n' flows at a time until we get under the
-     * memcap or free enough flows to be able to create
-     * new ones.
-     */
-    const uint32_t max_cap = config.max_sessions - cleanup_flows;
-    uint32_t pruned = 0;
-    Active::suspend();
+    ActiveSuspendContext act_susp(Active::ASP_PRUNE);
 
-    while (
-        (hash_table->get_count() > 1) &&
-        ((!memCheck && ((hash_table->get_count() > max_cap) || !pruned)) ||
-        (memCheck && memcap.at_max()) ))
+    auto max_cap = config.max_flows - cleanup_flows;
+    assert(max_cap > 0);
+
+    unsigned pruned = 0;
+
+    // initially skip offloads but if that doesn't work the hash table is iterated from the
+    // beginning again. prune offloads at that point.
+    unsigned ignore_offloads = hash_table->get_num_nodes();
+
     {
-        unsigned int blocks = 0;
-        Flow* flow = (Flow*)hash_table->first();
+        PacketTracerSuspend pt_susp;
+        unsigned blocks = 0;
 
-        for (unsigned i=0; i<cleanup_flows &&
-            (hash_table->get_count() > blocks); i++)
+        while ( hash_table->get_num_nodes() > max_cap and hash_table->get_num_nodes() > blocks )
         {
-            if ( (flow != save_me) && (!memCheck || !flow->was_blocked()) )
+            auto flow = static_cast<Flow*>(hash_table->lru_first());
+            assert(flow); // holds true because hash_table->get_count() > 0
+
+            if ( (save_me and flow == save_me) or flow->was_blocked() or
+                    (flow->is_suspended() and ignore_offloads) )
             {
-                flow->ssn_state.session_flags |= SSNFLAG_PRUNED;
-                release(flow, memCheck ? "memcap/check" : "memcap/stale");
-                pruned++;
+                // check for non-null save_me above to silence analyzer
+                // "called C++ object pointer is null" here
+                if ( flow->was_blocked() )
+                    ++blocks;
+
+                // FIXIT-M we should update last_data_seen upon touch to ensure
+                // the hash_table LRU list remains sorted by time
+                hash_table->lru_touch();
             }
             else
             {
-                if ( flow && flow->was_blocked() )
-                    blocks++;
-
-                if ( !hash_table->touch() )
-                    break; // this flow is the only one left
-
-                i--; /* Didn't clean this one */
+                flow->ssn_state.session_flags |= SSNFLAG_PRUNED;
+                if ( release(flow, PruneReason::EXCESS) )
+                    ++pruned;
             }
-            flow = (Flow*)hash_table->first();
+            if ( ignore_offloads > 0 )
+                --ignore_offloads;
         }
 
-        /* Nothing (or the one we're working with) in table, couldn't kill it */
-        if (!memCheck && (pruned == 0))
-            break;
+        if (!pruned and hash_table->get_num_nodes() > max_cap)
+        {
+            prune_one(PruneReason::EXCESS, true);
+            ++pruned;
+        }
     }
-    prunes += pruned;
-    Active::resume();
+
+    if ( PacketTracer::is_active() and pruned )
+        PacketTracer::log("Flow: Pruned %u flows\n", pruned);
+
     return pruned;
 }
 
-void FlowCache::timeout(uint32_t flowCount, time_t cur_time)
+bool FlowCache::prune_one(PruneReason reason, bool do_cleanup)
 {
-    uint32_t flowRetiredCount = 0, flowExaminedCount = 0;
-    uint32_t flowMax = flowCount * 2;
+    // so we don't prune the current flow (assume current == MRU)
+    if ( hash_table->get_num_nodes() <= 1 )
+        return false;
 
-    Flow* flow = (Flow*)hash_table->current();
+    // ZHash returns in LRU order, which is updated per packet via find --> move_to_front call
+    auto flow = static_cast<Flow*>(hash_table->lru_first());
+    assert(flow);
 
-    if ( !flow )
-        flow = (Flow*)hash_table->first();
+    flow->ssn_state.session_flags |= SSNFLAG_PRUNED;
+    release(flow, reason, do_cleanup);
 
-    while ( flow && flowRetiredCount < flowCount && flowExaminedCount < flowMax )
-    {
-        if ((time_t)(flow->last_data_seen + config.nominal_timeout) > cur_time)
-            break;
-
-        flowExaminedCount++;
-
-        DEBUG_WRAP(DebugMessage(DEBUG_STREAM, "retiring stale flow\n"); );
-        flow->ssn_state.session_flags |= SSNFLAG_TIMEDOUT;
-        release(flow, "stale/timeout");
-
-        flowRetiredCount++;
-        flow = (Flow*)hash_table->current();
-    }
+    return true;
 }
 
-/* Remove all flows from the hash table. */
-int FlowCache::purge()
+unsigned FlowCache::timeout(unsigned num_flows, time_t thetime)
 {
-    int retCount = 0;
+    ActiveSuspendContext act_susp(Active::ASP_TIMEOUT);
 
-    Active::suspend();
-    flags |= SESSION_CACHE_FLAG_PURGING;
-    Flow* flow = (Flow*)hash_table->first();
+    unsigned retired = 0;
 
-    while ( flow )
     {
-        flow->ssn_state.session_flags |= SSNFLAG_PRUNED;
-        release(flow, "purge whole cache");
-        retCount++;
-        flow = (Flow*)hash_table->first();
+        PacketTracerSuspend pt_susp;
+
+        auto flow = static_cast<Flow*>(hash_table->lru_current());
+
+        if ( !flow )
+            flow = static_cast<Flow*>(hash_table->lru_first());
+
+        while ( flow and (retired < num_flows) )
+        {
+            if ( flow->is_hard_expiration() )
+            {
+                if ( flow->expire_time > (uint64_t) thetime )
+                    break;
+            }
+            else if ( flow->last_data_seen + config.proto[to_utype(flow->key->pkt_type)].nominal_timeout > thetime )
+                break;
+
+            if ( HighAvailabilityManager::in_standby(flow) or
+                    flow->is_suspended() )
+            {
+                flow = static_cast<Flow*>(hash_table->lru_next());
+                continue;
+            }
+
+            flow->ssn_state.session_flags |= SSNFLAG_TIMEDOUT;
+            if ( release(flow, PruneReason::IDLE) )
+                ++retired;
+
+            flow = static_cast<Flow*>(hash_table->lru_current());
+        }
     }
 
-    flags &= ~SESSION_CACHE_FLAG_PURGING;
-    Active::resume();
+    if ( PacketTracer::is_active() and retired )
+        PacketTracer::log("Flow: Timed out %u flows\n", retired);
 
-    return retCount;
+    return retired;
 }
 
+unsigned FlowCache::delete_active_flows(unsigned mode, unsigned num_to_delete, unsigned &deleted)
+{
+    unsigned flows_to_check = hash_table->get_num_nodes();
+    while ( num_to_delete && flows_to_check-- )
+    {
+        auto flow = static_cast<Flow*>(hash_table->lru_first());
+        assert(flow);
+        if ( (mode == ALLOWED_FLOWS_ONLY and (flow->was_blocked() || flow->is_suspended()))
+                or (mode == OFFLOADED_FLOWS_TOO and flow->was_blocked()) )
+        {
+            hash_table->lru_touch();
+            continue;
+        }
+
+        // we have a winner...
+        if ( flow->next )
+            unlink_uni(flow);
+
+        if ( flow->was_blocked() )
+            delete_stats.update(FlowDeleteState::BLOCKED);
+        else if ( flow->is_suspended() )
+            delete_stats.update(FlowDeleteState::OFFLOADED);
+        else
+            delete_stats.update(FlowDeleteState::ALLOWED);
+
+        flow->reset(true);
+        //The flow should not be removed from the hash before reset
+        hash_table->remove();
+        delete flow;
+        memory::MemoryCap::update_deallocations(sizeof(HashNode) + sizeof(FlowKey));
+        --flows_allocated;
+        ++deleted;
+        --num_to_delete;
+    }
+
+    return num_to_delete;
+}
+
+unsigned FlowCache::delete_flows(unsigned num_to_delete)
+{
+    ActiveSuspendContext act_susp(Active::ASP_RELOAD);
+
+    unsigned deleted = 0;
+
+    {
+        PacketTracerSuspend pt_susp;
+
+        // delete from the free list first...
+        while ( num_to_delete )
+        {
+            Flow* flow = (Flow*)hash_table->pop();
+            if ( !flow )
+                break;
+
+            delete flow;
+            delete_stats.update(FlowDeleteState::FREELIST);
+            memory::MemoryCap::update_deallocations(sizeof(HashNode) + sizeof(FlowKey));
+
+            --flows_allocated;
+            ++deleted;
+            --num_to_delete;
+        }
+
+        unsigned mode = ALLOWED_FLOWS_ONLY;
+        while ( num_to_delete && mode <= ALL_FLOWS )
+            num_to_delete = delete_active_flows(mode++, num_to_delete, deleted);
+    }
+
+    if ( PacketTracer::is_active() and deleted )
+        PacketTracer::log("Flow: Deleted %u flows\n", deleted);
+
+    return deleted;
+}
+
+// Remove all flows from the hash table.
+unsigned FlowCache::purge()
+{
+    ActiveSuspendContext act_susp(Active::ASP_EXIT);
+    FlagContext<decltype(flags)>(flags, SESSION_CACHE_FLAG_PURGING);
+
+    unsigned retired = 0;
+
+    while ( auto flow = static_cast<Flow*>(hash_table->lru_first()) )
+    {
+        retire(flow);
+        ++retired;
+    }
+
+    while ( Flow* flow = (Flow*)hash_table->pop() )
+    {
+        delete flow;
+        memory::MemoryCap::update_deallocations(sizeof(HashNode) + sizeof(FlowKey));
+        --flows_allocated;
+    }
+
+    // Remove these here so alloc/dealloc counts are right when Memory::get_pegs is called
+    delete_uni();
+
+    return retired;
+}

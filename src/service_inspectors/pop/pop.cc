@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -15,42 +15,32 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-//
 
-/*
- * POP preprocessor
- * Author: Bhagyashree Bantwal < bbantwal@cisco.com>
- *
- */
+// pop.cc author Bhagyashree Bantwal < bbantwal@cisco.com>
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <assert.h>
-#include <string.h>
-#include <stdio.h>
-#include <sys/types.h>
-
-#include "snort_types.h"
-#include "snort_debug.h"
-
 #include "pop.h"
-#include "pop_module.h"
-#include "profiler.h"
-#include "stream/stream_api.h"
-#include "file_api/file_api.h"
-#include "parser.h"
-#include "framework/inspector.h"
-#include "utils/sfsnprintfappend.h"
-#include "target_based/snort_protocols.h"
-#include "pop_paf.h"
-#include "search_engines/search_tool.h"
-#include "sf_email_attach_decode.h"
+
+#include "detection/detection_engine.h"
+#include "log/messages.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
 #include "protocols/ssl.h"
-#include "file_api/file_mime_process.h"
+#include "pub_sub/opportunistic_tls_event.h"
+#include "search_engines/search_tool.h"
+#include "stream/stream.h"
+#include "utils/util_cstring.h"
+
+#include "pop_module.h"
+#include "pop_paf.h"
+
+using namespace snort;
 
 THREAD_LOCAL ProfileStats popPerfStats;
-THREAD_LOCAL SimpleStats popstats;
+THREAD_LOCAL PopStats popstats;
 
 POPToken pop_known_cmds[] =
 {
@@ -69,14 +59,14 @@ POPToken pop_known_cmds[] =
     { "TOP",           3, CMD_TOP },
     { "UIDL",          4, CMD_UIDL },
     { "USER",          4, CMD_USER },
-    { NULL,            0, 0 }
+    { nullptr,            0, 0 }
 };
 
 POPToken pop_resps[] =
 {
     { "+OK",   3,  RESP_OK },   /* SUCCESS */
     { "-ERR",  4,  RESP_ERR },  /* FAILURE */
-    { NULL,   0,  0 }
+    { nullptr,   0,  0 }
 };
 
 SearchTool* pop_resp_search_mpse = nullptr;
@@ -84,99 +74,97 @@ SearchTool* pop_cmd_search_mpse = nullptr;
 
 POPSearch pop_resp_search[RESP_LAST];
 POPSearch pop_cmd_search[CMD_LAST];
-THREAD_LOCAL const POPSearch* pop_current_search = NULL;
-THREAD_LOCAL POPSearchInfo pop_search_info;
+
+static THREAD_LOCAL const POPSearch* pop_current_search = nullptr;
+static THREAD_LOCAL POPSearchInfo pop_search_info;
+
+const PegInfo pop_peg_names[] =
+{
+    { CountType::SUM, "packets", "total packets processed" },
+    { CountType::SUM, "total_bytes", "total number of bytes processed" },
+    { CountType::SUM, "sessions", "total pop sessions" },
+    { CountType::NOW, "concurrent_sessions", "total concurrent pop sessions" },
+    { CountType::MAX, "max_concurrent_sessions", "maximum concurrent pop sessions" },
+    { CountType::SUM, "start_tls", "total STARTTLS events generated" },
+    { CountType::SUM, "ssl_search_abandoned", "total SSL search abandoned" },
+    { CountType::SUM, "ssl_srch_abandoned_early", "total SSL search abandoned too soon" },
+    { CountType::SUM, "b64_attachments", "total base64 attachments decoded" },
+    { CountType::SUM, "b64_decoded_bytes", "total base64 decoded bytes" },
+    { CountType::SUM, "qp_attachments", "total quoted-printable attachments decoded" },
+    { CountType::SUM, "qp_decoded_bytes", "total quoted-printable decoded bytes" },
+    { CountType::SUM, "uu_attachments", "total uu attachments decoded" },
+    { CountType::SUM, "uu_decoded_bytes", "total uu decoded bytes" },
+    { CountType::SUM, "non_encoded_attachments", "total non-encoded attachments extracted" },
+    { CountType::SUM, "non_encoded_bytes", "total non-encoded extracted bytes" },
+
+    { CountType::END, nullptr, nullptr }
+};
+
 
 static void snort_pop(POP_PROTO_CONF* GlobalConf, Packet* p);
-static void POP_ResetState(void*);
-void POP_DecodeAlert(void* ds);
+static void POP_ResetState(Flow*);
 
-MimeMethods pop_mime_methods = { NULL, NULL, POP_DecodeAlert, POP_ResetState, pop_is_data_end };
-
-PopFlowData::PopFlowData() : FlowData(flow_id)
-{ memset(&session, 0, sizeof(session)); }
-
-PopFlowData::~PopFlowData()
-{ free_mime_session(session.mime_ssn); }
-
-unsigned PopFlowData::flow_id = 0;
-static POPData* get_session_data(Flow* flow)
+PopFlowData::PopFlowData() : FlowData(inspector_id)
 {
-    PopFlowData* fd = (PopFlowData*)flow->get_application_data(
-        PopFlowData::flow_id);
-
-    return fd ? &fd->session : NULL;
+    memset(&session, 0, sizeof(session));
+    popstats.concurrent_sessions++;
+    if(popstats.max_concurrent_sessions < popstats.concurrent_sessions)
+        popstats.max_concurrent_sessions = popstats.concurrent_sessions;
 }
 
-POPData* SetNewPOPData(POP_PROTO_CONF* config, Packet* p)
+PopFlowData::~PopFlowData()
+{
+    if (session.mime_ssn)
+        delete(session.mime_ssn);
+
+    assert(popstats.concurrent_sessions > 0);
+    popstats.concurrent_sessions--;
+}
+
+unsigned PopFlowData::inspector_id = 0;
+static POPData* get_session_data(Flow* flow)
+{
+    PopFlowData* fd = (PopFlowData*)flow->get_flow_data(PopFlowData::inspector_id);
+    return fd ? &fd->session : nullptr;
+}
+
+static POPData* SetNewPOPData(POP_PROTO_CONF* config, Packet* p)
 {
     POPData* pop_ssn;
     PopFlowData* fd = new PopFlowData;
 
-    p->flow->set_application_data(fd);
+    p->flow->set_flow_data(fd);
     pop_ssn = &fd->session;
 
-    pop_ssn->mime_ssn.log_config = &(config->log_config);
-    pop_ssn->mime_ssn.decode_conf = &(config->decode_conf);
-    pop_ssn->mime_ssn.methods = &(pop_mime_methods);
-    pop_ssn->mime_ssn.config = config;
-    if (file_api->set_log_buffers(&(pop_ssn->mime_ssn.log_state), &(config->log_config)) < 0)
-    {
-        return NULL;
-    }
+    popstats.sessions++;
+    pop_ssn->mime_ssn = new PopMime( &(config->decode_conf), &(config->log_config));
+    pop_ssn->mime_ssn->set_mime_stats(&(popstats.mime_stats));
 
     if (p->packet_flags & SSNFLAG_MIDSTREAM)
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_POP, "Got midstream packet - "
-            "setting state to unknown\n"); );
         pop_ssn->state = STATE_UNKNOWN;
     }
 
     return pop_ssn;
 }
 
-void POP_DecodeAlert(void* ds)
-{
-    Email_DecodeState* decode_state = (Email_DecodeState*)ds;
-    switch ( decode_state->decode_type )
-    {
-    case DECODE_B64:
-        SnortEventqAdd(GID_POP, POP_B64_DECODING_FAILED);
-        break;
-    case DECODE_QP:
-        SnortEventqAdd(GID_POP, POP_QP_DECODING_FAILED);
-        break;
-    case DECODE_UU:
-        SnortEventqAdd(GID_POP, POP_UU_DECODING_FAILED);
-        break;
-
-    default:
-        break;
-    }
-}
-
-void POP_SearchInit(void)
+static void POP_SearchInit()
 {
     const POPToken* tmp;
-    pop_cmd_search_mpse = new SearchTool();
-    if (pop_cmd_search_mpse == NULL)
-    {
-        FatalError("Could not allocate memory for POP Command search.\n");
-    }
-    for (tmp = &pop_known_cmds[0]; tmp->name != NULL; tmp++)
+    if ( pop_cmd_search_mpse )
+        return;
+    pop_cmd_search_mpse = new SearchTool;
+
+    for (tmp = &pop_known_cmds[0]; tmp->name != nullptr; tmp++)
     {
         pop_cmd_search[tmp->search_id].name = tmp->name;
         pop_cmd_search[tmp->search_id].name_len = tmp->name_len;
         pop_cmd_search_mpse->add(tmp->name, tmp->name_len, tmp->search_id);
     }
     pop_cmd_search_mpse->prep();
+    pop_resp_search_mpse = new SearchTool;
 
-    pop_resp_search_mpse = new SearchTool();
-    if (pop_resp_search_mpse == NULL)
-    {
-        FatalError("Could not allocate memory for POP Response search.\n");
-    }
-    for (tmp = &pop_resps[0]; tmp->name != NULL; tmp++)
+    for (tmp = &pop_resps[0]; tmp->name != nullptr; tmp++)
     {
         pop_resp_search[tmp->search_id].name = tmp->name;
         pop_resp_search[tmp->search_id].name_len = tmp->name_len;
@@ -185,31 +173,24 @@ void POP_SearchInit(void)
     pop_resp_search_mpse->prep();
 }
 
-void POP_SearchFree(void)
+static void POP_SearchFree()
 {
-    if (pop_cmd_search_mpse != NULL)
+    if (pop_cmd_search_mpse != nullptr)
         delete pop_cmd_search_mpse;
 
-    if (pop_resp_search_mpse != NULL)
+    if (pop_resp_search_mpse != nullptr)
         delete pop_resp_search_mpse;
 }
 
-/*
-* Reset POP session state
-*
-* @param  none
-*
-* @return none
-*/
-static void POP_ResetState(void* ssn)
+static void POP_ResetState(Flow* ssn)
 {
-    POPData* pop_ssn = get_session_data((Flow*)ssn);
+    POPData* pop_ssn = get_session_data(ssn);
     pop_ssn->state = STATE_COMMAND;
     pop_ssn->prev_response = 0;
     pop_ssn->state_flags = 0;
 }
 
-void POP_GetEOL(const uint8_t* ptr, const uint8_t* end,
+static void POP_GetEOL(const uint8_t* ptr, const uint8_t* end,
     const uint8_t** eol, const uint8_t** eolm)
 {
     assert(ptr and end and eol and eolm);
@@ -217,8 +198,8 @@ void POP_GetEOL(const uint8_t* ptr, const uint8_t* end,
     const uint8_t* tmp_eol;
     const uint8_t* tmp_eolm;
 
-    tmp_eol = (uint8_t*)memchr(ptr, '\n', end - ptr);
-    if (tmp_eol == NULL)
+    tmp_eol = (const uint8_t*)memchr(ptr, '\n', end - ptr);
+    if (tmp_eol == nullptr)
     {
         tmp_eol = end;
         tmp_eolm = end;
@@ -244,76 +225,6 @@ void POP_GetEOL(const uint8_t* ptr, const uint8_t* end,
     *eolm = tmp_eolm;
 }
 
-static void PrintPopConf(POP_PROTO_CONF* config)
-{
-    if (config == NULL)
-        return;
-
-    LogMessage("POP config: \n");
-
-    if (config->decode_conf.b64_depth > -1)
-    {
-        switch (config->decode_conf.b64_depth)
-        {
-        case 0:
-            LogMessage("    Base64 Decoding Depth: %s\n", "Unlimited");
-            break;
-        default:
-            LogMessage("    Base64 Decoding Depth: %d\n", config->decode_conf.b64_depth);
-            break;
-        }
-    }
-    else
-        LogMessage("    Base64 Decoding: %s\n", "Disabled");
-
-    if (config->decode_conf.qp_depth > -1)
-    {
-        switch (config->decode_conf.qp_depth)
-        {
-        case 0:
-            LogMessage("    Quoted-Printable Decoding Depth: %s\n", "Unlimited");
-            break;
-        default:
-            LogMessage("    Quoted-Printable Decoding Depth: %d\n", config->decode_conf.qp_depth);
-            break;
-        }
-    }
-    else
-        LogMessage("    Quoted-Printable Decoding: %s\n", "Disabled");
-    if (config->decode_conf.uu_depth > -1)
-    {
-        switch (config->decode_conf.uu_depth)
-        {
-        case 0:
-            LogMessage("    Unix-to-Unix Decoding Depth: %s\n", "Unlimited");
-            break;
-        default:
-            LogMessage("    Unix-to-Unix Decoding Depth: %d\n", config->decode_conf.uu_depth);
-            break;
-        }
-    }
-    else
-        LogMessage("    Unix-to-Unix Decoding: %s\n", "Disabled");
-
-    if (config->decode_conf.bitenc_depth > -1)
-    {
-        switch (config->decode_conf.bitenc_depth)
-        {
-        case 0:
-            LogMessage("    Non-Encoded MIME attachment Extraction Depth: %s\n", "Unlimited");
-            break;
-        default:
-            LogMessage("    Non-Encoded MIME attachment Extraction Depth: %d\n",
-                config->decode_conf.bitenc_depth);
-            break;
-        }
-    }
-    else
-        LogMessage("    Non-Encoded MIME attachment Extraction: %s\n", "Disabled");
-
-    LogMessage("\n");
-}
-
 static inline int InspectPacket(Packet* p)
 {
     return p->has_paf_payload();
@@ -324,7 +235,7 @@ static int POP_Setup(Packet* p, POPData* ssn)
     int pkt_dir;
 
     /* Get the direction of the packet. */
-    if ( p->packet_flags & PKT_FROM_SERVER )
+    if ( p->is_from_server() )
         pkt_dir = POP_PKT_FROM_SERVER;
     else
         pkt_dir = POP_PKT_FROM_CLIENT;
@@ -337,20 +248,16 @@ static int POP_Setup(Packet* p, POPData* ssn)
         (p->packet_flags & PKT_REBUILT_STREAM))
     {
         int missing_in_rebuilt =
-            stream.missing_in_reassembled(p->flow, SSN_DIR_FROM_CLIENT);
+            Stream::missing_in_reassembled(p->flow, SSN_DIR_FROM_CLIENT);
 
         if (ssn->session_flags & POP_FLAG_NEXT_STATE_UNKNOWN)
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_POP, "Found gap in previous reassembly buffer - "
-                "set state to unknown\n"); );
             ssn->state = STATE_UNKNOWN;
             ssn->session_flags &= ~POP_FLAG_NEXT_STATE_UNKNOWN;
         }
 
         if (missing_in_rebuilt == SSN_MISSING_BEFORE)
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_POP, "Found missing packets before "
-                "in reassembly buffer - set state to unknown\n"); );
             ssn->state = STATE_UNKNOWN;
         }
     }
@@ -363,8 +270,8 @@ static int POP_SearchStrFound(void* id, void* , int index, void* , void* )
     int search_id = (int)(uintptr_t)id;
 
     pop_search_info.id = search_id;
-    pop_search_info.index = index;
     pop_search_info.length = pop_current_search[search_id].name_len;
+    pop_search_info.index = index - pop_search_info.length;
 
     /* Returning non-zero stops search, which is okay since we only look for one at a time */
     return 1;
@@ -390,10 +297,11 @@ static const uint8_t* POP_HandleCommand(Packet* p, POPData* pop_ssn, const uint8
     /* get end of line and end of line marker */
     POP_GetEOL(ptr, end, &eol, &eolm);
 
-    /* TODO If the end of line marker coincides with the end of data we can't be
-     * sure that we got a command and not a substring which we could tell through
-     * inspection of the next packet. Maybe a command pending state where the first
-     * char in the next packet is checked for a space and end of line marker */
+    // FIXIT-M If the end of line marker coincides with the end of data we
+    // can't be sure that we got a command and not a substring which we
+    // could tell through inspection of the next packet. Maybe a command
+    // pending state where the first char in the next packet is checked for
+    // a space and end of line marker
 
     /* do not confine since there could be space chars before command */
     pop_current_search = &pop_cmd_search[0];
@@ -427,40 +335,29 @@ static const uint8_t* POP_HandleCommand(Packet* p, POPData* pop_ssn, const uint8
     /* if command not found, alert and move on */
     if (!cmd_found)
     {
-        if (pop_ssn->state == STATE_UNKNOWN)
+        /* check for encrypted */
+        if (pop_ssn->state == STATE_UNKNOWN and
+            pop_ssn->session_flags & POP_FLAG_CHECK_SSL and
+            IsSSL(ptr, end - ptr, p->packet_flags))
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_POP, "Command not found, but state is "
-                "unknown - checking for SSL\n"); );
+            pop_ssn->state = STATE_TLS_DATA;
 
-            /* check for encrypted */
-
-            if ((pop_ssn->session_flags & POP_FLAG_CHECK_SSL) &&
-                (IsSSL(ptr, end - ptr, p->packet_flags)))
+            /* Ignore data */
+            return end;
+        }
+        else
+        {
+            if (pop_ssn->state == STATE_UNKNOWN)
             {
-                DEBUG_WRAP(DebugMessage(DEBUG_POP, "Packet is SSL encrypted\n"); );
-
-                pop_ssn->state = STATE_TLS_DATA;
-
-                /* Ignore data */
-                return end;
-            }
-            else
-            {
-                DEBUG_WRAP(DebugMessage(DEBUG_POP, "Not SSL - try data state\n"); );
                 /* don't check for ssl again in this packet */
                 if (pop_ssn->session_flags & POP_FLAG_CHECK_SSL)
                     pop_ssn->session_flags &= ~POP_FLAG_CHECK_SSL;
 
                 pop_ssn->state = STATE_DATA;
-                //pop_ssn->data_state = STATE_DATA_UNKNOWN;
-
+                DetectionEngine::queue_event(GID_POP, POP_UNKNOWN_CMD);
                 return ptr;
             }
-        }
-        else
-        {
-            SnortEventqAdd(GID_POP, POP_UNKNOWN_CMD);
-            DEBUG_WRAP(DebugMessage(DEBUG_POP, "No known command found\n"); );
+            DetectionEngine::queue_event(GID_POP, POP_UNKNOWN_CMD);
             return eol;
         }
     }
@@ -512,7 +409,7 @@ static void POP_ProcessServerPacket(Packet* p, POPData* pop_ssn)
     const uint8_t* eolm;
     const uint8_t* eol;
     int resp_line_len;
-    const char* tmp = NULL;
+    const char* tmp = nullptr;
 
     ptr = p->data;
     end = p->data + p->dsize;
@@ -521,11 +418,10 @@ static void POP_ProcessServerPacket(Packet* p, POPData* pop_ssn)
     {
         if (pop_ssn->state == STATE_DATA)
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_POP, "DATA STATE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"); );
             //ptr = POP_HandleData(p, ptr, end);
-            FilePosition position = file_api->get_file_position(p);
-            ptr = file_api->process_mime_data(p->flow, ptr, end, &(pop_ssn->mime_ssn), 0,
-                position);
+            FilePosition position = get_file_position(p);
+            int len = end - ptr;
+            ptr = pop_ssn->mime_ssn->process_mime_data(p, ptr, len, false, position);
             continue;
         }
         POP_GetEOL(ptr, end, &eol, &eolm);
@@ -544,8 +440,31 @@ static void POP_ProcessServerPacket(Packet* p, POPData* pop_ssn)
             {
             case RESP_OK:
                 tmp = SnortStrcasestr((const char*)cmd_start, (eol - cmd_start), "octets");
-                if (tmp != NULL)
+                if (tmp != nullptr)
+                {
+                    if (!(pop_ssn->session_flags & POP_FLAG_ABANDON_EVT)
+                        and !p->flow->flags.data_decrypted)
+                    {
+                        pop_ssn->session_flags |= POP_FLAG_ABANDON_EVT;
+                        DataBus::publish(SSL_SEARCH_ABANDONED, p);
+                        popstats.ssl_search_abandoned++;
+                    }
+
                     pop_ssn->state = STATE_DATA;
+                }
+                else if (pop_ssn->state == STATE_TLS_CLIENT_PEND)
+                {
+                    if ((pop_ssn->session_flags & POP_FLAG_ABANDON_EVT)
+                        and !p->flow->flags.data_decrypted)
+                    {
+                        popstats.ssl_srch_abandoned_early++;
+                    }
+
+                    OpportunisticTlsEvent event(p, p->flow->service);
+                    DataBus::publish(OPPORTUNISTIC_TLS_EVENT, event, p->flow);
+                    popstats.start_tls++;
+                    pop_ssn->state = STATE_DECRYPTION_REQ;
+                }
                 else
                 {
                     pop_ssn->prev_response = RESP_OK;
@@ -559,16 +478,10 @@ static void POP_ProcessServerPacket(Packet* p, POPData* pop_ssn)
         }
         else
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_POP,
-                "Server response not found - see if it's SSL data\n"); );
-
             if ((pop_ssn->session_flags & POP_FLAG_CHECK_SSL) &&
                 (IsSSL(ptr, end - ptr, p->packet_flags)))
             {
-                DEBUG_WRAP(DebugMessage(DEBUG_POP, "Server response is an SSL packet\n"); );
-
                 pop_ssn->state = STATE_TLS_DATA;
-
                 return;
             }
             else if (pop_ssn->session_flags & POP_FLAG_CHECK_SSL)
@@ -585,8 +498,7 @@ static void POP_ProcessServerPacket(Packet* p, POPData* pop_ssn)
             }
             else if (*ptr == '+')
             {
-                SnortEventqAdd(GID_POP, POP_UNKNOWN_RESP);
-                DEBUG_WRAP(DebugMessage(DEBUG_POP, "Server response not found\n"); );
+                DetectionEngine::queue_event(GID_POP, POP_UNKNOWN_RESP);
             }
         }
 
@@ -606,13 +518,10 @@ static void POP_ProcessServerPacket(Packet* p, POPData* pop_ssn)
  */
 static void snort_pop(POP_PROTO_CONF* config, Packet* p)
 {
-    POPData* pop_ssn = NULL;
-    int pkt_dir;
-
     /* Attempt to get a previously allocated POP block. */
-    pop_ssn = get_session_data(p->flow);
+    POPData* pop_ssn = get_session_data(p->flow);
 
-    if (pop_ssn == NULL)
+    if (pop_ssn == nullptr)
     {
         /* Check the stream session. If it does not currently
          * have our POP data-block attached, create one.
@@ -626,18 +535,16 @@ static void snort_pop(POP_PROTO_CONF* config, Packet* p)
         }
     }
 
-    pkt_dir = POP_Setup(p, pop_ssn);
+    popstats.total_bytes += p->dsize;
+    int pkt_dir = POP_Setup(p, pop_ssn);
 
     if (pkt_dir == POP_PKT_FROM_CLIENT)
     {
         /* This packet should be a tls client hello */
-        if (pop_ssn->state == STATE_TLS_CLIENT_PEND)
+        if ((pop_ssn->state == STATE_TLS_CLIENT_PEND) || (pop_ssn->state == STATE_DECRYPTION_REQ))
         {
             if (IsTlsClientHello(p->data, p->data + p->dsize))
             {
-                DEBUG_WRAP(DebugMessage(DEBUG_POP,
-                    "TLS DATA STATE ~~~~~~~~~~~~~~~~~~~~~~~~~\n"); );
-
                 pop_ssn->state = STATE_TLS_SERVER_PEND;
                 return;
             }
@@ -653,7 +560,6 @@ static void snort_pop(POP_PROTO_CONF* config, Packet* p)
             return;
         }
         POP_ProcessClientPacket(p, pop_ssn);
-        DEBUG_WRAP(DebugMessage(DEBUG_POP, "POP client packet\n"); );
     }
     else
     {
@@ -663,8 +569,8 @@ static void snort_pop(POP_PROTO_CONF* config, Packet* p)
             {
                 pop_ssn->state = STATE_TLS_DATA;
             }
-            else if (!(stream.get_session_flags(p->flow) & SSNFLAG_MIDSTREAM)
-                && !stream.missed_packets(p->flow, SSN_DIR_BOTH))
+            else if ( !p->test_session_flags(SSNFLAG_MIDSTREAM)
+                && !Stream::missed_packets(p->flow, SSN_DIR_BOTH))
             {
                 /* revert back to command state - assume server didn't accept STARTTLS */
                 pop_ssn->state = STATE_UNKNOWN;
@@ -680,7 +586,6 @@ static void snort_pop(POP_PROTO_CONF* config, Packet* p)
         if ( !InspectPacket(p))
         {
             /* Packet will be rebuilt, so wait for it */
-            DEBUG_WRAP(DebugMessage(DEBUG_POP, "Client packet will be reassembled\n"));
             return;
         }
         else if (!(p->packet_flags & PKT_REBUILT_STREAM))
@@ -700,15 +605,47 @@ static void snort_pop(POP_PROTO_CONF* config, Packet* p)
              * that were not rebuilt, state is going to be messed up
              * so set state to unknown. It's likely this was the
              * beginning of the conversation so reset state */
-            DEBUG_WRAP(DebugMessage(DEBUG_POP, "Got non-rebuilt packets before "
-                "this rebuilt packet\n"); );
-
             pop_ssn->state = STATE_UNKNOWN;
             pop_ssn->session_flags &= ~POP_FLAG_GOT_NON_REBUILT;
         }
         /* Process as a server packet */
         POP_ProcessServerPacket(p, pop_ssn);
     }
+}
+
+void PopMime::decode_alert()
+{
+    switch ( decode_state->get_decode_type() )
+    {
+    case DECODE_B64:
+        DetectionEngine::queue_event(GID_POP, POP_B64_DECODING_FAILED);
+        break;
+    case DECODE_QP:
+        DetectionEngine::queue_event(GID_POP, POP_QP_DECODING_FAILED);
+        break;
+    case DECODE_UU:
+        DetectionEngine::queue_event(GID_POP, POP_UU_DECODING_FAILED);
+        break;
+
+    default:
+        break;
+    }
+}
+
+void PopMime::decompress_alert()
+{
+    DetectionEngine::queue_event(GID_POP, POP_FILE_DECOMP_FAILED);
+}
+
+void PopMime::reset_state(Flow* ssn)
+{
+    POP_ResetState(ssn);
+}
+
+
+bool PopMime::is_end_of_data(Flow* session)
+{
+    return pop_is_data_end(session);
 }
 
 //-------------------------------------------------------------------------
@@ -719,14 +656,20 @@ class Pop : public Inspector
 {
 public:
     Pop(POP_PROTO_CONF*);
-    ~Pop();
+    ~Pop() override;
 
     bool configure(SnortConfig*) override;
-    void show(SnortConfig*) override;
+    void show(const SnortConfig*) const override;
     void eval(Packet*) override;
 
     StreamSplitter* get_splitter(bool c2s) override
     { return new PopSplitter(c2s); }
+
+    bool can_carve_files() const override
+    { return true; }
+
+    bool can_start_tls() const override
+    { return true; }
 
 private:
     POP_PROTO_CONF* config;
@@ -745,39 +688,32 @@ Pop::~Pop()
 
 bool Pop::configure(SnortConfig* )
 {
-    config->decode_conf.file_depth = file_api->get_max_file_depth();
+    config->decode_conf.sync_all_depths();
 
-    if (config->decode_conf.file_depth > -1)
+    if (config->decode_conf.get_file_depth() > -1)
         config->log_config.log_filename = 1;
 
-    file_api->check_decode_config(&config->decode_conf);
-
-    if (file_api->is_decoding_enabled(&config->decode_conf) )
-    {
-        updateMaxDepth(config->decode_conf.file_depth,
-            &config->decode_conf.max_depth);
-    }
+    POP_SearchInit();
     return true;
 }
 
-void Pop::show(SnortConfig*)
+void Pop::show(const SnortConfig*) const
 {
-    PrintPopConf(config);
+    if ( config )
+        config->decode_conf.show();
 }
 
 void Pop::eval(Packet* p)
 {
-    PROFILE_VARS;
+    Profile profile(popPerfStats);
+
     // precondition - what we registered for
     assert(p->has_tcp_data());
+    assert(p->flow);
 
-    ++popstats.total_packets;
-
-    MODULE_PROFILE_START(popPerfStats);
+    ++popstats.packets;
 
     snort_pop(config, p);
-
-    MODULE_PROFILE_END(popPerfStats);
 }
 
 //-------------------------------------------------------------------------
@@ -793,7 +729,6 @@ static void mod_dtor(Module* m)
 static void pop_init()
 {
     PopFlowData::init();
-    POP_SearchInit();
 }
 
 static void pop_term()
@@ -827,9 +762,9 @@ const InspectApi pop_api =
         mod_dtor
     },
     IT_SERVICE,
-    (uint16_t)PktType::PDU,
+    PROTO_BIT__PDU,
     nullptr, // buffers
-    "pop",
+    "pop3",
     pop_init,
     pop_term, // pterm
     nullptr, // tinit

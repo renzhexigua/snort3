@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -34,8 +34,7 @@
  *
  * This version will send a web page to the client and then reset both
  * ends of the session.  The web page may be configured or the default
- * may be used.  The web page can have the default warning message
- * inserted or the message from the rule.
+ * may be used.
  *
  * If you wish to just reset the session, use the reject keyword instead.
  */
@@ -44,22 +43,27 @@
 #include "config.h"
 #endif
 
-#include <sys/types.h>
 #include <sys/stat.h>
 
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
+#include <fstream>
+#include <string>
 
-#include "snort_types.h"
-#include "snort_debug.h"
-#include "protocols/packet.h"
-#include "profiler.h"
-#include "packet_io/active.h"
-#include "parser/parser.h"
 #include "framework/ips_action.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "log/messages.h"
+#include "main/snort_config.h"
+#include "main/snort_debug.h"
+#include "packet_io/active.h"
+#include "payload_injector/payload_injector.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+#include "service_inspectors/http2_inspect/http2_flow_data.h"
+#include "utils/util.h"
+#include "utils/util_cstring.h"
+
+using namespace snort;
+using namespace HttpCommon;
+using namespace Http2Enums;
 
 #define s_name "react"
 
@@ -68,15 +72,11 @@
 
 static THREAD_LOCAL ProfileStats reactPerfStats;
 
-#define MSG_KEY "<>"
-#define MSG_PERCENT "%"
-
 #define DEFAULT_HTTP \
     "HTTP/1.1 403 Forbidden\r\n" \
     "Connection: close\r\n" \
     "Content-Type: text/html; charset=utf-8\r\n" \
-    "Content-Length: %d\r\n" \
-    "\r\n"
+    "Content-Length: "
 
 #define DEFAULT_HTML \
     "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\"\r\n" \
@@ -88,164 +88,95 @@ static THREAD_LOCAL ProfileStats reactPerfStats;
     "</head>\r\n" \
     "<body>\r\n" \
     "<h1>Access Denied</h1>\r\n" \
-    "<p>%s</p>\r\n" \
+    "<p>You are attempting to access a forbidden site.<br />" \
+    "Consult your system administrator for details.</p>\r\n" \
     "</body>\r\n" \
     "</html>\r\n"
 
-#define DEFAULT_MSG \
-    "You are attempting to access a forbidden site.<br />" \
-    "Consult your system administrator for details."
+THREAD_LOCAL const snort::Trace* react_trace = nullptr;
 
-struct ReactData
-{
-    int rule_msg;        // 1=>use rule msg; 0=>use DEFAULT_MSG
-    ssize_t buf_len;     // length of response
-    char* resp_buf;      // response to send
-};
-
-static char* s_page = NULL;
-
-class ReactAction : public IpsAction
+class ReactData
 {
 public:
-    ReactAction(ReactData* c) : IpsAction(s_name, ACT_PROXY)
-    { config = c; }
 
-    ~ReactAction();
+    ReactData(const std::string& page)
+    {
+        if ( page.empty())
+        {
+            resp_buf = DEFAULT_HTTP + std::to_string(strlen(DEFAULT_HTML));
+            resp_buf.append("\r\n\r\n");
+            resp_buf.append(DEFAULT_HTML);
+        }
+        else
+        {
+            resp_buf = DEFAULT_HTTP + std::to_string(page.size());
+            resp_buf.append("\r\n\r\n");
+            resp_buf.append(page);
+        }
+    }
 
-    void exec(Packet*) override;
+    ~ReactData() = default;
+
+    size_t get_buf_len() const
+    { return resp_buf.size(); }
+
+    const char* get_resp_buf() const
+    { return resp_buf.c_str(); }
 
 private:
-    void send(Packet*);
+    std::string resp_buf;      // response to send
+};
+
+class ReactAction : public snort::IpsAction
+{
+public:
+    ReactAction(ReactData* c)
+        : IpsAction(s_name, ActionType::ACT_PROXY), config(c)
+    { }
+
+    ~ReactAction() override
+    { delete config; }
+
+    void exec(snort::Packet* p) override
+    {
+        Profile profile(reactPerfStats);
+
+        if ( p->active->is_reset_candidate(p) )
+            send(p);
+    }
+
+private:
+    void send(snort::Packet* p)
+    {
+        InjectionControl control;
+        control.http_page = (const uint8_t*)config->get_resp_buf();
+        control.http_page_len = config->get_buf_len();
+        if (p->flow && p->flow->gadget &&
+            (strcmp(p->flow->gadget->get_name(), "http2_inspect") == 0))
+        {
+            Http2FlowData* const session_data =
+                (Http2FlowData*)p->flow->get_flow_data(Http2FlowData::inspector_id);
+            assert(session_data != nullptr);
+            const SourceId source_id = p->is_from_client() ? SRC_CLIENT : SRC_SERVER;
+            if (session_data != nullptr)
+            {
+                control.stream_id = session_data->get_current_stream_id(source_id);
+                assert(control.stream_id != NO_STREAM_ID);
+            }
+        }
+        InjectionReturnStatus status = PayloadInjector::inject_http_payload(p, control);
+#ifdef DEBUG_MSGS
+        if (status != INJECTION_SUCCESS)
+            debug_logf(react_trace, p, "Injection error: %s\n",
+                PayloadInjector::get_err_string(status));
+#else
+        UNUSED(status);
+#endif
+    }
 
 private:
     ReactData* config;
 };
-
-//-------------------------------------------------------------------------
-// class methods
-//-------------------------------------------------------------------------
-
-ReactAction::~ReactAction()
-{
-    if ( s_page )
-    {
-        free(s_page);
-        s_page = nullptr;
-    }
-    if (config->resp_buf)
-        free(config->resp_buf);
-
-    free(config);
-}
-
-void ReactAction::exec(Packet* p)
-{
-    PROFILE_VARS;
-    MODULE_PROFILE_START(reactPerfStats);
-
-    if ( Active::is_reset_candidate(p) )
-        send(p);
-
-    MODULE_PROFILE_END(reactPerfStats);
-}
-
-void ReactAction::send(Packet* p)
-{
-    EncodeFlags df = (p->packet_flags & PKT_FROM_SERVER) ? ENC_FLAG_FWD : 0;
-    EncodeFlags rf = ENC_FLAG_SEQ | (ENC_FLAG_VAL & config->buf_len);
-
-    if ( p->packet_flags & PKT_STREAM_EST )
-        Active::send_data(p, df, (uint8_t*)config->resp_buf, config->buf_len);
-
-    Active::send_reset(p, rf);
-    Active::send_reset(p, ENC_FLAG_FWD);
-}
-
-//-------------------------------------------------------------------------
-// implementation foo
-//-------------------------------------------------------------------------
-
-static bool react_getpage(const char* file)
-{
-    char* msg;
-    char* percent_s;
-    struct stat fs;
-    FILE* fd;
-    size_t n;
-
-    if ( stat(file, &fs) )
-    {
-        ParseError("can't stat react page file '%s'.", file);
-        return false;
-    }
-
-    s_page = (char*)SnortAlloc(fs.st_size+1);
-    fd = fopen(file, "r");
-
-    if ( !fd )
-    {
-        ParseError("can't open react page file '%s'.", file);
-        return false;
-    }
-
-    n = fread(s_page, 1, fs.st_size, fd);
-    fclose(fd);
-
-    if ( n != (size_t)fs.st_size )
-    {
-        ParseError("can't load react page file '%s'.", file);
-        return false;
-    }
-
-    s_page[n] = '\0';
-    msg = strstr(s_page, MSG_KEY);
-    if ( msg )
-        strncpy(msg, "%s", 2);
-
-    // search for %
-    percent_s = strstr(s_page, MSG_PERCENT);
-    if (percent_s)
-    {
-        percent_s += strlen(MSG_PERCENT); // move past current
-        // search for % again
-        percent_s = strstr(percent_s, MSG_PERCENT);
-        if (percent_s)
-        {
-            ParseError("can't specify more than one %%s or other "
-                "printf style formatting characters in react page '%s'.",
-                file);
-            return false;
-        }
-    }
-    return true;
-}
-
-//--------------------------------------------------------------------
-
-// format response buffer
-static void react_config(ReactData* rd)
-{
-    size_t body_len, head_len, total_len;
-    char dummy;
-
-    const char* head = DEFAULT_HTTP;
-    const char* body = s_page ? s_page : DEFAULT_HTML;
-    const char* msg = DEFAULT_MSG;
-
-    body_len = snprintf(&dummy, 1, body, msg);
-    head_len = snprintf(&dummy, 1, head, body_len);
-    total_len = head_len + body_len + 1;
-
-    rd->resp_buf = (char*)SnortAlloc(total_len);
-
-    SnortSnprintf((char*)rd->resp_buf, head_len+1, head, body_len);
-    SnortSnprintf((char*)rd->resp_buf+head_len, body_len+1, body, msg);
-
-    // set actual length
-    rd->resp_buf[total_len-1] = '\0';
-    rd->buf_len = strlen(rd->resp_buf);
-}
 
 //-------------------------------------------------------------------------
 // module
@@ -253,11 +184,8 @@ static void react_config(ReactData* rd)
 
 static const Parameter s_params[] =
 {
-    { "msg", Parameter::PT_BOOL, nullptr, "false",
-      " use rule msg in response page instead of default message" },
-
     { "page", Parameter::PT_STRING, nullptr, nullptr,
-      "file containing HTTP response (headers and body)" },
+      "file containing HTTP response body" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -265,7 +193,8 @@ static const Parameter s_params[] =
 class ReactModule : public Module
 {
 public:
-    ReactModule() : Module(s_name, s_help, s_params) { }
+    ReactModule() : Module(s_name, s_help, s_params)
+    { }
 
     bool begin(const char*, int, SnortConfig*) override;
     bool set(const char*, Value&, SnortConfig*) override;
@@ -273,25 +202,49 @@ public:
     ProfileStats* get_profile() const override
     { return &reactPerfStats; }
 
-    bool msg;
+    Usage get_usage() const override
+    { return DETECT; }
+
+    void set_trace(const snort::Trace* trace) const override
+    { react_trace = trace; }
+
+    const snort::TraceOption* get_trace_options() const override
+    {
+        static const TraceOption react_trace_options(nullptr, 0, nullptr);
+        return &react_trace_options;
+    }
+
+public:
+    std::string page;
+
+private:
+    bool getpage(const char* file);
 };
 
-bool ReactModule::begin(const char*, int, SnortConfig*)
+bool ReactModule::getpage(const char* file)
 {
-    msg = false;
+    std::ifstream ifs(file);
+    if ( !ifs.good() )
+    {
+        ParseError("Failed to open custom react page file: %s.", file);
+        return false;
+    }
+
+    page.assign((std::istreambuf_iterator<char>(ifs)), (std::istreambuf_iterator<char>()));
+    return true;
+}
+
+bool ReactModule::begin(const char*, int, SnortConfig* sc)
+{
+    page.clear();
+    sc->set_active_enabled();
     return true;
 }
 
 bool ReactModule::set(const char*, Value& v, SnortConfig*)
 {
-    if ( v.is("msg") )
-        msg = v.get_bool();
-
-    else if ( v.is("page") )
-        return react_getpage(v.get_string());
-
-    else
-        return false;
+    if ( v.is("page") )
+        return getpage(v.get_string());
 
     return true;
 }
@@ -301,32 +254,21 @@ bool ReactModule::set(const char*, Value& v, SnortConfig*)
 //-------------------------------------------------------------------------
 
 static Module* mod_ctor()
-{
-    return new ReactModule;
-}
+{ return new ReactModule; }
 
 static void mod_dtor(Module* m)
-{
-    delete m;
-}
+{ delete m; }
 
 static IpsAction* react_ctor(Module* p)
 {
-    ReactData* rd = (ReactData*)SnortAlloc(sizeof(*rd));
-
     ReactModule* m = (ReactModule*)p;
-    rd->rule_msg = m->msg;
-
-    react_config(rd); // FIXIT-L this must be done per response
-    Active::set_enabled();
+    ReactData* rd = new ReactData(m->page);
 
     return new ReactAction(rd);
 }
 
 static void react_dtor(IpsAction* p)
-{
-    delete p;
-}
+{ delete p; }
 
 static const ActionApi react_api =
 {
@@ -342,7 +284,7 @@ static const ActionApi react_api =
         mod_ctor,
         mod_dtor
     },
-    RULE_TYPE__DROP,
+    Actions::DROP,
     nullptr,  // pinit
     nullptr,  // pterm
     nullptr,  // tinit
@@ -353,11 +295,11 @@ static const ActionApi react_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* act_react[] =
+#endif
 {
     &react_api.base,
     nullptr
 };
-#else
-const BaseApi* act_react = &react_api.base;
-#endif
 

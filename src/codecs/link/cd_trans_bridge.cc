@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,12 +21,11 @@
 #include "config.h"
 #endif
 
-#include "framework/codec.h"
 #include "codecs/codec_module.h"
-
+#include "framework/codec.h"
 #include "protocols/eth.h"
-#include "protocols/protocol_ids.h"
-#include "protocols/packet.h"
+
+using namespace snort;
 
 namespace
 {
@@ -37,32 +36,15 @@ class TransbridgeCodec : public Codec
 {
 public:
     TransbridgeCodec() : Codec(CD_TRANSBRIDGE_NAME) { }
-    ~TransbridgeCodec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
 };
 } // anonymous namespace
 
-void TransbridgeCodec::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(ETHERTYPE_TRANS_ETHER_BRIDGING); }
+void TransbridgeCodec::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::ETHERTYPE_TRANS_ETHER_BRIDGING); }
 
-/*
- * Function: DecodeTransBridging(uint8_t *, const uint32_t, Packet)
- *
- * Purpose: Decode Transparent Ethernet Bridging
- *
- * Arguments: pkt => pointer to the real live packet data
- *            len => length of remaining data in packet
- *            p => pointer to the decoded packet struct
- *
- *
- * Returns: void function
- *
- * Note: This is basically the code from DecodeEthPkt but the calling
- * convention needed to be changed and the stuff at the beginning
- * wasn't needed since we are already deep into the packet
- */
 bool TransbridgeCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
 {
     if (raw.len < eth::ETH_HEADER_LEN)
@@ -79,7 +61,9 @@ bool TransbridgeCodec::decode(const RawData& raw, CodecData& codec, DecodeData&)
 
     codec.proto_bits |= PROTO_BIT__ETH;
     codec.lyr_len = eth::ETH_HEADER_LEN;
-    codec.next_prot_id = ntohs(eh->ether_type);
+    codec.next_prot_id = eh->ethertype();
+    codec.codec_flags |= CODEC_ETHER_NEXT;
+
     return true;
 }
 
@@ -117,11 +101,11 @@ static const CodecApi transbridge_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_transbridge[] =
+#endif
 {
     &transbridge_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_transbridge = &transbridge_api.base;
-#endif
 

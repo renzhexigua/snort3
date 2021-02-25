@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,17 +21,15 @@
 #include "config.h"
 #endif
 
-#include "snort_types.h"
-#include "protocols/packet.h"
-#include "snort_debug.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
 #include "framework/range.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
 #include "protocols/tcp.h"
+
+using namespace snort;
 
 #define s_name "seq"
 
@@ -47,7 +45,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     RangeCheck config;
@@ -59,52 +57,49 @@ private:
 
 uint32_t TcpSeqOption::hash() const
 {
-    uint32_t a,b,c;
+    uint32_t a = config.op;
+    uint32_t b = config.min;
+    uint32_t c = config.max;
 
-    a = config.op;
-    b = config.min;
-    c = config.max;
+    mix(a,b,c);
+    a += IpsOption::hash();
 
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
-
+    finalize(a,b,c);
     return c;
 }
 
 bool TcpSeqOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    TcpSeqOption& rhs = (TcpSeqOption&)ips;
+    const TcpSeqOption& rhs = (const TcpSeqOption&)ips;
     return ( config == rhs.config );
 }
 
-int TcpSeqOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus TcpSeqOption::eval(Cursor&, Packet* p)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
-    PROFILE_VARS;
+    RuleProfile profile(tcpSeqPerfStats);
 
     if (!p->ptrs.tcph)
-        return rval;
+        return NO_MATCH;
 
-    MODULE_PROFILE_START(tcpSeqPerfStats);
+    if ( config.eval(p->ptrs.tcph->seq()) )
+        return MATCH;
 
-    if ( config.eval(p->ptrs.tcph->th_seq) )
-        rval = DETECTION_OPTION_MATCH;
-
-    MODULE_PROFILE_END(tcpSeqPerfStats);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
 // module
 //-------------------------------------------------------------------------
 
+#define RANGE "0:"
+
 static const Parameter s_params[] =
 {
-    { "~range", Parameter::PT_STRING, nullptr, nullptr,
-      "check if packet payload size is 'size | min<>max | <max | >min'" },
+    { "~range", Parameter::PT_INTERVAL, RANGE, nullptr,
+      "check if TCP sequence number is in given range" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -123,6 +118,10 @@ public:
     ProfileStats* get_profile() const override
     { return &tcpSeqPerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     RangeCheck data;
 };
 
@@ -137,7 +136,7 @@ bool SeqModule::set(const char*, Value& v, SnortConfig*)
     if ( !v.is("~range") )
         return false;
 
-    return data.parse(v.get_string());
+    return data.validate(v.get_string(), RANGE);
 }
 
 //-------------------------------------------------------------------------
@@ -192,11 +191,11 @@ static const IpsApi seq_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_seq[] =
+#endif
 {
     &seq_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_seq = &seq_api.base;
-#endif
 

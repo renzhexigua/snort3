@@ -10,9 +10,10 @@ set( FILE_LIST
 )
 
 if (STATIC_INSPECTORS)
-    add_library( pop STATIC ${FILE_LIST})
+    add_library( pop OBJECT ${FILE_LIST})
 
 else (STATIC_INSPECTORS)
-    add_shared_library(pop inspectors ${FILE_LIST})
+    add_dynamic_module(pop inspectors ${FILE_LIST})
 
 endif (STATIC_INSPECTORS)
+

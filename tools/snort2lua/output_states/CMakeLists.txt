@@ -1,6 +1,7 @@
 
-add_library(output_states
+add_library(output_states OBJECT
     out_csv.cc
+    out_deleted.cc
     out_fast.cc
     out_full.cc
     out_null.cc
@@ -13,7 +14,3 @@ add_library(output_states
     output_api.cc
 )
 
-target_link_libraries( output_states
-    snort2lua_helpers
-    conversion_data
-)

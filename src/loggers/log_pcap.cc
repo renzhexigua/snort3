@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -22,33 +22,20 @@
 #include "config.h"
 #endif
 
-#include <sys/types.h>
-#include <ctype.h>
-#include <stdlib.h>
-#include <string.h>
-#include <errno.h>
-#include <unistd.h>
-#include <time.h>
 #include <pcap.h>
 
-extern "C" {
-#include <sfbpf_dlt.h>
-}
-
-#include <string>
-
+#include "detection/ips_context.h"
 #include "framework/logger.h"
 #include "framework/module.h"
-#include "protocols/packet.h"
-#include "event.h"
-#include "parser.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "snort_config.h"
-#include "main/analyzer.h"
+#include "log/messages.h"
+#include "main/snort_config.h"
 #include "packet_io/sfdaq.h"
-#include "stream/stream_api.h"
-#include "utils/stats.h"
+#include "packet_io/sfdaq_config.h"
+#include "protocols/packet.h"
+#include "utils/util.h"
+
+using namespace snort;
+using namespace std;
 
 /*
  * <pcap file> ::= <pcap file hdr> [<pcap pkt hdr> <packet>]*
@@ -60,8 +47,6 @@ extern "C" {
 
 #define PCAP_FILE_HDR_SZ (24)
 #define PCAP_PKT_HDR_SZ  (16)
-
-using namespace std;
 
 struct LtdConfig
 {
@@ -75,6 +60,7 @@ struct LtdContext
     pcap_dumper_t* dumpd;
     time_t lastTime;
     size_t size;
+    int log_cnt;
 };
 
 static THREAD_LOCAL LtdContext context;
@@ -90,11 +76,8 @@ static void TcpdumpRollLogFile(LtdConfig*);
 
 static const Parameter s_params[] =
 {
-    { "limit", Parameter::PT_INT, "0:", "0",
-      "set limit (0 is unlimited)" },
-
-    { "units", Parameter::PT_ENUM, "B | K | M | G", "B",
-      "bytes | KB | MB | GB" },
+    { "limit", Parameter::PT_INT, "0:maxSZ", "0",
+      "set maximum size in MB before rollover (0 is unlimited)" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -109,20 +92,18 @@ public:
 
     bool set(const char*, Value&, SnortConfig*) override;
     bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+
+    Usage get_usage() const override
+    { return GLOBAL; }
 
 public:
-    unsigned limit;
-    unsigned units;
+    size_t limit = 0;
 };
 
 bool TcpdumpModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("limit") )
-        limit = v.get_long();
-
-    else if ( v.is("units") )
-        units = v.get_long();
+        limit = v.get_size() * 1024 * 1024;
 
     else
         return false;
@@ -133,15 +114,6 @@ bool TcpdumpModule::set(const char*, Value& v, SnortConfig*)
 bool TcpdumpModule::begin(const char*, int, SnortConfig*)
 {
     limit = 0;
-    units = 0;
-    return true;
-}
-
-bool TcpdumpModule::end(const char*, int, SnortConfig*)
-{
-    while ( units-- )
-        limit *= 1024;
-
     return true;
 }
 
@@ -149,23 +121,27 @@ bool TcpdumpModule::end(const char*, int, SnortConfig*)
 // api stuff
 //-------------------------------------------------------------------------
 
-static inline size_t SizeOf(const DAQ_PktHdr_t* pkth)
+static inline size_t SizeOf(const Packet* p)
 {
-    return PCAP_PKT_HDR_SZ + pkth->caplen;
+    return PCAP_PKT_HDR_SZ + p->pktlen;
 }
 
 static void LogTcpdumpSingle(
     LtdConfig* data, Packet* p, const char*, Event*)
 {
-    size_t dumpSize = SizeOf(p->pkth);
+    size_t dumpSize = SizeOf(p);
 
     if ( data->limit && (context.size + dumpSize > data->limit) )
         TcpdumpRollLogFile(data);
 
-    pcap_dump((u_char*)context.dumpd,(struct pcap_pkthdr*)p->pkth,p->pkt);
+    struct pcap_pkthdr pcaphdr;
+    pcaphdr.ts = p->pkth->ts;
+    pcaphdr.caplen = p->pktlen;
+    pcaphdr.len = p->pkth->pktlen;
+    pcap_dump((uint8_t*)context.dumpd, &pcaphdr, p->pkt);
     context.size += dumpSize;
 
-    if (!SnortConfig::line_buffered_logging())  // FIXIT-L misnomer
+    if (!p->context->conf->line_buffered_logging())  // FIXIT-L misnomer
     {
         fflush( (FILE*)context.dumpd);
     }
@@ -178,44 +154,52 @@ static void LogTcpdumpStream(
 // (take original packet headers and append reassembled data)
 }
 
-static void TcpdumpInitLogFile(LtdConfig*, int /*nostamps?*/)
+static void TcpdumpInitLogFile(LtdConfig*, bool no_timestamp)
 {
-    context.lastTime = time(NULL);
-
     string file;
-    get_instance_file(file, F_NAME);
+    string filename = F_NAME;
 
+    context.lastTime = time(nullptr);
+    context.log_cnt = 0;
+
+    if(!no_timestamp)
     {
-        pcap_t* pcap;
-        int dlt = DAQ_GetBaseProtocol();
-
-        // convert these flavors of raw to the generic
-        // for compatibility with libpcap 1.0.0
-        if ( dlt == DLT_IPV4 || dlt == DLT_IPV6 )
-            dlt = DLT_RAW;
-
-        pcap = pcap_open_dead(dlt, DAQ_GetSnapLen());
-
-        if ( !pcap )
-            FatalError("%s: can't get pcap context\n", S_NAME);
-
-        context.dumpd = pcap ? pcap_dump_open(pcap, file.c_str()) : NULL;
-
-        if (context.dumpd == NULL)
-        {
-            FatalError("%s: can't open %s: %s\n",
-                S_NAME, file.c_str(), pcap_geterr(pcap));
-        }
-        pcap_close(pcap);
+        char timestamp[16];
+        snprintf(timestamp, sizeof(timestamp), ".%lu", (unsigned long)context.lastTime);
+        filename += timestamp;
     }
 
-    context.file = SnortStrdup(file.c_str());
+    get_instance_file(file, filename.c_str());
+
+    int dlt = SFDAQ::get_base_protocol();
+
+    // convert these flavors of raw to the generic
+    // for compatibility with libpcap 1.0.0
+    if ( dlt == DLT_IPV4 || dlt == DLT_IPV6 )
+        dlt = DLT_RAW;
+
+    pcap_t* pcap;
+    pcap = pcap_open_dead(dlt, SnortConfig::get_conf()->daq_config->get_mru_size());
+
+    if ( !pcap )
+        FatalError("%s: can't get pcap context\n", S_NAME);
+
+    context.dumpd = pcap ? pcap_dump_open(pcap, file.c_str()) : nullptr;
+
+    if (context.dumpd == nullptr)
+    {
+        FatalError("%s: can't open %s: %s\n",
+            S_NAME, file.c_str(), pcap_geterr(pcap));
+    }
+    pcap_close(pcap);
+
+    context.file = snort_strdup(file.c_str());
     context.size = PCAP_FILE_HDR_SZ;
 }
 
 static void TcpdumpRollLogFile(LtdConfig* data)
 {
-    time_t now = time(NULL);
+    time_t now = time(nullptr);
 
     /* don't roll over any sooner than resolution
      * of filename discriminator
@@ -224,17 +208,17 @@ static void TcpdumpRollLogFile(LtdConfig* data)
         return;
 
     /* close the output file */
-    if ( context.dumpd != NULL )
+    if ( context.dumpd != nullptr )
     {
         pcap_dump_close(context.dumpd);
-        context.dumpd = NULL;
+        context.dumpd = nullptr;
         context.size = 0;
-        free(context.file);
+        snort_free(context.file);
         context.file = nullptr;
     }
 
     /* Have to add stamps now to distinguish files */
-    TcpdumpInitLogFile(data, 0);
+    TcpdumpInitLogFile(data, false);
 }
 
 static void SpoLogTcpdumpCleanup(LtdConfig*)
@@ -243,7 +227,7 @@ static void SpoLogTcpdumpCleanup(LtdConfig*)
      * if we haven't written any data, dump the output file so there aren't
      * fragments all over the disk
      */
-    if (context.file && !pc.log_pkts && !pc.total_alert_pkts)
+    if (context.file && !context.log_cnt)
     {
         int ret = unlink(context.file);
 
@@ -251,7 +235,7 @@ static void SpoLogTcpdumpCleanup(LtdConfig*)
             ErrorMessage("Could not remove tcpdump output file %s: %s\n",
                 context.file, get_error(errno));
 
-        free(context.file);
+        snort_free(context.file);
         context.file = nullptr;
     }
 }
@@ -264,7 +248,7 @@ class PcapLogger : public Logger
 {
 public:
     PcapLogger(TcpdumpModule*);
-    ~PcapLogger();
+    ~PcapLogger() override;
 
     void open() override;
     void close() override;
@@ -284,28 +268,33 @@ PcapLogger::PcapLogger(TcpdumpModule* m)
 
 PcapLogger::~PcapLogger()
 {
-    SpoLogTcpdumpCleanup(config);
     delete config;
 }
 
 void PcapLogger::open()
 {
-    TcpdumpInitLogFile(config, SnortConfig::output_no_timestamp());
+    TcpdumpInitLogFile(config, SnortConfig::get_conf()->output_no_timestamp());
 }
 
 void PcapLogger::close()
 {
+    SpoLogTcpdumpCleanup(nullptr);
+
     if ( context.dumpd )
     {
         pcap_dump_close(context.dumpd);
         context.dumpd = nullptr;
     }
     if ( context.file )
-        free(context.file);
+        snort_free(context.file);
 }
 
 void PcapLogger::log(Packet* p, const char* msg, Event* event)
 {
+    if(!context.dumpd)
+        open();
+
+    context.log_cnt++;
     if (p->packet_flags & PKT_REBUILT_STREAM)
         LogTcpdumpStream(config, p, msg, event);
     else
@@ -314,7 +303,10 @@ void PcapLogger::log(Packet* p, const char* msg, Event* event)
 
 void PcapLogger::reset()
 {
-    TcpdumpRollLogFile(config);
+    if(!context.dumpd)
+        open();
+    else
+        TcpdumpRollLogFile(config);
 }
 
 //-------------------------------------------------------------------------
@@ -327,7 +319,7 @@ static Module* mod_ctor()
 static void mod_dtor(Module* m)
 { delete m; }
 
-static Logger* tcpdump_ctor(SnortConfig*, Module* mod)
+static Logger* tcpdump_ctor(Module* mod)
 { return new PcapLogger((TcpdumpModule*)mod); }
 
 static void tcpdump_dtor(Logger* p)
@@ -354,11 +346,11 @@ static LogApi tcpdump_api
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* log_pcap[] =
+#endif
 {
     &tcpdump_api.base,
     nullptr
 };
-#else
-const BaseApi* log_pcap = &tcpdump_api.base;
-#endif
 

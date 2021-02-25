@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,11 +17,16 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "parse_ports.h"
-#include "ports/port_table.h"
-#include "main/snort_debug.h"
-#include "utils/snort_bounds.h"
+
+#include "protocols/packet.h"
 #include "utils/util.h"
+
+using namespace snort;
 
 static int POParserInit(POParser* pop, const char* s, PortVarTable* pvTable)
 {
@@ -40,14 +45,12 @@ static int POParserInit(POParser* pop, const char* s, PortVarTable* pvTable)
 */
 static int POPGetChar(POParser* pop)
 {
-    int c;
     if ( pop->slen > 0 )
     {
-        c = pop->s[0];
+        int c = pop->s[0];
         pop->slen--;
         pop->s++;
         pop->pos++;
-        DEBUG_WRAP(DebugMessage(DEBUG_PORTLISTS,"GetChar: %c, %d bytes left\n",c, pop->slen); );
         return c;
     }
     return 0;
@@ -98,60 +101,6 @@ static int POPPeekChar(POParser* pop)
     return 0;
 }
 
-#ifdef XXXX
-/* copy a simple alpha string */
-static void POPeekString(POParser* p, char* s, int smax)
-{
-    int c;
-    int cnt = 0;
-    int k = p->slen;
-
-    smax--;
-
-    s[0] = 0;
-
-    while ( k > 0  && cnt < smax )
-    {
-        c = p->s[ cnt ];
-
-        if ( c ==  0     )
-            break;
-        if ( !isalpha(c) )
-            break;
-
-        s[ cnt++ ] = c;
-        s[ cnt   ] = 0;
-        k--;
-    }
-}
-
-static void POGetString(POParser* p, char* s, int smax)
-{
-    int c;
-    int cnt = 0;
-
-    smax--;
-
-    s[0] = 0;
-
-    while ( p->slen > 0  && cnt < smax )
-    {
-        c = p->s[ 0 ];
-
-        if ( c ==  0     )
-            break;
-        if ( !isalpha(c) )
-            break;
-
-        s[ cnt++ ] = c;
-        s[ cnt   ] = 0;
-        p->slen--;
-        p->s++;
-    }
-}
-
-#endif
-
 /*
    Skip whitespace : ' ', '\t', '\n'
 */
@@ -180,18 +129,18 @@ static char* POParserName(POParser* pop)
 
     /* check if were done  */
     if ( !pop || !pop->s || !*(pop->s) )
-        return 0;
+        return nullptr;
 
     /* Start the name - skip space */
     c = POPGetChar2(pop);
     if ( !c )
-        return 0;
+        return nullptr;
 
     if ( c== '$' ) /* skip leading '$' - old Var indicator */
     {
         c = POPGetChar2(pop);
         if ( !c )
-            return 0;
+            return nullptr;
     }
 
     if ( isalnum(c) )
@@ -202,7 +151,7 @@ static char* POParserName(POParser* pop)
     else
     {
         POPUnGetChar(pop);
-        return 0; /* not a name */
+        return nullptr; /* not a name */
     }
 
     for ( c  = POPGetChar(pop);
@@ -221,13 +170,11 @@ static char* POParserName(POParser* pop)
         }
     }
 
-    DEBUG_WRAP(DebugMessage(DEBUG_PORTLISTS,">>> POParserName : %s\n",pop->token); );
-
-    return strdup(pop->token);
+    return snort_strdup(pop->token);
 }
 
 /*
-*   Read an unsigned short (a port)
+*   read an unsigned short (a port)
 */
 static uint16_t POParserGetShort(POParser* pop)
 {
@@ -251,7 +198,7 @@ static uint16_t POParserGetShort(POParser* pop)
         }
         else
         {
-            if ( c && ( c!= ':' && c != ' ' && c != ']' && c != ',' && c != '\t' && c != '\n' ) )
+            if ( c != ':' && c != ' ' && c != ']' && c != ',' && c != '\t' && c != '\n' )
             {
                 pop->errflag = POPERR_NOT_A_NUMBER;
                 return 0;
@@ -269,81 +216,61 @@ static uint16_t POParserGetShort(POParser* pop)
         return 0;
     }
 
-    DEBUG_WRAP(DebugMessage(DEBUG_PORTLISTS,"GetUNumber: %d\n",c); );
-
     return c;
 }
 
 static PortObject* _POParseVar(POParser* pop)
 {
-    PortObject* pox;
-    char* name;
-
-    name  = POParserName(pop);
-
+    char* name  = POParserName(pop);
     if (!name)
     {
         pop->pos++;
         pop->errflag = POPERR_NO_NAME;
-        return NULL;
+        return nullptr;
     }
 
-    pox = PortVarTableFind(pop->pvTable, name);
-    free(name);
+    PortObject* pox = PortVarTableFind(pop->pvTable, name);
+    snort_free(name);
 
     if (!pox)
     {
         pop->errflag = POPERR_BAD_VARIABLE;
-        return NULL;
+        return nullptr;
     }
 
     pox = PortObjectDup(pox);
-
-    if (!pox)
-    {
-        pop->errflag = POPERR_MALLOC_FAILED;
-        return NULL;
-    }
-
     return pox;
 }
 
 static PortObject* _POParsePort(POParser* pop)
 {
-    uint16_t hport, lport;
-    char c;
     PortObject* po = PortObjectNew();
 
-    if (!po)
-    {
-        pop->errflag = POPERR_MALLOC_FAILED;
-        return NULL;
-    }
-
-    pop->token[0]=0;
+    pop->token[0] = 0;
 
     /* The string in pop should only be of the form <port> or <port>:<port> */
-    lport = POParserGetShort(pop);
+    uint16_t lport = POParserGetShort(pop);
 
     if (pop->errflag)
     {
         PortObjectFree(po);
-        return NULL;
+        return nullptr;
     }
 
-    c = POPPeekChar(pop);
+    char c = POPPeekChar(pop);
 
     if ( c == ':' ) /* half open range */
     {
         POPGetChar(pop);
         c = POPPeekChar(pop);
+        uint16_t hport;
 
         if (((c == 0) && (pop->slen == 0)) ||
             (c == ','))
         {
             /* Open ended range, highport is 65k */
-            hport = MAXPORTS-1;
-            PortObjectAddRange(po, lport, hport, 0);
+            hport = MAX_PORTS - 1;
+            PortObjectAddRange(po, lport, hport);
             return po;
         }
 
@@ -351,7 +278,7 @@ static PortObject* _POParsePort(POParser* pop)
         {
             pop->errflag = POPERR_NOT_A_NUMBER;
             PortObjectFree(po);
-            return NULL;
+            return nullptr;
         }
 
         hport = POParserGetShort(pop);
@@ -359,46 +286,38 @@ static PortObject* _POParsePort(POParser* pop)
         if ( pop->errflag )
         {
             PortObjectFree(po);
-            return NULL;
+            return nullptr;
         }
 
         if (lport > hport)
         {
             pop->errflag = POPERR_INVALID_RANGE;
             PortObjectFree(po);
-            return NULL;
+            return nullptr;
         }
 
-        PortObjectAddRange(po, lport, hport, 0);
+        PortObjectAddRange(po, lport, hport);
     }
     else
     {
-        PortObjectAddPort(po, lport, 0);
+        PortObjectAddPort(po, lport);
     }
 
     return po;
 }
 
-// FIXIT-L this creates 1 PortObject per port in the list
-// and then consolidates into one PortObject; it should
-// just create a single PortObject and put each port into
-// appropriate PortItems
+// FIXIT-L _POParseString creates 1 PortObject per port in the list and
+// then consolidates into one PortObject; it should just create a single
+// PortObject and put each port into appropriate PortItems
+
 static PortObject* _POParseString(POParser* pop)
 {
-    PortObject* po;
-    PortObject* potmp = NULL;
+    PortObject* potmp = nullptr;
     int local_neg = 0;
     char c;
     int list_count = 0;
 
-    po = PortObjectNew();
-
-    if (!po)
-    {
-        pop->errflag = POPERR_MALLOC_FAILED;
-        return NULL;
-    }
-
+    PortObject* po = PortObjectNew();
     while ( (c = POPGetChar2(pop)) != 0 )
     {
         if (c == '!')
@@ -422,31 +341,25 @@ static PortObject* _POParseString(POParser* pop)
 
             list_count++;
 
-            if ( (end = strrchr(pop->s, (int)']')) == NULL )
+            if ( (end = strrchr(pop->s, (int)']')) == nullptr )
             {
                 pop->errflag = POPERR_NO_ENDLIST_BRACKET;
                 PortObjectFree(po);
-                return NULL;
+                return nullptr;
             }
 
-            if ( (tok = SnortStrndup(pop->s, end - pop->s)) == NULL)
-            {
-                pop->errflag = POPERR_MALLOC_FAILED;
-                PortObjectFree(po);
-                return NULL;
-            }
-
+            tok = snort_strndup(pop->s, end - pop->s);
             POParserInit(&local_pop, tok, pop->pvTable);
 
             /* Recurse */
             potmp = _POParseString(&local_pop);
-            free(tok);
+            snort_free(tok);
 
             if (!potmp)
             {
                 pop->errflag = local_pop.errflag;
                 PortObjectFree(po);
-                return NULL;
+                return nullptr;
             }
 
             /* Advance "cursor" to end of this list */
@@ -461,7 +374,7 @@ static PortObject* _POParseString(POParser* pop)
             {
                 pop->errflag = POPERR_EXTRA_BRACKET;
                 PortObjectFree(po);
-                return NULL;
+                return nullptr;
             }
 
             continue;
@@ -476,7 +389,7 @@ static PortObject* _POParseString(POParser* pop)
         if (!potmp)
         {
             PortObjectFree(po);
-            return NULL;
+            return nullptr;
         }
 
         if (local_neg)
@@ -492,14 +405,11 @@ static PortObject* _POParseString(POParser* pop)
         {
             PortObjectFree(po);
             PortObjectFree(potmp);
-            return NULL;
+            return nullptr;
         }
 
-        if (potmp)
-        {
-            PortObjectFree(potmp);
-            potmp = NULL;
-        }
+        PortObjectFree(potmp);
+        potmp = nullptr;
     }
 
     /* Check for mis-matched brackets */
@@ -511,7 +421,7 @@ static PortObject* _POParseString(POParser* pop)
             pop->errflag = POPERR_EXTRA_BRACKET;
 
         PortObjectFree(po);
-        return NULL;
+        return nullptr;
     }
 
     return po;
@@ -537,54 +447,52 @@ static PortObject* _POParseString(POParser* pop)
 PortObject* PortObjectParseString(PortVarTable* pvTable, POParser* pop,
     const char* name, const char* s, int nameflag)
 {
-    PortObject* po, * potmp;
-
-    DEBUG_WRAP(DebugMessage(DEBUG_PORTLISTS,"PortObjectParseString: %s\n",s); );
-
     POParserInit(pop, s, pvTable);
-
-    po = PortObjectNew();
-    if (!po)
-    {
-        pop->errflag=POPERR_MALLOC_FAILED;
-        return 0;
-    }
+    PortObject* po = PortObjectNew();
 
     if ( nameflag ) /* parse a name */
     {
         po->name = POParserName(pop);
-        if (!po->name )
+        if ( !po->name )
         {
-            pop->errflag=POPERR_NO_NAME;
+            pop->errflag = POPERR_NO_NAME;
             PortObjectFree(po);
-            return 0;
+            return nullptr;
         }
     }
     else
     {
         if ( name )
-            po->name = SnortStrdup(name);
+            po->name = snort_strdup(name);
         else
-            po->name = SnortStrdup("noname");
+            po->name = snort_strdup("noname");
     }
 
     // LogMessage("PortObjectParseString: po->name=%s\n",po->name);
 
-    potmp = _POParseString(pop);
-
-    if (!potmp)
+    PortObject* potmp = _POParseString(pop);
+    if ( !potmp )
     {
         PortObjectFree(po);
-        return NULL;
+        return nullptr;
     }
 
     PortObjectNormalize(potmp);
 
-    if (PortObjectAddPortObject(po, potmp, &pop->errflag))
+    // Catches !:65535
+    if ( sflist_count(potmp->item_list) == 0 )
     {
         PortObjectFree(po);
         PortObjectFree(potmp);
-        return NULL;
+        pop->errflag = POPERR_INVALID_RANGE;
+        return nullptr;
+    }
+
+    if ( PortObjectAddPortObject(po, potmp, &pop->errflag) )
+    {
+        PortObjectFree(po);
+        PortObjectFree(potmp);
+        return nullptr;
     }
 
     PortObjectFree(potmp);
@@ -598,9 +506,7 @@ const char* PortObjectParseError(POParser* pop)
     {
     case POPERR_NO_NAME:            return "no name";
     case POPERR_NO_ENDLIST_BRACKET: return "no end of list bracket."
-               " Elements must be comma seperated,"
-               " and no spaces may appear between"
-               " brackets.";
+        " Elements must be comma separated, and no spaces may appear between brackets.";
     case POPERR_NOT_A_NUMBER:       return "not a number";
     case POPERR_EXTRA_BRACKET:      return "extra list bracket";
     case POPERR_NO_DATA:            return "no data";

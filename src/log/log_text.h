@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,61 +17,46 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-/**
- * @file   log_text.h
- * @author Russ Combs <rcombs@sourcefire.com>
- * @date   Fri Jun 27 10:34:37 2003
- *
- * @brief  logging to text file
- *
- * Use these methods to write to a TextLog.
- */
+// log_text.h author Russ Combs <rcombs@sourcefire.com>
 
 #ifndef LOG_TEXT_H
 #define LOG_TEXT_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+// Use these methods to write to a TextLog
 
-#include <stdint.h>
 #include "log/text_log.h"
-#include "main/snort_types.h"
 
-struct Packet;
 struct Event;
 
-namespace ip
+namespace snort
 {
-struct IP4Hdr;
-}
-namespace tcp
-{
-struct TCPHdr;
-}
-typedef ip::IP4Hdr IP4Hdr;
+struct Packet;
+namespace ip { struct IP4Hdr; }
+namespace tcp { struct TCPHdr; }
 
-void LogPriorityData(TextLog*, const Event*, bool doNewLine);
-void LogXrefs(TextLog*, const Event*, bool doNewLine);
+SO_PUBLIC void LogTimeStamp(TextLog*, Packet*);
+SO_PUBLIC void LogPriorityData(TextLog*, const Event&);
+SO_PUBLIC void LogXrefs(TextLog*, const Event&);
 
-void LogIPPkt(TextLog*, Packet*);
-void LogPayload(TextLog*, Packet*);
-void LogNetData(TextLog*, const uint8_t* data, const int len, Packet*);
+SO_PUBLIC void LogIPPkt(TextLog*, Packet*);
+SO_PUBLIC void LogPayload(TextLog*, Packet*);
+SO_PUBLIC bool LogAppID(TextLog*, Packet*);
 
-void LogDiv(TextLog*);
-void LogTimeStamp(TextLog*, Packet*);
+SO_PUBLIC void LogNetData(
+        TextLog*, const uint8_t* data, const int len, Packet*, const char* buf_name = nullptr,
+        const char* ins_name = nullptr);
 
-void LogTrHeader(TextLog*, Packet*);
-void Log2ndHeader(TextLog*, Packet*);
-void LogIpAddrs(TextLog*, Packet*);
+SO_PUBLIC void Log2ndHeader(TextLog*, Packet*);
+SO_PUBLIC void LogTCPHeader(TextLog*, Packet*);
+SO_PUBLIC void LogUDPHeader(TextLog*, Packet*);
+SO_PUBLIC void LogICMPHeader(TextLog*, Packet*);
 
-void LogIPHeader(TextLog*, Packet*);
-void LogTCPHeader(TextLog*, Packet*);
-void LogUDPHeader(TextLog*, Packet*);
-void LogICMPHeader(TextLog*, Packet*);
+SO_PUBLIC void LogIpAddrs(TextLog*, Packet*);
+SO_PUBLIC void LogIPHeader(TextLog*, Packet*);
 
-SO_PUBLIC void LogIpOptions(TextLog*, const IP4Hdr*, uint16_t valid_ip4_len);
+SO_PUBLIC void LogIpOptions(TextLog*, const ip::IP4Hdr*, uint16_t valid_ip4_len);
 SO_PUBLIC void LogTcpOptions(TextLog*, const tcp::TCPHdr*, uint16_t valid_tcp_len);
+}
 
 #endif
 

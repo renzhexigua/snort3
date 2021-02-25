@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -18,53 +18,122 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "ips_content.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <errno.h>
-#ifdef DEBUG_MSGS
-# include <assert.h>
-#endif
-
-#include "snort_types.h"
-#include "snort_bounds.h"
+#include "detection/pattern_match_data.h"
 #include "detection/treenodes.h"
-#include "snort_debug.h"
-#include "utils/boyer_moore.h"
-#include "util.h"
-#include "parser/parser.h"
-#include "parser/parse_utils.h"
-#include "sfhashfcn.h"
 #include "framework/cursor.h"
 #include "framework/ips_option.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
-#include "ips_byte_extract.h"
-#include "detection/detection_util.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "hash/hash_key_operations.h"
+#include "helpers/literal_search.h"
+#include "log/messages.h"
+#include "main/thread_config.h"
+#include "parser/parse_utils.h"
+#include "profiler/profiler.h"
+#include "utils/util.h"
+#include "utils/stats.h"
+
+#include "extract.h"
+
+using namespace snort;
 
 #define MAX_PATTERN_SIZE 2048
 
 #define s_name "content"
 
 static THREAD_LOCAL ProfileStats contentPerfStats;
+static LiteralSearch::Handle* search_handle = nullptr;
 
-static int CheckANDPatternMatch(PatternMatchData*, Cursor&);
+static IpsOption::EvalStatus CheckANDPatternMatch(class ContentData*, Cursor&);
+
+//-------------------------------------------------------------------------
+// instance data
+//-------------------------------------------------------------------------
+
+class ContentData
+{
+public:
+    ContentData();
+    ~ContentData();
+
+    void setup_bm();
+    void set_max_jump_size();
+
+    PatternMatchData pmd = {};
+
+    LiteralSearch* searcher;
+
+    int8_t offset_var;      /* byte_extract variable indices for offset, */
+    int8_t depth_var;       /* depth, distance, within */
+
+    unsigned match_delta;   /* Maximum distance we can jump to search for this pattern again. */
+};
+
+ContentData::ContentData()
+{
+    searcher = nullptr;
+    offset_var = IPS_OPTIONS_NO_VAR;
+    depth_var = IPS_OPTIONS_NO_VAR;
+    match_delta = 0;
+}
+
+ContentData::~ContentData()
+{
+    if ( searcher )
+        delete searcher;
+
+    if ( pmd.pattern_buf )
+        snort_free(const_cast<char*>(pmd.pattern_buf));
+
+    if ( pmd.last_check )
+        snort_free(pmd.last_check);
+}
+
+void ContentData::setup_bm()
+{
+    const uint8_t* pattern = (const uint8_t*)pmd.pattern_buf;
+    searcher = LiteralSearch::instantiate(search_handle, pattern, pmd.pattern_size, pmd.is_no_case());
+}
+
+// find the maximum number of characters we can jump ahead
+// from the current offset when checking for this pattern again
+
+void ContentData::set_max_jump_size()
+{
+    unsigned j = 0;
+
+    for ( unsigned i = 1; i < pmd.pattern_size; i++ )
+    {
+        if ( pmd.pattern_buf[j] != pmd.pattern_buf[i] )
+        {
+            j = 0;
+            continue;
+        }
+        if ( i == (pmd.pattern_size - 1) )
+        {
+            match_delta = pmd.pattern_size - j - 1;
+            return;
+        }
+        j++;
+    }
+    match_delta = pmd.pattern_size;
+}
+
+//-------------------------------------------------------------------------
+// rule option
+//-------------------------------------------------------------------------
 
 class ContentOption : public IpsOption
 {
 public:
-    ContentOption(PatternMatchData* c,
-        option_type_t t = RULE_OPTION_TYPE_CONTENT) :
-        IpsOption(s_name, t)
+    ContentOption(ContentData* c) : IpsOption(s_name, RULE_OPTION_TYPE_CONTENT)
     { config = c; }
 
-    ~ContentOption();
+    ~ContentOption() override
+    { delete config; }
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
@@ -73,239 +142,127 @@ public:
     { return CAT_ADJUST; }
 
     bool is_relative() override
-    { return (config->relative == 1); }
+    { return config->pmd.is_relative(); }
 
-    PatternMatchData* get_data()
+    bool retry(Cursor&, const Cursor&) override;
+
+    ContentData* get_data()
     { return config; }
 
-    void set_data(PatternMatchData* pmd)
-    { config = pmd; }
+    void set_data(ContentData* cd)
+    { config = cd; }
 
-    int eval(Cursor& c, Packet*) override
+    EvalStatus eval(Cursor& c, Packet*) override
     { return CheckANDPatternMatch(config, c); }
 
+    PatternMatchData* get_pattern(SnortProtocolId, RuleDirection) override
+    { return &config->pmd; }
+
 protected:
-    PatternMatchData* config;
+    ContentData* config;
 };
 
-//-------------------------------------------------------------------------
-// class methods
-//-------------------------------------------------------------------------
-
-ContentOption::~ContentOption()
+bool ContentOption::retry(Cursor& current_cursor, const Cursor& orig_cursor)
 {
-    PatternMatchData* pmd = config;
+    if ( config->pmd.is_negated() )
+        return false;
 
-    if ( !pmd )
-        return;
+    if ( !config->pmd.depth )
+        return true;
 
-    if (pmd->pattern_buf)
-        free(pmd->pattern_buf);
-    if (pmd->skip_stride)
-        free(pmd->skip_stride);
-    if (pmd->shift_stride)
-        free(pmd->shift_stride);
+    // Do not retry if the current pattern would extend beyond the area
+    // in which we're looking for it.
+    unsigned min = current_cursor.get_delta() + config->pmd.pattern_size;
+    unsigned max = orig_cursor.get_delta() + config->pmd.offset + config->pmd.depth;
 
-    free(pmd->last_check);
-    free(pmd);
+    return min <= max;
 }
 
 uint32_t ContentOption::hash() const
 {
-    uint32_t a,b,c;
-    const PatternMatchData* pmd = config;
-
-    a = pmd->negated;
-    b = pmd->offset;
-    c = pmd->depth;
+    uint32_t a = config->pmd.flags;
+    uint32_t b = config->pmd.offset;
+    uint32_t c = config->pmd.depth;
 
     mix(a,b,c);
 
-    a += pmd->pattern_size;
-    b += pmd->relative;
-    c += pmd->match_delta;
+    a += config->pmd.pattern_size;
+    b += config->pmd.fp_offset;
+    c += config->pmd.fp_length;
 
     mix(a,b,c);
 
-    if ( pmd->pattern_size )
-        mix_str(a,b,c,pmd->pattern_buf, pmd->pattern_size);
+    a += config->pmd.pm_type;
+    b += IpsOption::hash();
 
-    a += pmd->no_case;
-    b += pmd->fp;
-    c += pmd->fp_only;
+    mix(a, b, c);
 
-    mix(a,b,c);
-    mix_str(a,b,c,get_name());
+    if ( config->pmd.pattern_size )
+        mix_str(a, b, c, config->pmd.pattern_buf, config->pmd.pattern_size);
 
-    a += pmd->fp_offset;
-    b += pmd->fp_length;
-    c += pmd->offset_var;
+    a += config->depth_var;
+    b += config->offset_var;
+    c += config->match_delta;
 
-    mix(a,b,c);
-
-    a += pmd->depth_var;
-
-    final(a,b,c);
+    mix(a, b, c);
+    finalize(a, b, c);
 
     return c;
 }
 
-bool ContentOption::operator==(const IpsOption& ips) const
+static bool same_buffers(
+    unsigned len1, const char* buf1, bool no_case1,
+    unsigned len2, const char* buf2, bool no_case2)
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( len1 != len2 or no_case1 != no_case2 )
         return false;
 
-    ContentOption& rhs = (ContentOption&)ips;
-    PatternMatchData* left = config;
-    PatternMatchData* right = rhs.config;
-    unsigned int i;
+    if ( !len1 )
+        return true;
 
-    /* Sizes will be most different, check that first */
-    if ((left->pattern_size != right->pattern_size) ||
-        (left->no_case != right->no_case))
-        return false;
-
-    /* Next compare the patterns for uniqueness */
-    if (left->pattern_size)
+    if ( no_case1 )
     {
-        if (left->no_case)
+        for ( unsigned i = 0; i < len1; ++i )
         {
-            /* If no_case is set, do case insensitive compare on pattern */
-            for (i=0; i<left->pattern_size; i++)
-            {
-                if (toupper(left->pattern_buf[i]) != toupper(right->pattern_buf[i]))
-                {
-                    return false;
-                }
-            }
-        }
-        else
-        {
-            /* If no_case is not set, do case sensitive compare on pattern */
-            if (memcmp(left->pattern_buf, right->pattern_buf, left->pattern_size) != 0)
-            {
+            if ( toupper(buf1[i]) != toupper(buf2[i]) )
                 return false;
-            }
         }
     }
+    else
+    {
+        if ( memcmp(buf1, buf2, len1) )
+            return false;
+    }
+    return true;
+}
 
-    /* Now check the rest of the options */
-    if ((left->negated == right->negated) &&
-        (left->offset == right->offset) &&
-        (left->depth == right->depth) &&
-        (left->relative == right->relative) &&
-        (left->match_delta == right->match_delta) &&
-        (left->fp == right->fp) &&
-        (left->fp_only == right->fp_only) &&
-        (left->fp_offset == right->fp_offset) &&
-        (left->fp_length == right->fp_length) &&
-        (left->offset_var == right->offset_var) &&
-        (left->depth_var == right->depth_var) )
+bool ContentOption::operator==(const IpsOption& ips) const
+{
+    if ( !IpsOption::operator==(ips) )
+        return false;
+
+    const ContentOption& rhs = (const ContentOption&)ips;
+    const ContentData& left = *config;
+    const ContentData& right = *rhs.config;
+
+    if ( !same_buffers(left.pmd.pattern_size, left.pmd.pattern_buf, left.pmd.is_no_case(),
+        right.pmd.pattern_size, right.pmd.pattern_buf, right.pmd.is_no_case()) )
+        return false;
+
+    if (
+        (left.pmd.flags == right.pmd.flags) and
+        (left.pmd.offset == right.pmd.offset) and
+        (left.pmd.depth == right.pmd.depth) and
+        (left.pmd.fp_offset == right.pmd.fp_offset) and
+        (left.pmd.fp_length == right.pmd.fp_length) and
+        (left.pmd.pm_type == right.pmd.pm_type) and
+        (left.match_delta == right.match_delta) and
+        (left.offset_var == right.offset_var) and
+        (left.depth_var == right.depth_var) )
     {
         return true;
     }
-
     return false;
-}
-
-//-------------------------------------------------------------------------
-// private helpers
-//-------------------------------------------------------------------------
-
-static PatternMatchData* new_pmd()
-{
-    PatternMatchData* pmd = (PatternMatchData*)SnortAlloc(sizeof(PatternMatchData));
-
-    /* Set any non-zero default values here. */
-    pmd->offset_var = BYTE_EXTRACT_NO_VAR;
-    pmd->depth_var = BYTE_EXTRACT_NO_VAR;
-
-    return pmd;
-}
-
-static void finalize_content(PatternMatchData* pmd, OptTreeNode*)
-{
-    if ( pmd->negated )
-        pmd->last_check = (PmdLastCheck*)SnortAlloc(
-            get_instance_max() * sizeof(*pmd->last_check));
-}
-
-static void make_precomp(PatternMatchData* idx)
-{
-    idx->skip_stride = make_skip(idx->pattern_buf, idx->pattern_size);
-    idx->shift_stride = make_shift(idx->pattern_buf, idx->pattern_size);
-}
-
-/****************************************************************************
- *
- * Function: GetMaxJumpSize(char *, int)
- *
- * Purpose: Find the maximum number of characters we can jump ahead
- *          from the current offset when checking for this pattern again.
- *
- * Arguments: data => the pattern string
- *            data_len => length of pattern string
- *
- * Returns: int => number of bytes before pattern repeats within itself
- *
- ***************************************************************************/
-static unsigned int GetMaxJumpSize(char* data, int data_len)
-{
-    int i, j;
-
-    j = 0;
-    for ( i = 1; i < data_len; i++ )
-    {
-        if ( data[j] != data[i] )
-        {
-            j = 0;
-            continue;
-        }
-        if ( i == (data_len - 1) )
-        {
-            return (data_len - j - 1);
-        }
-        j++;
-    }
-    return data_len;
-}
-
-//-------------------------------------------------------------------------
-// public methods
-//-------------------------------------------------------------------------
-
-PatternMatchData* get_pmd(OptFpList* ofl)
-{
-    if ( ofl->type != RULE_OPTION_TYPE_CONTENT )
-        return nullptr;
-
-    ContentOption* opt = (ContentOption*)ofl->context;
-    return opt->get_data();
-}
-
-bool is_fast_pattern_only(OptFpList* ofl)
-{
-    PatternMatchData* pmd = get_pmd(ofl);
-
-    if ( !pmd )
-        return false;
-
-    return pmd->fp_only > 0;
-}
-
-void clear_fast_pattern_only(OptFpList* ofl)
-{
-    PatternMatchData* pmd = get_pmd(ofl);
-
-    if ( pmd && pmd->fp_only > 0 )
-        pmd->fp_only = 0;
-}
-
-bool is_unbounded(void* pv)
-{
-    ContentOption* opt = (ContentOption*)pv;
-    PatternMatchData* pmd = opt->get_data();
-    return ( pmd->depth == 0 );
 }
 
 //-------------------------------------------------------------------------
@@ -319,34 +276,34 @@ bool is_unbounded(void* pv)
  * return  0 for not found
  * return -1 for error (search out of bounds)
  */
-static int uniSearchReal(PatternMatchData* pmd, Cursor& c)
+static int uniSearchReal(ContentData* cd, Cursor& c)
 {
     int offset, depth;
 
     /* Get byte_extract variables */
-    if (pmd->offset_var >= 0 && pmd->offset_var < NUM_BYTE_EXTRACT_VARS)
+    if (cd->offset_var >= 0 && cd->offset_var < NUM_IPS_OPTIONS_VARS)
     {
         uint32_t extract;
-        GetByteExtractValue(&extract, pmd->offset_var);
+        GetVarValueByIndex(&extract, cd->offset_var);
         offset = (int)extract;
     }
     else
-        offset = pmd->offset;
+        offset = cd->pmd.offset;
 
-    if (pmd->depth_var >= 0 && pmd->depth_var < NUM_BYTE_EXTRACT_VARS)
+    if (cd->depth_var >= 0 && cd->depth_var < NUM_IPS_OPTIONS_VARS)
     {
         uint32_t extract;
-        GetByteExtractValue(&extract, pmd->depth_var);
+        GetVarValueByIndex(&extract, cd->depth_var);
         depth = (int)extract;
     }
     else
-        depth = pmd->depth;
+        depth = cd->pmd.depth;
 
     int pos = c.get_delta();
 
     if ( !pos )
     {
-        if ( pmd->relative )
+        if ( cd->pmd.is_relative() )
             pos = c.get_pos();
 
         pos += offset;
@@ -360,57 +317,41 @@ static int uniSearchReal(PatternMatchData* pmd, Cursor& c)
     if ( !depth || len < depth )
         depth = len;
 
-    unsigned end = pos + pmd->pattern_size;
+    unsigned end = pos + cd->pmd.pattern_size;
 
     // If the pattern size is greater than the amount of data we have to
     // search, there's no way we can match, but return 0 here for the
     // case where the match is inverted and there is at least some data.
     if ( end > c.size() || (int)end > pos + depth )
     {
-        if ( pmd->negated && (depth > 0) )
+        if ( cd->pmd.is_negated() && (depth > 0) )
             return 0;
 
         return -1;
     }
 
-    const uint8_t* base = c.buffer() + pos;
-    int found;
+    // FIXIT-M: The depth on retries should not be the same as that used
+    // on the first try.
 
-    if ( pmd->no_case )
-    {
-        found = mSearchCI(
-            (const char*)base, depth, pmd->pattern_buf, pmd->pattern_size,
-            pmd->skip_stride, pmd->shift_stride);
-    }
-    else
-    {
-        found = mSearch(
-            (const char*)base, depth, pmd->pattern_buf, pmd->pattern_size,
-            pmd->skip_stride, pmd->shift_stride);
-    }
+    const uint8_t* base = c.buffer() + pos;
+    int found = cd->searcher->search(search_handle, base, depth);
 
     if ( found >= 0 )
     {
         int at = pos + found;
-        c.set_delta(at + pmd->match_delta);
-        c.set_pos(at + pmd->pattern_size);
+        c.set_delta(at + cd->match_delta);
+        c.set_pos(at + cd->pmd.pattern_size);
         return 1;
     }
 
     return 0;
 }
 
-static int CheckANDPatternMatch(PatternMatchData* idx, Cursor& c)
+static IpsOption::EvalStatus CheckANDPatternMatch(ContentData* idx, Cursor& c)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
-    int found = 0;
+    RuleProfile profile(contentPerfStats);
 
-    PROFILE_VARS;
-    MODULE_PROFILE_START(contentPerfStats);
-
-    DEBUG_WRAP(DebugMessage(DEBUG_PATTERN_MATCH, "CheckPatternANDMatch: "); );
-
-    found = uniSearchReal(idx, c);
+    int found = uniSearchReal(idx, c);
 
     if ( found == -1 )
     {
@@ -422,37 +363,17 @@ static int CheckANDPatternMatch(PatternMatchData* idx, Cursor& c)
     }
     else
     {
-        found ^= idx->negated;
+        found ^= idx->pmd.is_negated();
     }
 
     if ( found )
     {
-        rval = DETECTION_OPTION_MATCH;
-        DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "Pattern match found\n"); );
+        return IpsOption::MATCH;
     }
     else
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "Pattern match failed\n"); );
+        return IpsOption::NO_MATCH;
     }
-
-    MODULE_PROFILE_END(contentPerfStats);
-    return rval;
-}
-
-PatternMatchData* content_get_data(void* pv)
-{
-    ContentOption* opt = (ContentOption*)pv;
-    return opt->get_data();
-}
-
-/* current should be the cursor after this content rule option matched
- * orig is the place from where we first did evaluation of this content */
-bool content_next(PatternMatchData* pmd)
-{
-    if ( pmd->negated )
-        return false;
-
-    return true;
 }
 
 //-------------------------------------------------------------------------
@@ -464,12 +385,12 @@ typedef enum
     CMF_DISTANCE = 0x1, CMF_WITHIN = 0x2, CMF_OFFSET = 0x4, CMF_DEPTH = 0x8
 } ContentModifierFlags;
 
-static unsigned GetCMF(PatternMatchData* pmd)
+static unsigned GetCMF(ContentData* cd)
 {
     unsigned cmf = 0;
-    if ( (pmd->offset != 0) || (pmd->offset_var != -1) )
+    if ( (cd->pmd.offset != 0) || (cd->offset_var != -1) )
         cmf |= CMF_OFFSET;
-    if ( (pmd->depth != 0) || (pmd->depth_var != -1) )
+    if ( (cd->pmd.depth != 0) || (cd->depth_var != -1) )
         cmf |= CMF_DEPTH;
     return cmf;
 }
@@ -483,7 +404,7 @@ static unsigned GetCMF(PatternMatchData* pmd)
 // parsing methods
 //-------------------------------------------------------------------------
 
-static void parse_content(PatternMatchData* ds_idx, const char* rule)
+static void parse_content(ContentData* cd, const char* rule)
 {
     bool negated;
     std::string buf;
@@ -494,23 +415,30 @@ static void parse_content(PatternMatchData* ds_idx, const char* rule)
     const char* tmp_buf = buf.c_str();
     unsigned dummy_size = buf.size();
 
-    ds_idx->pattern_buf = (char*)SnortAlloc(dummy_size+1);
-    memcpy(ds_idx->pattern_buf, tmp_buf, dummy_size);
+    char* pattern_buf = (char*)snort_alloc(dummy_size+1);
+    memcpy(pattern_buf, tmp_buf, dummy_size);
+    pattern_buf[dummy_size] = '\0';
 
-    ds_idx->pattern_size = dummy_size;
-    ds_idx->negated = negated;
-    ds_idx->match_delta = GetMaxJumpSize(ds_idx->pattern_buf, ds_idx->pattern_size);
+    cd->pmd.pattern_buf = pattern_buf;
+    cd->pmd.pattern_size = dummy_size;
+
+    cd->pmd.set_literal();
+
+    if ( negated )
+        cd->pmd.set_negated();
+
+    cd->set_max_jump_size();
 }
 
-static void parse_offset(PatternMatchData* pmd, const char* data)
+static void parse_offset(ContentData* cd, const char* data)
 {
-    if ( GetCMF(pmd) & BAD_OFFSET && pmd->relative )
+    if ( GetCMF(cd) & BAD_OFFSET && cd->pmd.is_relative() )
     {
         ParseError("offset can't be used with itself, distance, or within");
         return;
     }
 
-    if (data == NULL)
+    if (data == nullptr)
     {
         ParseError("missing argument to 'offset' option");
         return;
@@ -518,32 +446,30 @@ static void parse_offset(PatternMatchData* pmd, const char* data)
 
     if (isdigit(data[0]) || data[0] == '-')
     {
-        pmd->offset = parse_int(data, "offset");
-        pmd->offset_var = BYTE_EXTRACT_NO_VAR;
+        cd->pmd.offset = parse_int(data, "offset");
+        cd->offset_var = IPS_OPTIONS_NO_VAR;
     }
     else
     {
-        pmd->offset_var = GetVarByName(data);
-        if (pmd->offset_var == BYTE_EXTRACT_NO_VAR)
+        cd->offset_var = GetVarByName(data);
+        if (cd->offset_var == IPS_OPTIONS_NO_VAR)
         {
-            ParseError(BYTE_EXTRACT_INVALID_ERR_STR, "content offset", data);
+            ParseError(INVALID_VAR_ERR_STR, "content offset", data);
             return;
         }
     }
 
-    DEBUG_WRAP(DebugMessage(DEBUG_PARSER, "Pattern offset = %d\n",
-        pmd->offset); );
 }
 
-static void parse_depth(PatternMatchData* pmd, const char* data)
+static void parse_depth(ContentData* cd, const char* data)
 {
-    if ( GetCMF(pmd) & BAD_DEPTH && pmd->relative )
+    if ( GetCMF(cd) & BAD_DEPTH && cd->pmd.is_relative() )
     {
         ParseError("depth can't be used with itself, distance, or within");
         return;
     }
 
-    if (data == NULL)
+    if (data == nullptr)
     {
         ParseError("missing argument to 'depth' option");
         return;
@@ -551,40 +477,38 @@ static void parse_depth(PatternMatchData* pmd, const char* data)
 
     if (isdigit(data[0]) || data[0] == '-')
     {
-        pmd->depth = parse_int(data, "depth");
+        cd->pmd.depth = parse_int(data, "depth");
 
         /* check to make sure that this the depth allows this rule to fire */
-        if (pmd->depth < (int)pmd->pattern_size)
+        if (cd->pmd.depth < (int)cd->pmd.pattern_size)
         {
             ParseError("the depth (%d) is less than the size of the content(%u)",
-                pmd->depth, pmd->pattern_size);
+                cd->pmd.depth, cd->pmd.pattern_size);
             return;
         }
-        pmd->depth_var = BYTE_EXTRACT_NO_VAR;
+        cd->depth_var = IPS_OPTIONS_NO_VAR;
     }
     else
     {
-        pmd->depth_var = GetVarByName(data);
-        if (pmd->depth_var == BYTE_EXTRACT_NO_VAR)
+        cd->depth_var = GetVarByName(data);
+        if (cd->depth_var == IPS_OPTIONS_NO_VAR)
         {
-            ParseError(BYTE_EXTRACT_INVALID_ERR_STR, "content depth", data);
+            ParseError(INVALID_VAR_ERR_STR, "content depth", data);
             return;
         }
     }
 
-    DEBUG_WRAP(DebugMessage(DEBUG_PATTERN_MATCH, "Pattern depth = %d\n",
-        pmd->depth); );
 }
 
-static void parse_distance(PatternMatchData* pmd, const char* data)
+static void parse_distance(ContentData* cd, const char* data)
 {
-    if ( GetCMF(pmd) & BAD_DISTANCE && !pmd->relative )
+    if ( GetCMF(cd) & BAD_DISTANCE && !cd->pmd.is_relative() )
     {
         ParseError("distance can't be used with itself, offset, or depth");
         return;
     }
 
-    if (data == NULL)
+    if (data == nullptr)
     {
         ParseError("missing argument to 'distance' option");
         return;
@@ -592,31 +516,31 @@ static void parse_distance(PatternMatchData* pmd, const char* data)
 
     if (isdigit(data[0]) || data[0] == '-')
     {
-        pmd->offset = parse_int(data, "distance");
-        pmd->offset_var = BYTE_EXTRACT_NO_VAR;
+        cd->pmd.offset = parse_int(data, "distance");
+        cd->offset_var = IPS_OPTIONS_NO_VAR;
     }
     else
     {
-        pmd->offset_var = GetVarByName(data);
-        if (pmd->offset_var == BYTE_EXTRACT_NO_VAR)
+        cd->offset_var = GetVarByName(data);
+        if (cd->offset_var == IPS_OPTIONS_NO_VAR)
         {
-            ParseError(BYTE_EXTRACT_INVALID_ERR_STR, "content distance", data);
+            ParseError(INVALID_VAR_ERR_STR, "content distance", data);
             return;
         }
     }
 
-    pmd->relative = 1;
+    cd->pmd.set_relative();
 }
 
-static void parse_within(PatternMatchData* pmd, const char* data)
+static void parse_within(ContentData* cd, const char* data)
 {
-    if ( GetCMF(pmd) & BAD_WITHIN && !pmd->relative )
+    if ( GetCMF(cd) & BAD_WITHIN && !cd->pmd.is_relative() )
     {
         ParseError("within can't be used with itself, offset, or depth");
         return;
     }
 
-    if (data == NULL)
+    if (data == nullptr)
     {
         ParseError("missing argument to 'within' option");
         return;
@@ -624,29 +548,27 @@ static void parse_within(PatternMatchData* pmd, const char* data)
 
     if (isdigit(data[0]) || data[0] == '-')
     {
-        pmd->depth = parse_int(data, "within");
+        cd->pmd.depth = parse_int(data, "within");
 
-        if (pmd->depth < (int)pmd->pattern_size)
+        if (cd->pmd.depth < (int)cd->pmd.pattern_size)
         {
-            ParseError("within (%d) is smaller than size of pattern", pmd->depth);
+            ParseError("within (%d) is smaller than size of pattern", cd->pmd.depth);
             return;
         }
-        pmd->depth_var = BYTE_EXTRACT_NO_VAR;
+        cd->depth_var = IPS_OPTIONS_NO_VAR;
     }
     else
     {
-        pmd->depth_var = GetVarByName(data);
-        if (pmd->depth_var == BYTE_EXTRACT_NO_VAR)
+        cd->depth_var = GetVarByName(data);
+        if (cd->depth_var == IPS_OPTIONS_NO_VAR)
         {
-            ParseError(BYTE_EXTRACT_INVALID_ERR_STR, "content within", data);
+            ParseError(INVALID_VAR_ERR_STR, "content within", data);
             return;
         }
     }
 
-    DEBUG_WRAP(DebugMessage(DEBUG_PATTERN_MATCH, "Pattern within = %d\n",
-        pmd->depth); );
 
-    pmd->relative = 1;
+    cd->pmd.set_relative();
 }
 
 //-------------------------------------------------------------------------
@@ -664,10 +586,10 @@ static const Parameter s_params[] =
     { "fast_pattern", Parameter::PT_IMPLIED, nullptr, nullptr,
       "use this content in the fast pattern matcher instead of the content selected by default" },
 
-    { "fast_pattern_offset", Parameter::PT_INT, "0:", "0",
+    { "fast_pattern_offset", Parameter::PT_INT, "0:65535", "0",
       "number of leading characters of this content the fast pattern matcher should exclude" },
 
-    { "fast_pattern_length", Parameter::PT_INT, "1:", nullptr,
+    { "fast_pattern_length", Parameter::PT_INT, "1:65535", nullptr,
       "maximum number of characters from this content the fast pattern matcher should use" },
 
     { "offset", Parameter::PT_STRING, nullptr, nullptr,
@@ -692,10 +614,16 @@ class ContentModule : public Module
 {
 public:
     ContentModule() : Module(s_name, s_help, s_params)
-    { pmd = nullptr; }
+    {
+        cd = nullptr;
+        search_handle = LiteralSearch::setup();
+    }
 
-    ~ContentModule()
-    { delete pmd; }
+    ~ContentModule() override
+    {
+        delete cd;
+        LiteralSearch::cleanup(search_handle);
+    }
 
     bool begin(const char*, int, SnortConfig*) override;
     bool end(const char*, int, SnortConfig*) override;
@@ -704,84 +632,96 @@ public:
     ProfileStats* get_profile() const override
     { return &contentPerfStats; }
 
-    PatternMatchData* get_data();
+    ContentData* get_data();
+
+    Usage get_usage() const override
+    { return DETECT; }
 
 private:
-    PatternMatchData* pmd;
+    ContentData* cd;
 };
 
-PatternMatchData* ContentModule::get_data()
+ContentData* ContentModule::get_data()
 {
-    PatternMatchData* tmp = pmd;
-    pmd = nullptr;
+    ContentData* tmp = cd;
+    cd = nullptr;
     return tmp;
 }
 
 bool ContentModule::begin(const char*, int, SnortConfig*)
 {
-    pmd = new_pmd();
+    cd = new ContentData();
     return true;
 }
 
 bool ContentModule::end(const char*, int, SnortConfig*)
 {
-    if ( (int)pmd->pattern_size <= pmd->fp_offset )
+    if ( (int)cd->pmd.pattern_size <= cd->pmd.fp_offset )
     {
         ParseError(
             "fast_pattern_offset must be less "
             "than the actual pattern length which is %u.",
-            pmd->pattern_size);
+            cd->pmd.pattern_size);
         return false;
     }
-    if ( (int)pmd->pattern_size < (pmd->fp_offset + pmd->fp_length) )
+    if ( (int)cd->pmd.pattern_size < (cd->pmd.fp_offset + cd->pmd.fp_length) )
     {
         ParseError(
             "fast_pattern_offset + fast_pattern_length must be less "
             "than or equal to the actual pattern length which is %u.",
-            pmd->pattern_size);
+            cd->pmd.pattern_size);
         return false;
     }
-    if ( pmd->no_case )
+    if ( cd->pmd.is_no_case() )
     {
-        for ( unsigned i = 0; i < pmd->pattern_size; i++ )
-            pmd->pattern_buf[i] = toupper(pmd->pattern_buf[i]);
+        char* s = const_cast<char*>(cd->pmd.pattern_buf);
+
+        for ( unsigned i = 0; i < cd->pmd.pattern_size; i++ )
+            s[i] = toupper(cd->pmd.pattern_buf[i]);
     }
-    make_precomp(pmd);
+    cd->setup_bm();
+
+    if ( cd->pmd.is_negated() )
+    {
+        cd->pmd.last_check = (PmdLastCheck*)snort_calloc(
+            ThreadConfig::get_instance_max(), sizeof(*cd->pmd.last_check));
+    }
+
     return true;
 }
 
 bool ContentModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("~data") )
-        parse_content(pmd, v.get_string());
+        parse_content(cd, v.get_string());
 
     else if ( v.is("offset") )
-        parse_offset(pmd, v.get_string());
+        parse_offset(cd, v.get_string());
 
     else if ( v.is("depth") )
-        parse_depth(pmd, v.get_string());
+        parse_depth(cd, v.get_string());
 
     else if ( v.is("distance") )
-        parse_distance(pmd, v.get_string());
+        parse_distance(cd, v.get_string());
 
     else if ( v.is("within") )
-        parse_within(pmd, v.get_string());
+        parse_within(cd, v.get_string());
 
     else if ( v.is("nocase") )
-        pmd->no_case = 1;
+        cd->pmd.set_no_case();
 
     else if ( v.is("fast_pattern") )
-        pmd->fp = 1;
+        cd->pmd.set_fast_pattern();
 
     else if ( v.is("fast_pattern_offset") )
     {
-        pmd->fp_offset = v.get_long();
-        pmd->fp = 1;
+        cd->pmd.fp_offset = v.get_uint16();
+        cd->pmd.set_fast_pattern();
     }
     else if ( v.is("fast_pattern_length") )
     {
-        pmd->fp_length = v.get_long();
-        pmd->fp = 1;
+        cd->pmd.fp_length = v.get_uint16();
+        cd->pmd.set_fast_pattern();
     }
     else
         return false;
@@ -806,9 +746,9 @@ static void mod_dtor(Module* m)
 static IpsOption* content_ctor(Module* p, OptTreeNode* otn)
 {
     ContentModule* m = (ContentModule*)p;
-    PatternMatchData* pmd = m->get_data();
-    finalize_content(pmd, otn);
-    return new ContentOption(pmd);
+    ContentData* cd = m->get_data();
+    cd->pmd.pm_type = otn->sticky_buf;
+    return new ContentOption(cd);
 }
 
 static void content_dtor(IpsOption* p)
@@ -841,5 +781,15 @@ static const IpsApi content_api =
     nullptr
 };
 
+// FIXIT-L need boyer_moore.cc funcs but they
+// aren't otherwise called
+//#ifdef BUILDING_SO
+//SO_PUBLIC const BaseApi* snort_plugins[] =
+//{
+//    &content_api.base,
+//    nullptr
+//};
+//#else
 const BaseApi* ips_content = &content_api.base;
+//#endif
 

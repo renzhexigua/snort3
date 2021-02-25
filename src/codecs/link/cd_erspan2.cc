@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,10 +17,14 @@
 //--------------------------------------------------------------------------
 // cd_erspan2.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
-#include "framework/codec.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "codecs/codec_module.h"
-#include "protocols/protocol_ids.h"
-#include "protocols/packet.h"
+#include "framework/codec.h"
+
+using namespace snort;
 
 #define CD_ERSPAN2_NAME "erspan2"
 #define CD_ERSPAN2_HELP "support for encapsulated remote switched port analyzer - type 2"
@@ -30,14 +34,14 @@ namespace
 static const RuleMap erspan2_rules[] =
 {
     { DECODE_ERSPAN_HDR_VERSION_MISMATCH, "ERSpan header version mismatch" },
-    { DECODE_ERSPAN2_DGRAM_LT_HDR, "captured < ERSpan type2 header length" },
+    { DECODE_ERSPAN2_DGRAM_LT_HDR, "captured length < ERSpan type2 header length" },
     { 0, nullptr }
 };
 
-class Erspan2Module : public CodecModule
+class Erspan2Module : public BaseCodecModule
 {
 public:
-    Erspan2Module() : CodecModule(CD_ERSPAN2_NAME, CD_ERSPAN2_HELP) { }
+    Erspan2Module() : BaseCodecModule(CD_ERSPAN2_NAME, CD_ERSPAN2_HELP) { }
 
     const RuleMap* get_rules() const override
     { return erspan2_rules; }
@@ -47,9 +51,8 @@ class Erspan2Codec : public Codec
 {
 public:
     Erspan2Codec() : Codec(CD_ERSPAN2_NAME) { }
-    ~Erspan2Codec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
 };
 
@@ -63,25 +66,11 @@ struct ERSpanType2Hdr
     { return ntohs(ver_vlan) >> 12; }
 };
 
-constexpr uint16_t ETHERTYPE_ERSPAN_TYPE2 = 0x88be;
 } // namespace
 
-void Erspan2Codec::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(ETHERTYPE_ERSPAN_TYPE2); }
+void Erspan2Codec::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::ETHERTYPE_ERSPAN_TYPE2); }
 
-/*
- * Function: DecodeERSPANType2(uint8_t *, uint32_t, Packet *)
- *
- * Purpose: Decode Encapsulated Remote Switch Packet Analysis Type 2
- *          This will decode ERSPAN Type 2 Headers
- *
- * Arguments: pkt => ptr to the packet data
- *            len => length from here to the end of the packet
- *            p   => pointer to decoded packet struct
- *
- * Returns: void function
- *
- */
 bool Erspan2Codec::decode(const RawData& raw, CodecData& codec, DecodeData&)
 {
     const ERSpanType2Hdr* const erSpan2Hdr =
@@ -102,7 +91,7 @@ bool Erspan2Codec::decode(const RawData& raw, CodecData& codec, DecodeData&)
     }
 
     codec.lyr_len = sizeof(ERSpanType2Hdr);
-    codec.next_prot_id = ETHERTYPE_TRANS_ETHER_BRIDGING;
+    codec.next_prot_id = ProtocolId::ETHERTYPE_TRANS_ETHER_BRIDGING;
     return true;
 }
 
@@ -146,11 +135,11 @@ static const CodecApi erspan2_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_erspan2[] =
+#endif
 {
     &erspan2_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_erspan2 = &erspan2_api.base;
-#endif
 

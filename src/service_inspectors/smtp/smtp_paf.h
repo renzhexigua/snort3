@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -16,21 +16,23 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+// smtp_paf.h author Hui Cao <huica@ciso.com>
+
 #ifndef SMTP_PAF_H
 #define SMTP_PAF_H
 
-#include "snort_types.h"
-#include "stream/stream_api.h"
-#include "stream/stream_splitter.h"
-#include "file_api/file_api.h"
+// Protocol aware flushing for SMTP
 
-/* State tracker for SMTP PAF */
+#include "mime/file_mime_paf.h"
+#include "stream/stream_splitter.h"
+
+// State tracker for SMTP PAF
 enum SmtpPafState
 {
     SMTP_PAF_CMD_STATE,
     SMTP_PAF_DATA_STATE
 };
-/* State tracker for data command */
+// State tracker for data command
 typedef enum _SmtpPafCmdState
 {
     SMTP_PAF_CMD_UNKNOWN,
@@ -47,7 +49,7 @@ struct SmtpCmdSearchInfo
     const char* search_state;
 };
 
-/* State tracker for SMTP PAF */
+// State tracker for SMTP PAF
 struct SmtpPafData
 {
     DataEndState data_end_state;
@@ -58,22 +60,24 @@ struct SmtpPafData
     bool end_of_data;
 };
 
-class SmtpSplitter : public StreamSplitter
+class SmtpSplitter : public snort::StreamSplitter
 {
 public:
-    SmtpSplitter(bool c2s);
-    ~SmtpSplitter();
+    SmtpSplitter(bool c2s, int max_auth_cmd_line_len);
 
-    Status scan(Flow*, const uint8_t* data, uint32_t len,
+    Status scan(snort::Packet*, const uint8_t* data, uint32_t len,
         uint32_t flags, uint32_t* fp) override;
 
-    virtual bool is_paf() override { return true; }
+    bool is_paf() override { return true; }
 
 public:
     SmtpPafData state;
+
+private:
+    int max_auth_command_line_len;
 };
 
-bool smtp_is_data_end(void* ssn);
+// Function: Check if IMAP data end is reached
+bool smtp_is_data_end(snort::Flow* ssn);
 
 #endif
-

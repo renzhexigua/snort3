@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -29,56 +29,48 @@
 **
 */
 
-#include "service_map.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <assert.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "service_map.h"
 
+#include <cassert>
+
+#include "hash/ghash.h"
+#include "log/messages.h"
 #include "main/snort_config.h"
-#include "hash/sfghash.h"
-#include "utils/sflsq.h"
-#include "ips_options/ips_flow.h"
-#include "detection/treenodes.h"
-#include "detection/fp_detect.h"
 #include "parser/parser.h"
+#include "utils/sflsq.h"
+#include "utils/util.h"
+
+#include "fp_create.h"
+#include "treenodes.h"
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // service map stuff
 //-------------------------------------------------------------------------
 
-static SFGHASH* alloc_srvmap()
+static GHash* alloc_srvmap()
 {
-    SFGHASH* p = sfghash_new(1000, 0, 0,
-        /*nodes are lists,free them in sfghash_delete*/
-        (void (*)(void*))sflist_free);
-
-    if ( !p )
-        FatalError("could not allocate a service rule map - no memory?\n");
-
-    return p;
+    // nodes are lists,free them in ghash_delete
+    return new GHash(1000, 0, 0, (void (*)(void*))sflist_free);
 }
 
-static void free_srvmap(SFGHASH* table)
+static void free_srvmap(GHash* table)
 {
     if ( table )
-        sfghash_delete(table);
+        delete table;
 }
 
 srmm_table_t* ServiceMapNew()
 {
-    srmm_table_t* table = (srmm_table_t*)SnortAlloc(sizeof(srmm_table_t));
+    srmm_table_t* table = (srmm_table_t*)snort_calloc(sizeof(srmm_table_t));
 
-    for ( int i = SNORT_PROTO_IP; i < SNORT_PROTO_MAX; i++ )
-    {
-        table->to_srv[i] = alloc_srvmap();
-        table->to_cli[i] = alloc_srvmap();
-    }
+    table->to_srv = alloc_srvmap();
+    table->to_cli = alloc_srvmap();
 
     return table;
 }
@@ -88,53 +80,39 @@ void ServiceMapFree(srmm_table_t* table)
     if ( !table )
         return;
 
-    for ( int i = SNORT_PROTO_IP; i < SNORT_PROTO_MAX; i++ )
-    {
-        if ( table->to_srv[i] )
-            free_srvmap(table->to_srv[i]);
+    free_srvmap(table->to_srv);
+    free_srvmap(table->to_cli);
 
-        if ( table->to_cli[i] )
-            free_srvmap(table->to_cli[i]);
-    }
-
-    free(table);
+    snort_free(table);
 }
 
 //-------------------------------------------------------------------------
 // service pg stuff
 //-------------------------------------------------------------------------
 
-static SFGHASH* alloc_spgmm()
+static void delete_pg(void* pv)
+{ PortGroup::free((PortGroup*)pv); }
+
+static GHash* alloc_spgmm()
 {
-    SFGHASH* p = sfghash_new(
-     1000,  /* # rows in table */
-        0, /* size: of key 0 = ascii, >0 = fixed size */
-        0, /* bool:user keys,  if true just store this pointer, don't copy the key */
-        fpDeletePortGroup);
-
-    if ( !p )
-        FatalError("could not allocate a service port_group map : no memory?\n");
-
-    return p;
+    // 1000 rows, ascii key
+    return new GHash(1000, 0, 0, delete_pg);
 }
 
-static void free_spgmm(SFGHASH* table)
+static void free_spgmm(GHash* table)
 {
     if ( !table )
         return;
 
-    sfghash_delete(table);
+    delete table;
 }
 
 srmm_table_t* ServicePortGroupMapNew()
 {
-    srmm_table_t* table = (srmm_table_t*)SnortAlloc(sizeof(srmm_table_t));
+    srmm_table_t* table = (srmm_table_t*)snort_calloc(sizeof(srmm_table_t));
 
-    for ( int i = SNORT_PROTO_IP; i < SNORT_PROTO_MAX; i++ )
-    {
-        table->to_srv[i] = alloc_spgmm();
-        table->to_cli[i] = alloc_spgmm();
-    }
+    table->to_srv = alloc_spgmm();
+    table->to_cli = alloc_spgmm();
 
     return table;
 }
@@ -144,16 +122,10 @@ void ServicePortGroupMapFree(srmm_table_t* table)
     if ( !table )
         return;
 
-    for ( int i = SNORT_PROTO_IP; i < SNORT_PROTO_MAX; i++ )
-    {
-        if ( table->to_srv[i] )
-            free_spgmm(table->to_srv[i]);
+    free_spgmm(table->to_srv);
+    free_spgmm(table->to_cli);
 
-        if ( table->to_cli[i] )
-            free_spgmm(table->to_cli[i]);
-    }
-
-    free(table);
+    snort_free(table);
 }
 
 //-------------------------------------------------------------------------
@@ -168,29 +140,17 @@ void ServicePortGroupMapFree(srmm_table_t* table)
  * otn - rule - may be content,-no-content, or uri-content
  *
  */
-static void ServiceMapAddOtnRaw(SFGHASH* table, char* servicename, OptTreeNode* otn)
+static void ServiceMapAddOtnRaw(GHash* table, const char* servicename, OptTreeNode* otn)
 {
-    SF_LIST* list;
-
-    list = (SF_LIST*)sfghash_find(table, servicename);
+    SF_LIST* list = (SF_LIST*)table->find(servicename);
 
     if ( !list )
     {
-        /* create the list */
         list = sflist_new();
-        if ( !list )
-            FatalError("service_rule_map: could not create a  service rule-list\n");
-
-        /* add the service list to the table */
-        if ( sfghash_add(table, servicename, list) != SFGHASH_OK )
-        {
-            FatalError("service_rule_map: could not add a rule to the rule-service-map\n");
-        }
+        table->insert(servicename, list);
     }
 
-    /* add the rule */
-    if ( sflist_add_tail(list, otn) )
-        FatalError("service_rule_map: could not add a rule to the service rule-list\n");
+    sflist_add_tail(list, otn);
 }
 
 /*
@@ -198,49 +158,29 @@ static void ServiceMapAddOtnRaw(SFGHASH* table, char* servicename, OptTreeNode* 
  *  each service map maintains a list of otn's for each service it maps to a
  *  service name.
  */
-static int ServiceMapAddOtn(srmm_table_t* srmm, int proto, char* servicename, OptTreeNode* otn)
+static void ServiceMapAddOtn(
+    srmm_table_t* srmm, SnortProtocolId, const char* servicename, OptTreeNode* otn)
 {
-    if ( !servicename )
-        return -1;
+    assert(servicename and otn);
 
-    if ( !otn )
-        return -1;
+    if ( !otn->to_server() )
+        ServiceMapAddOtnRaw(srmm->to_cli, servicename, otn);
 
-    if ( proto > SNORT_PROTO_USER )
-        proto = SNORT_PROTO_USER;
-
-    SFGHASH* to_srv = srmm->to_srv[proto];
-    SFGHASH* to_cli = srmm->to_cli[proto];
-
-    if ( OtnFlowFromClient(otn) )
-        ServiceMapAddOtnRaw(to_srv, servicename, otn);
-
-    else if ( OtnFlowFromServer(otn) )
-        ServiceMapAddOtnRaw(to_cli, servicename, otn);
-
-    else /* else add to both sides */
-    {
-        ServiceMapAddOtnRaw(to_srv, servicename, otn);
-        ServiceMapAddOtnRaw(to_cli, servicename, otn);
-    }
-
-    return 0;
+    if ( !otn->to_client() )
+        ServiceMapAddOtnRaw(srmm->to_srv, servicename, otn);
 }
 
-void fpPrintServicePortGroupSummary(srmm_table_t* srvc_pg_map)
+void fpPrintServicePortGroupSummary(SnortConfig* sc)
 {
     LogMessage("+--------------------------------\n");
     LogMessage("| Service-PortGroup Table Summary \n");
     LogMessage("---------------------------------\n");
 
-    for ( int i = SNORT_PROTO_IP; i < SNORT_PROTO_MAX; i++ )
-    {
-        if ( unsigned n = srvc_pg_map->to_srv[i]->count )
-            LogMessage("| %s to server   : %d services\n", get_protocol_name(i), n);
+    if ( unsigned n = sc->spgmmTable->to_srv->get_count() )
+        LogMessage("| server   : %d services\n", n);
 
-        if ( unsigned n = srvc_pg_map->to_cli[i]->count )
-            LogMessage("| %s to client   : %d services\n", get_protocol_name(i), n);
-    }
+    if ( unsigned n = sc->spgmmTable->to_cli->get_count() )
+        LogMessage("| client   : %d services\n", n);
 
     LogMessage("---------------------------------\n");
 }
@@ -249,102 +189,58 @@ void fpPrintServicePortGroupSummary(srmm_table_t* srvc_pg_map)
  *  Scan the master otn lists and load the Service maps
  *  for service based rule grouping.
  */
-int fpCreateServiceMaps(SnortConfig* sc)
+void fpCreateServiceMaps(SnortConfig* sc)
 {
-    RuleTreeNode* rtn;
-    SFGHASH_NODE* hashNode;
-    OptTreeNode* otn  = NULL;
-    PolicyId policyId = 0;
-    unsigned int svc_idx;
-
-    for (hashNode = sfghash_findfirst(sc->otn_map);
-        hashNode;
-        hashNode = sfghash_findnext(sc->otn_map))
+    for (GHashNode* hashNode = sc->otn_map->find_first();
+         hashNode;
+         hashNode = sc->otn_map->find_next())
     {
-        otn = (OptTreeNode*)hashNode->data;
-        for ( policyId = 0;
-            policyId < otn->proto_node_num;
-            policyId++ )
+        OptTreeNode* otn = (OptTreeNode*)hashNode->data;
+        for (PolicyId policyId = 0;
+             policyId < otn->proto_node_num;
+             policyId++ )
         {
-            rtn = getRtnFromOtn(otn);
-
+            RuleTreeNode* rtn = getRtnFromOtn(otn, policyId);
             if ( rtn )
             {
                 // skip builtin rules
-                if ( !otn->sigInfo.text_rule )
+                if ( otn->sigInfo.builtin )
                     continue;
 
                 /* Not enabled, don't do the FP content */
-                if ( !otn->enabled )
+                if ( !rtn->enabled() )
                     continue;
 
-                for (svc_idx = 0; svc_idx < otn->sigInfo.num_services; svc_idx++)
+                for ( const auto& svc : otn->sigInfo.services )
                 {
-                    if (ServiceMapAddOtn(sc->srmmTable, rtn->proto,
-                        otn->sigInfo.services[svc_idx].service, otn))
-                        return -1;
+                    const char* s = svc.service.c_str();
+                    ServiceMapAddOtn(sc->srmmTable, rtn->snort_protocol_id, s, otn);
                 }
             }
         }
     }
-
-    return 0;
 }
 
 //-------------------------------------------------------------------------
 // sopg_table_t stuff
 //-------------------------------------------------------------------------
 
-sopg_table_t::sopg_table_t()
+sopg_table_t::sopg_table_t(unsigned n)
 {
-    unsigned n = (unsigned)get_protocol_count();
+    if ( to_srv.size() < n )
+        to_srv.resize(n, nullptr);
 
-    for ( int i = SNORT_PROTO_IP; i < SNORT_PROTO_MAX; ++i )
-    {
-        if ( to_srv[i].size() < n )
-            to_srv[i].resize(n, nullptr);
-
-        if ( to_cli[i].size() < n )
-            to_cli[i].resize(n, nullptr);
-    }
-    user_mode = false;
+    if ( to_cli.size() < n )
+        to_cli.resize(n, nullptr);
 }
 
-PortGroup* sopg_table_t::get_port_group(
-    int proto, bool c2s, int16_t proto_ordinal)
+PortGroup* sopg_table_t::get_port_group(bool c2s, SnortProtocolId snort_protocol_id)
 {
-    assert(proto < SNORT_PROTO_MAX);
+    PortGroupVector& v = c2s ? to_srv : to_cli;
 
-    PortGroupVector& v = c2s ? to_srv[proto] : to_cli[proto];
-
-    if ( (unsigned)proto_ordinal > v.size() )
+    if ( snort_protocol_id >= v.size() )
         return nullptr;
 
-    return v[proto_ordinal];
-}
-
-bool sopg_table_t::set_user_mode()
-{
-    PortGroupVector& v1 = to_srv[SNORT_PROTO_USER];
-
-    for ( unsigned i = 0; i < v1.size(); ++i )
-    {
-        if ( v1[i] )
-        {
-            user_mode = true;
-            return true;
-        }
-    }
-    v1 = to_cli[SNORT_PROTO_USER];
-
-    for ( unsigned i = 0; i < v1.size(); ++i )
-    {
-        if ( v1[i] )
-        {
-            user_mode = true;
-            break;
-        }
-    }
-    return user_mode;
+    return v[snort_protocol_id];
 }
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,6 +20,10 @@
 #ifndef PROTOCOLS_MPLS_H
 #define PROTOCOLS_MPLS_H
 
+#include <cstdint>
+
+namespace snort
+{
 namespace mpls
 {
 struct MplsHdr
@@ -31,9 +35,10 @@ struct MplsHdr
 };
 } // namespace mpls
 
+// FIXIT-L constexpr != const, they are orthogonal keywords
 constexpr int MPLS_PAYLOADTYPE_ETHERNET = 1;
 constexpr int MPLS_PAYLOADTYPE_IPV4 = 2;
 constexpr int MPLS_PAYLOADTYPE_IPV6 = 3;
-
+}
 #endif
 

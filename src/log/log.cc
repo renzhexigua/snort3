@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -18,33 +18,30 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "log.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <sys/types.h>
-#include <stdlib.h>
-#include <string.h>
-#include <errno.h>
-#include <signal.h>
+#include "log.h"
 
-#include <string>
 #include <mutex>
-using namespace std;
+
+#include "protocols/packet.h"
+#include "protocols/tcp.h"
+#include "utils/util.h"
+#include "utils/util_cstring.h"
 
 #include "log_text.h"
-#include "main/analyzer.h"
-#include "snort_config.h"
-#include "protocols/tcp.h"
-#include "main/snort_debug.h"
+#include "messages.h"
+
+using namespace snort;
 
 #define DEFAULT_DAEMON_ALERT_FILE  "alert"
 
-/* Input is packet and an nine-byte (including NULL) character array.  Results
- * are put into the character array.
- */
+namespace snort
+{
+// Input is packet and an nine-byte (including NULL) character array.  Results
+// are put into the character array.
 void CreateTCPFlagString(const tcp::TCPHdr* const tcph, char* flagBuffer)
 {
     /* parse TCP flags */
@@ -57,6 +54,7 @@ void CreateTCPFlagString(const tcp::TCPHdr* const tcph, char* flagBuffer)
     *flagBuffer++ = (char)((tcph->th_flags & TH_SYN)  ? 'S' : '*');
     *flagBuffer++ = (char)((tcph->th_flags & TH_FIN)  ? 'F' : '*');
     *flagBuffer = '\0';
+}
 }
 
 /****************************************************************************
@@ -80,14 +78,12 @@ FILE* OpenAlertFile(const char* filearg)
     std::string name;
     const char* filename = get_instance_file(name, filearg);
 
-    DEBUG_WRAP(DebugMessage(DEBUG_INIT,"Opening alert file: %s\n", filename); );
-
-    if ((file = fopen(filename, "a")) == NULL)
+    if ((file = fopen(filename, "a")) == nullptr)
     {
         FatalError("OpenAlertFile() => fopen() alert file %s: %s\n",
             filename, get_error(errno));
     }
-    setvbuf(file, (char*)NULL, _IOLBF, (size_t)0);
+    setvbuf(file, (char*)nullptr, _IOLBF, (size_t)0);
 
     return file;
 }
@@ -106,7 +102,7 @@ FILE* OpenAlertFile(const char* filearg)
 int RollAlertFile(const char* filearg)
 {
     char newname[STD_BUF+1];
-    time_t now = time(NULL);
+    time_t now = time(nullptr);
 
     if ( !filearg )
         filearg = "alert.txt";
@@ -117,7 +113,6 @@ int RollAlertFile(const char* filearg)
 
     SnortSnprintf(newname, sizeof(newname)-1, "%s.%lu", oldname, (unsigned long)now);
 
-    DEBUG_WRAP(DebugMessage(DEBUG_INIT,"Rolling alert file: %s\n", newname); );
 
     if ( rename(oldname, newname) )
     {
@@ -131,9 +126,9 @@ int RollAlertFile(const char* filearg)
 // default logger stuff
 //--------------------------------------------------------------------
 
-static mutex log_mutex;
+static std::mutex log_mutex;
 
-static TextLog* text_log = NULL;
+static TextLog* text_log = nullptr;
 
 void OpenLogger()
 {

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -26,8 +26,6 @@
 #define FTP_PARSE_H
 
 #include "ftpp_ui_config.h"
-#include "protocols/packet.h"
-#include "framework/bits.h"
 
 /*
  * These are the definitions of the parser section delimiting
@@ -50,7 +48,7 @@
 #define F_DATE              "date"
 #define F_LITERAL           "'"
 #define F_STRING            "string"
-#define F_STRING_FMT        "formated_string"
+#define F_STRING_FMT        "formatted_string"
 #define F_HOST_PORT         "host_port"
 #define F_LONG_HOST_PORT    "long_host_port"
 #define F_EXTD_HOST_PORT    "extd_host_port"

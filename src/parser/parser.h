@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,105 +20,86 @@
 #ifndef PARSER_H
 #define PARSER_H
 
-#ifdef HAVE_CONFIG_H
-# include "config.h"
-#endif
-
-#include <stdio.h>
-
-#include "rules.h"
-#include "treenodes.h"
+#include "detection/rules.h"
+#include "detection/treenodes.h"
 #include "main/policy.h"
-#include "detection/sfrim.h"
 
-unsigned get_parse_errors();
-unsigned get_parse_warnings();
+namespace snort
+{
+struct SnortConfig;
+}
 
-const char* get_parse_file();
+void parser_init();
+void parser_term(snort::SnortConfig*);
+
+// line > 0 implies name is non-null
 void get_parse_location(const char*& name, unsigned& line);
-void push_parse_location(const char* name, unsigned line = 0);
+
+// use line = 0 for lua to suppress line numbers for errors or warnings
+void push_parse_location(
+    const char* code, const char* path, const char* name = nullptr, unsigned line = 1);
 
 void pop_parse_location();
 void inc_parse_position();
 
-/* rule setup funcs */
-SnortConfig* ParseSnortConf(const SnortConfig*);
-void ParseRules(SnortConfig*);
+snort::SnortConfig* ParseSnortConf(const snort::SnortConfig*, const char* fname = nullptr,
+    bool is_fatal = true);
+void ParseRules(snort::SnortConfig*);
+void ShowPolicyStats(const snort::SnortConfig*);
 
-void OrderRuleLists(SnortConfig*, const char*);
-void PrintRuleOrder(RuleListNode*);
+char* ProcessFileOption(snort::SnortConfig*, const char*);
+void SetRuleStates(snort::SnortConfig*);
 
-const char* VarGet(SnortConfig*, const char*);
-char* ProcessFileOption(SnortConfig*, const char*);
-void SetRuleStates(SnortConfig*);
-
-void ParserCleanup(void);
-void FreeRuleLists(SnortConfig*);
-void VarTablesFree(SnortConfig*);
-void PortTablesFree(struct RulePortTables*);
+void OrderRuleLists(snort::SnortConfig*);
+void FreeRuleLists(snort::SnortConfig*);
+void VarTablesFree(snort::SnortConfig*);
 
 void parser_append_rules(const char*);
-
-void ConfigureSideChannelModules(SnortConfig*);
-
-SO_PUBLIC NORETURN void ParseAbort(const char*, ...);
-SO_PUBLIC void ParseError(const char*, ...);
-SO_PUBLIC void ParseMessage(const char*, ...);
-
-enum WarningGroup
-{
-    WARN_DAQ, WARN_CONF, WARN_VARS, WARN_SYMBOLS, WARN_SCRIPTS,
-    WARN_HOSTS, WARN_RULES, WARN_FLOWBITS, WARN_PLUGINS, WARN_MAX
-};
-
-SO_PUBLIC void ParseWarning(WarningGroup, const char*, ...);
+void parser_append_includes(const char*);
 
 int ParseBool(const char* arg);
 
-int addRtnToOtn(struct OptTreeNode*, RuleTreeNode*);
-int addRtnToOtn(struct OptTreeNode*, RuleTreeNode*, PolicyId);
+int addRtnToOtn(snort::SnortConfig*, struct OptTreeNode*, RuleTreeNode*);
+int addRtnToOtn(snort::SnortConfig*, struct OptTreeNode*, RuleTreeNode*, PolicyId);
 
-RuleTreeNode* deleteRtnFromOtn(struct OptTreeNode*);
-RuleTreeNode* deleteRtnFromOtn(struct OptTreeNode*, PolicyId);
+bool same_headers(RuleTreeNode*, RuleTreeNode*);
+RuleTreeNode* deleteRtnFromOtn(OptTreeNode*, snort::SnortConfig* sc = nullptr);
+RuleTreeNode* deleteRtnFromOtn(struct OptTreeNode*, PolicyId, snort::SnortConfig* sc = nullptr, bool remove = true);
 
-/*Get RTN for a given OTN and policyId.
- *
- * @param otn pointer to structure OptTreeNode.
- * @param policyId policy id
- *
- * @return pointer to deleted RTN, NULL otherwise.
- */
-static inline RuleTreeNode* getRtnFromOtn(
-    const struct OptTreeNode* otn, PolicyId policyId)
+inline RuleTreeNode* getRtnFromOtn(const struct OptTreeNode* otn, PolicyId policyId)
 {
     if (otn && otn->proto_nodes && (otn->proto_node_num > (unsigned)policyId))
     {
         return otn->proto_nodes[policyId];
     }
-
-    return NULL;
+    return nullptr;
 }
 
-static inline RuleTreeNode* getRtnFromOtn(
-    const struct OptTreeNode* otn)
+inline RuleTreeNode* getRtnFromOtn(const struct OptTreeNode* otn)
 {
-    return getRtnFromOtn(otn, get_ips_policy()->policy_id);
+    return getRtnFromOtn(otn, snort::get_ips_policy()->policy_id);
 }
 
-static inline RuleTreeNode* getRuntimeRtnFromOtn(
-    const struct OptTreeNode* otn)
+inline RuleTreeNode* getRuntimeRtnFromOtn(const struct OptTreeNode* otn)
 {
     return getRtnFromOtn(otn);
 }
 
-extern rule_index_map_t* ruleIndexMap;
-
-ListHead* CreateRuleType(SnortConfig* sc, const char* name, RuleType);
+RuleListNode* CreateRuleType(snort::SnortConfig* sc, const char* name,
+    snort::Actions::Type, bool is_plugin_action = false);
 
 void FreeRuleTreeNode(RuleTreeNode*);
 void DestroyRuleTreeNode(RuleTreeNode*);
 
+int parser_get_rule_index(unsigned gid, unsigned sid);
+void parser_get_rule_ids(int index, unsigned& gid, unsigned& sid);
 void rule_index_map_print_index(int index, char* buf, int);
+
+struct RuleTreeNodeKey
+{
+    RuleTreeNode* rtn;
+    PolicyId policyId;
+};
 
 #endif
 

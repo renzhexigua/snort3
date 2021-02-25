@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,15 +20,16 @@
 #ifndef BASE_API_H
 #define BASE_API_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+// BaseApi is the struct at the front of every plugin api and provides the
+// data necessary for common management of plugins.  in addition to basic
+// usage fields, it provides module instantiation and release functions, as
+// well as additional data to help detect mismatched builds etc.
 
-#include "main/snort_types.h"
+#include <cstdint>
 
 // this is the current version of the base api
 // must be prefixed to subtype version
-#define BASE_API_VERSION 1
+#define BASE_API_VERSION 2
 
 // set options to API_OPTIONS to ensure compatibility
 #ifndef API_OPTIONS
@@ -47,9 +48,15 @@ enum PlugType
     PT_SEARCH_ENGINE,
     PT_SO_RULE,
     PT_LOGGER,
+    PT_CONNECTOR,
+#ifdef PIGLET
+    PT_PIGLET,
+#endif
     PT_MAX
 };
 
+namespace snort
+{
 class Module;
 typedef Module* (* ModNewFunc)();
 typedef void (* ModDelFunc)(Module*);
@@ -66,9 +73,9 @@ struct BaseApi
     const char* options;
     const char* name;
     const char* help;
-    ModNewFunc mod_ctor;
+    snort::ModNewFunc mod_ctor;
     ModDelFunc mod_dtor;
 };
-
+}
 #endif
 

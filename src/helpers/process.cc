@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -16,38 +16,40 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "process.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <fcntl.h>
-#include <stdio.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#include "process.h"
 
-#ifdef HAVE_MALLINFO
-#include <malloc.h>
+#include <fcntl.h>
+
+#ifdef HAVE_LIBUNWIND
+#define UNW_LOCAL_ONLY
+#include <libunwind.h>
+#include <dlfcn.h>
 #endif
 
 #ifdef HAVE_MALLOC_TRIM
 #include <malloc.h>
 #endif
 
+#include <csignal>
 #include <iostream>
-using namespace std;
 
+#include "log/messages.h"
 #include "main.h"
-#include "main/analyzer.h"
-#include "main/thread.h"
-#include "main/snort.h"
+#include "main/oops_handler.h"
 #include "main/snort_config.h"
-#include "utils/util.h"
-#include "utils/ring.h"
+#include "utils/cpp_macros.h"
 #include "utils/stats.h"
-#include "helpers/markup.h"
-#include "parser/parser.h"
+#include "utils/util.h"
+
+#include "markup.h"
+#include "ring.h"
+#include "sigsafe.h"
+
+using namespace snort;
 
 #ifndef SIGNAL_SNORT_RELOAD
 #define SIGNAL_SNORT_RELOAD        SIGHUP
@@ -77,31 +79,52 @@ static const char* const pig_sig_names[PIG_SIG_MAX] =
 
 static Ring<PigSignal> sig_ring(4);
 static volatile sig_atomic_t child_ready_signal = 0;
-static THREAD_LOCAL volatile bool is_main_thread = false;
+static THREAD_LOCAL bool is_main_thread = false;
 
-typedef void (* sighandler_t)(int);
-static int add_signal(int sig, sighandler_t, int check_needed);
+// Backup copies of the original fatal signal actions.  Kept here because they must
+//  be trivially accessible to signal handlers.
+#ifdef HAVE_SIGACTION
+static struct
+{
+    int signal;
+    struct sigaction original_sigaction;
+}
+original_sigactions[] =
+{
+    { SIGILL, { } },
+    { SIGABRT, { } },
+    { SIGBUS,  { } },
+    { SIGFPE,  { } },
+    { SIGSEGV, { } },
+    { 0, { } },
+};
+#else
+static struct
+{
+    int signal;
+    sig_t original_sighandler;
+}
+original_sighandlers[] =
+{
+    { SIGILL,  SIG_DFL },
+    { SIGABRT, SIG_DFL },
+    { SIGBUS,  SIG_DFL },
+    { SIGFPE,  SIG_DFL },
+    { SIGSEGV, SIG_DFL },
+    { 0, SIG_DFL },
+};
+#endif
+
+static bool add_signal(int sig, sig_t);
+static bool restore_signal(int sig, bool silent = false);
 
 static bool exit_pronto = true;
 
 void set_quick_exit(bool b)
 { exit_pronto = b; }
 
-void init_main_thread_sig()
+void set_main_thread()
 { is_main_thread = true; }
-
-static void exit_log(const char* why)
-{
-    // printf() etc not allowed here
-    char buf[256] = "\n\0";
-
-    strncat(buf, get_prompt(), sizeof(buf)-strlen(buf)-1);
-    strncat(buf, " caught ", sizeof(buf)-strlen(buf)-1);
-    strncat(buf, why, sizeof(buf)-strlen(buf)-1);
-    strncat(buf, " signal, exiting\n", sizeof(buf)-strlen(buf)-1);
-
-    (void)write(STDOUT_FILENO, buf, strlen(buf));
-}
 
 static void exit_handler(int signal)
 {
@@ -110,15 +133,15 @@ static void exit_handler(int signal)
 
     switch ( signal )
     {
-    case SIGTERM: s = PIG_SIG_TERM; t = "term"; break;
-    case SIGQUIT: s = PIG_SIG_QUIT; t = "quit"; break;
-    case SIGINT: s = PIG_SIG_INT;  t = "int";  break;
-    default: return;
+        case SIGTERM: s = PIG_SIG_TERM; t = "term"; break;
+        case SIGQUIT: s = PIG_SIG_QUIT; t = "quit"; break;
+        case SIGINT:  s = PIG_SIG_INT;  t = "int";  break;
+        default: return;
     }
 
     if ( exit_pronto )
     {
-        exit_log(t);
+        SigSafePrinter(STDOUT_FILENO).printf("%s caught %s signal, exiting\n", get_prompt(), t);
         _exit(0);
     }
 
@@ -127,7 +150,7 @@ static void exit_handler(int signal)
 
 static void dirty_handler(int signal)
 {
-    snort_conf->dirty_pig = 1;
+    SnortConfig::get_main_conf()->dirty_pig = true;
     exit_handler(signal);
 }
 
@@ -151,22 +174,124 @@ static void reload_attrib_handler(int /*signal*/)
     sig_ring.put(PIG_SIG_RELOAD_HOSTS);
 }
 
-static void ignore_handler(int /*signal*/)
-{
-}
-
 static void child_ready_handler(int /*signal*/)
 {
     child_ready_signal = 1;
 }
 
+#ifdef HAVE_LIBUNWIND
+static void print_backtrace(SigSafePrinter& ssp)
+{
+    int ret;
+
+    // grab the machine context and initialize the cursor
+    unw_context_t context;
+    if ((ret = unw_getcontext(&context)) < 0)
+    {
+        ssp.printf("unw_getcontext failed: %s (%d)\n", unw_strerror(ret), ret);
+        return;
+    }
+
+    unw_cursor_t cursor;
+    if ((ret = unw_init_local(&cursor, &context)) < 0)
+    {
+        ssp.printf("unw_init_local failed: %s (%d)\n", unw_strerror(ret), ret);
+        return;
+    }
+
+    ssp.printf("Backtrace:\n");
+
+    // walk the stack frames
+    unsigned frame_num = 0;
+    while ((ret = unw_step(&cursor)) > 0)
+    {
+        // skip printing any frames until we've found the frame that received the signal
+        if (frame_num == 0 && !unw_is_signal_frame(&cursor))
+            continue;
+
+        unw_word_t pc;
+        if ((ret = unw_get_reg(&cursor, UNW_REG_IP, &pc)) < 0)
+        {
+            ssp.printf("unw_get_reg failed for instruction pointer: %s (%d)\n",
+                    unw_strerror(ret), ret);
+            return;
+        }
+
+        unw_proc_info_t pip;
+        if ((ret = unw_get_proc_info(&cursor, &pip)) < 0)
+        {
+            ssp.printf("unw_get_proc_info failed: %s (%d)\n", unw_strerror(ret), ret);
+            return;
+        }
+
+        ssp.printf("  #%u 0x%x", frame_num, pc);
+
+        char sym[256];
+        unw_word_t offset;
+        if (unw_get_proc_name(&cursor, sym, sizeof(sym), &offset) == 0)
+            ssp.printf(" in %s+0x%x", sym, offset);
+
+        Dl_info dlinfo;
+        if (dladdr((void *)(uintptr_t)(pip.start_ip + offset), &dlinfo)
+            && dlinfo.dli_fname && *dlinfo.dli_fname)
+        {
+            ssp.printf(" (%s @0x%x)", dlinfo.dli_fname, dlinfo.dli_fbase);
+        }
+
+        ssp.printf("\n");
+
+        frame_num++;
+    }
+    if (ret < 0)
+        ssp.printf("unw_step failed: %s (%d)\n", unw_strerror(ret), ret);
+
+    ssp.printf("\n");
+}
+#endif
+
 static void oops_handler(int signal)
 {
+    // First things first, restore the original signal handler.
+    restore_signal(signal, true);
+
+    // Log the Snort version and signal caught.
+    const char* sigstr = "???\n";
+    switch (signal)
+    {
+        case SIGILL:
+            sigstr = STRINGIFY(SIGILL) " (" STRINGIFY_MX(SIGILL) ")";
+            break;
+        case SIGABRT:
+            sigstr = STRINGIFY(SIGABRT) " (" STRINGIFY_MX(SIGABRT) ")";
+            break;
+        case SIGBUS:
+            sigstr = STRINGIFY(SIGBUS) " (" STRINGIFY_MX(SIGBUS) ")";
+            break;
+        case SIGFPE:
+            sigstr = STRINGIFY(SIGFPE) " (" STRINGIFY_MX(SIGFPE) ")";
+            break;
+        case SIGSEGV:
+            sigstr = STRINGIFY(SIGSEGV) " (" STRINGIFY_MX(SIGSEGV) ")";
+            break;
+    }
+    SigSafePrinter ssp(STDERR_FILENO);
+    ssp.printf("\nSnort (PID %u) caught fatal signal: %s\n", getpid(), sigstr);
+#ifdef BUILD
+    ssp.printf("Version: " VERSION " Build " BUILD "\n\n");
+#else
+    ssp.printf("Version: " VERSION "\n\n");
+#endif
+
+#ifdef HAVE_LIBUNWIND
+    // Try to pretty-print a stack trace using libunwind to traverse the stack.
+    print_backtrace(ssp);
+#endif
+
     // FIXIT-L what should we capture if this is the main thread?
     if ( !is_main_thread )
-        Snort::capture_packet();
+        OopsHandler::handle_crash(STDERR_FILENO);
 
-    add_signal(signal, SIG_DFL, 0);
+    // Finally, raise the signal so that the original handler can handle it.
     raise(signal);
 }
 
@@ -191,84 +316,176 @@ const char* get_signal_name(PigSignal s)
 // signal management
 //-------------------------------------------------------------------------
 
-// If check needed, also check whether previous signal_handler is neither
-// SIG_IGN nor SIG_DFL
-
-// FIXIT-L convert sigaction, etc. to c++11
-static int add_signal(int sig, sighandler_t signal_handler, int check_needed)
+static bool add_signal(int sig, sig_t signal_handler)
 {
-#ifdef VALGRIND_TESTING
-    if ( sig == SIGUSR2 )
-        return;  // used by valgrind
-#endif
-    sighandler_t pre_handler;
-
 #ifdef HAVE_SIGACTION
     struct sigaction action;
-    struct sigaction old_action;
+    // Mask all other signals while in the signal handler
     sigfillset(&action.sa_mask);
+    // Make compatible system calls restartable across signals
     action.sa_flags = SA_RESTART;
     action.sa_handler = signal_handler;
-    sigaction(sig, &action, &old_action);
-    pre_handler = old_action.sa_handler;
+
+    struct sigaction* old_action = nullptr;
+    for (unsigned i = 0; original_sigactions[i].signal; i++)
+    {
+        if (original_sigactions[i].signal == sig)
+        {
+            old_action = &original_sigactions[i].original_sigaction;
+            break;
+        }
+    }
+
+    if (sigaction(sig, &action, old_action) != 0)
+    {
+        ErrorMessage("Could not add handler for signal %d: %s (%d)\n", sig, get_error(errno), errno);
+        return false;
+    }
 #else
-    pre_handler = signal(sig, signal_handler);
+    sig_t original_handler = signal(sig, signal_handler);
+    if (original_handler == SIG_ERR)
+    {
+        ErrorMessage("Could not add handler for signal %d: %s (%d)\n", sig, get_error(errno), errno);
+        return false;
+    }
+
+    for (unsigned i = 0; original_sighandlers[i].signal; i++)
+    {
+        if (original_sighandlers[i].signal == sig)
+        {
+            original_sighandlers[i].original_sighandler = original_handler;
+            break;
+        }
+    }
 #endif
-    if (SIG_ERR == pre_handler)
-    {
-        ErrorMessage("Could not add handler for signal %d \n", sig);
-        return 0;
-    }
-    else if (check_needed && (SIG_IGN != pre_handler) && (SIG_DFL!= pre_handler))
-    {
-        ParseWarning(WARN_CONF, "handler is already installed for signal %d.\n", sig);
-    }
-    return 1;
+
+    return true;
 }
 
-void init_signals(void)
+static bool restore_signal(int sig, bool silent)
 {
-# if defined(LINUX) || defined(FREEBSD) || defined(OPENBSD) || \
-    defined(SOLARIS) || defined(BSD) || defined(MACOS)
+#ifdef HAVE_SIGACTION
+    struct sigaction* new_action = nullptr;
+    struct sigaction action;
+
+    for (unsigned i = 0; original_sigactions[i].signal; i++)
+    {
+        if (original_sigactions[i].signal == sig)
+        {
+            new_action = &original_sigactions[i].original_sigaction;
+            break;
+        }
+    }
+
+    if (!new_action)
+    {
+        sigemptyset(&action.sa_mask);
+        action.sa_flags = 0;
+        action.sa_handler = SIG_DFL;
+        new_action = &action;
+    }
+
+    if (sigaction(sig, new_action, nullptr) != 0)
+    {
+        if (!silent)
+            ErrorMessage("Could not restore handler for signal %d: %s (%d)\n", sig, get_error(errno), errno);
+        return false;
+    }
+#else
+    sig_t signal_handler = SIG_DFL;
+
+    for (unsigned i = 0; original_sighandlers[i].signal; i++)
+    {
+        if (original_sighandlers[i].signal == sig)
+        {
+            signal_handler = original_sighandlers[i].original_sighandler;
+            break;
+        }
+    }
+
+    if (signal(sig, signal_handler) == SIG_ERR)
+    {
+        if (!silent)
+            ErrorMessage("Could not restore handler for signal %d: %s (%d)\n", sig, get_error(errno), errno);
+        return false;
+    }
+#endif
+
+    return true;
+}
+
+void install_oops_handler()
+{
+    add_signal(SIGILL, oops_handler);
+    add_signal(SIGABRT, oops_handler);
+    add_signal(SIGBUS, oops_handler);
+    add_signal(SIGFPE, oops_handler);
+    add_signal(SIGSEGV, oops_handler);
+}
+
+void init_signals()
+{
     sigset_t set;
 
     sigemptyset(&set);
     // FIXIT-L this is undefined for multithreaded apps
-    sigprocmask(SIG_SETMASK, &set, NULL);
-# else
-    sigsetmask(0);
-# endif
+    sigprocmask(SIG_SETMASK, &set, nullptr);
 
-    /* Make this prog behave nicely when signals come along.
-     * Windows doesn't like all of these signals, and will
-     * set errno for some.  Ignore/reset this error so it
-     * doesn't interfere with later checks of errno value.  */
-    add_signal(SIGTERM, exit_handler, 1);
-    add_signal(SIGINT, exit_handler, 1);
-    add_signal(SIGQUIT, dirty_handler, 1);
+    // First things first, install the crash handler
+    install_oops_handler();
 
-    add_signal(SIGNAL_SNORT_DUMP_STATS, dump_stats_handler, 1);
-    add_signal(SIGNAL_SNORT_ROTATE_STATS, rotate_stats_handler, 1);
-    add_signal(SIGNAL_SNORT_RELOAD, reload_config_handler, 1);
-    add_signal(SIGNAL_SNORT_READ_ATTR_TBL, reload_attrib_handler, 1);
+    // Ignore SIGPIPE for now (it's not particularly actionable in a multithreaded program)
+    add_signal(SIGPIPE, SIG_IGN);
 
-    add_signal(SIGPIPE, ignore_handler, 1);
-    add_signal(SIGABRT, oops_handler, 1);
-    add_signal(SIGSEGV, oops_handler, 1);
-    add_signal(SIGBUS, oops_handler, 1);
+    // Set up a clean exit when expected shutdown signals come along
+    add_signal(SIGTERM, exit_handler);
+    add_signal(SIGINT, exit_handler);
+    add_signal(SIGQUIT, dirty_handler);
 
+    // Finally, set up signal handlers for custom Snort actions
+    add_signal(SIGNAL_SNORT_DUMP_STATS, dump_stats_handler);
+    add_signal(SIGNAL_SNORT_ROTATE_STATS, rotate_stats_handler);
+    add_signal(SIGNAL_SNORT_RELOAD, reload_config_handler);
+    add_signal(SIGNAL_SNORT_READ_ATTR_TBL, reload_attrib_handler);
+
+    // Errno will have potentially been left set from a failed handler installation
     errno = 0;
+}
+
+void remove_oops_handler()
+{
+    restore_signal(SIGILL);
+    restore_signal(SIGABRT);
+    restore_signal(SIGBUS);
+    restore_signal(SIGFPE);
+    restore_signal(SIGSEGV);
+}
+
+void term_signals()
+{
+    restore_signal(SIGNAL_SNORT_DUMP_STATS);
+    restore_signal(SIGNAL_SNORT_ROTATE_STATS);
+    restore_signal(SIGNAL_SNORT_RELOAD);
+    restore_signal(SIGNAL_SNORT_READ_ATTR_TBL);
+
+    restore_signal(SIGTERM);
+    restore_signal(SIGINT);
+    restore_signal(SIGQUIT);
+
+    restore_signal(SIGPIPE);
+
+    remove_oops_handler();
 }
 
 static void help_signal(unsigned n, const char* name, const char* h)
 {
-    cout << Markup::item();
+    std::cout << Markup::item();
 
-    cout << Markup::emphasis_on();
-    cout << name;
-    cout << Markup::emphasis_off();
+    std::cout << Markup::emphasis_on();
+    std::cout << name;
+    std::cout << Markup::emphasis_off();
 
-    cout << "(" << n << "): " << h << endl;
+    std::cout << "(" << n << "): " << h << std::endl;
 }
 
 void help_signals()
@@ -287,144 +504,80 @@ void help_signals()
 // daemonize
 //-------------------------------------------------------------------------
 
-/* Signal the parent that child is ready */
-static void signal_waiting_parent(void)
+static void snuff_stdio()
 {
-    pid_t ppid = getppid();
-#ifdef DEBUG
-    printf("Signaling parent %d from child %d\n", ppid, getpid());
-#endif
+    bool err = (close(STDIN_FILENO) != 0);
+    err = err or (close(STDOUT_FILENO) != 0);
+    err = err or (close(STDERR_FILENO) != 0);
 
-    if (kill(ppid, SIGNAL_SNORT_CHILD_READY))
-    {
-        LogMessage("Daemon initialized, failed to signal parent pid: "
-            "%d, failure: %d, %s\n", ppid, errno, get_error(errno));
-    }
-    else
-    {
-        LogMessage("Daemon initialized, signaled parent pid: %d\n", ppid);
-    }
-}
-
-/* All threads need to be created after daemonizing.  If created in
- * the parent thread, when it goes away, so will all of the threads.
- * The child does not "inherit" threads created in the parent. */
-
-void daemonize()
-{
-    int exit_val = 0;
-    pid_t cpid;
-
-    if (SnortConfig::daemon_restart())
-        return;
-
-    LogMessage("Initializing daemon mode\n");
-
-    /* Don't daemonize if we've already daemonized and
-     * received a SIGNAL_SNORT_RELOAD. */
-    if (getppid() != 1)
-    {
-        /* Register signal handler that parent can trap signal */
-        add_signal(SIGNAL_SNORT_CHILD_READY, child_ready_handler, 1);
-
-        if (errno != 0)
-            errno = 0;
-
-        /* now fork the child */
-        printf("Spawning daemon child...\n");
-        cpid = fork();
-
-        if (cpid > 0)
-        {
-            /* Continue waiting until receiving signal from child */
-            int status;
-            /* Parent */
-            printf("My daemon child %d lives...\n", cpid);
-
-            /* Don't exit quite yet.  Wait for the child
-             * to signal that is there and created the PID
-             * file.
-             */
-            do
-            {
-#ifdef DEBUG
-                printf("Parent waiting for child...\n");
-#endif
-                sleep(1);
-            }
-            while ( !child_ready_signal );
-
-            if (waitpid(cpid, &status, WNOHANG) == cpid)
-            {
-                if (WIFEXITED(status))
-                {
-                    LogMessage("Child exited unexpectedly\n");
-                    exit_val = -1;
-                }
-                else if (WIFSIGNALED(status))
-                {
-                    LogMessage("Child terminated unexpectedly\n");
-                    exit_val = -2;
-                }
-            }
-#ifdef DEBUG
-            printf("Child terminated unexpectedly (%d)\n", status);
-#endif
-            printf("Daemon parent exiting (%d)\n", exit_val);
-
-            exit(exit_val);                /* parent */
-        }
-
-        if (cpid < 0)
-        {
-            /* Daemonizing failed... */
-            perror("fork");
-            exit(1);
-        }
-    }
-    /* Child */
-    setsid();
-
-    errno = 0;
-    bool err = false;
-
-    err = close(0) || err;
-    err = close(1) || err;
-    err = close(2) || err;
-
-#ifdef DEBUG
-    /* redirect stdin/stdout/stderr to a file */
-    const int mode = S_IWUSR | S_IRUSR | S_IRGRP;
-    const char* file = "/tmp/snort.debug";
-
-    err = open(file, O_CREAT | O_RDWR, mode) || err;  /* stdin, fd 0 */
-
-    /* Change ownership to that which we will drop privileges to */
-    if ((snort_conf->user_id != -1) || (snort_conf->group_id != -1))
-    {
-        uid_t user_id = getuid();
-        gid_t group_id = getgid();
-
-        if (snort_conf->user_id != -1)
-            user_id = snort_conf->user_id;
-        if (snort_conf->group_id != -1)
-            group_id = snort_conf->group_id;
-
-        err = chown(file, user_id, group_id) || err;
-    }
-#else
     /* redirect stdin/stdout/stderr to /dev/null */
-    const char* file = "/dev/null";
-    err = open(file, O_RDWR) || err;  /* stdin, fd 0 */
-#endif
+    err = err or (open("/dev/null", O_RDWR) != STDIN_FILENO);  // fd 0
 
-    err = dup(0) || err;  /* stdout, fd 0 => fd 1 */
-    err = dup(0) || err;  /* stderr, fd 0 => fd 2 */
+    err = err or (dup(STDIN_FILENO) != STDOUT_FILENO);  // fd 0 => fd 1
+    err = err or (dup(STDIN_FILENO) != STDERR_FILENO);  // fd 0 => fd 2
 
     if ( err )
-        perror("daemonization errors");
+        // message is hit or miss but we will exit with failure
+        FatalError("failed to snuff stdio - %s", get_error(errno));
+}
 
-    signal_waiting_parent();
+// All threads need to be created after daemonizing.  If created in the
+// parent thread, when it goes away, so will all of the threads.  The child
+// does not "inherit" threads created in the parent.
+
+// Similar to daemon(1, 0).  We also add a signal to confirm child was at
+// least started ok.  Should daemon() become posix compliant, we can switch
+// to that.  We can also consider updating to have the child execve().
+// Note that there are system tools for daemonization these days.  See
+// daemon(3) and search deprecated daemonomicon for more.
+void daemonize()
+{
+    // don't daemonize more than once
+    if ( getppid() == 1 )
+        return;
+
+    LogMessage("initializing daemon mode\n");
+
+    // register signal handler so that parent can trap signal
+    add_signal(SIGNAL_SNORT_CHILD_READY, child_ready_handler);
+
+    pid_t cpid = fork();
+
+    if ( cpid < 0 )
+        FatalError("fork failed - %s", get_error(errno));
+
+    if ( cpid > 0 )
+    {
+        // parent
+        int i = 0;
+
+        while ( !child_ready_signal and i++ < 10 )
+            sleep(1);
+
+        if ( !child_ready_signal )
+            FatalError("daemonization failed");
+        else
+            LogMessage("child process is %d\n", cpid);
+
+        exit(0);
+    }
+
+    // child
+    errno = 0;  // disregard any inherited issues
+
+    setsid();
+
+    if ( errno )
+        FatalError("failed to setsid - %s", get_error(errno));
+
+    if ( SnortConfig::log_quiet() or SnortConfig::log_syslog() )
+        snuff_stdio();
+
+    pid_t ppid = getppid();
+
+    if ( kill(ppid, SIGNAL_SNORT_CHILD_READY) )
+        LogMessage("daemonization incomplete, failed to signal parent "
+            "%d: %s\n", ppid, get_error(errno));
 }
 
 //-------------------------------------------------------------------------
@@ -437,26 +590,3 @@ void trim_heap()
     malloc_trim(0);
 #endif
 }
-
-void log_malloc_info()
-{
-#ifdef HAVE_MALLINFO
-    struct mallinfo mi = mallinfo();
-
-    LogLabel("heap usage");
-    LogCount("total non-mmapped bytes", mi.arena);
-    LogCount("bytes in mapped regions", mi.hblkhd);
-    LogCount("total allocated space", mi.uordblks);
-    LogCount("total free space", mi.fordblks);
-    LogCount("topmost releasable block", mi.keepcost);
-
-#ifdef DEBUG
-    LogCount("free chunks", mi.ordblks);
-    LogCount("free fastbin blocks", mi.smblks);
-    LogCount("mapped regions", mi.hblks);
-    LogCount("max total alloc space", mi.usmblks);
-    LogCount("free bytes in fastbins", mi.fsmblks);
-#endif
-#endif
-}
-

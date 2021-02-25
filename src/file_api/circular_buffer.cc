@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,19 +22,21 @@
  **
  **  NOTES
  **
- **  Circular buffer is thread safe for one writer and one reader thread
+ **  Circular buffer is thread-safe for one writer and one reader thread
  **
- **  This implementaton is inspired by one slot open approach.
+ **  This implementation is inspired by one slot open approach.
  **  See http://en.wikipedia.org/wiki/Circular_buffer
  **
  **  5.25.13 - Initial Source Code. Hui Cao
  */
 
-#include "snort_types.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "circular_buffer.h"
 
-#include <stdio.h>
-#include <stdlib.h>
+#include "utils/util.h"
 
 /* Circular buffer object */
 struct _CircularBuffer
@@ -42,30 +44,22 @@ struct _CircularBuffer
     uint64_t size;     /* maximum number of elements           */
     uint64_t start;    /* index of oldest element, reader update only */
     uint64_t end;      /* index to write new element, writer update only*/
-    uint64_t under_run;
-    uint64_t over_run;
     ElemType* elems;    /* vector of elements                   */
-    uint64_t total_write;
-    uint64_t total_read;
 };
 
 /* This approach adds one byte to end and start pointers */
 
 CircularBuffer* cbuffer_init(uint64_t size)
 {
-    CircularBuffer* cb = (CircularBuffer*)calloc(1, sizeof(*cb));
-
-    if ( !cb )
-        return NULL;
+    CircularBuffer* cb = (CircularBuffer*)snort_calloc(sizeof(*cb));
 
     cb->size  = size + 1;
-
-    cb->elems = (ElemType*)calloc(cb->size, sizeof(ElemType));
+    cb->elems = (ElemType*)snort_calloc(cb->size, sizeof(ElemType));
 
     if (!cb->elems)
     {
-        free(cb);
-        return NULL;
+        snort_free(cb);
+        return nullptr;
     }
 
     return cb;
@@ -75,14 +69,13 @@ void cbuffer_free(CircularBuffer* cb)
 {
     if (cb && cb->elems)
     {
-        free(cb->elems);
-        cb->elems = NULL;
+        snort_free(cb->elems);
+        cb->elems = nullptr;
     }
 
-    free(cb);
+    snort_free(cb);
 }
 
-/* We use mirror flag to detection full or empty efficiently*/
 int cbuffer_is_full(CircularBuffer* cb)
 {
     uint64_t next = cb->end + 1;
@@ -93,7 +86,7 @@ int cbuffer_is_full(CircularBuffer* cb)
     return (next == cb->start);
 }
 
-/* We use mirror flag to detection full or empty efficiently*/
+
 int cbuffer_is_empty(CircularBuffer* cb)
 {
     return (cb->end == cb->start);
@@ -111,12 +104,6 @@ uint64_t cbuffer_used(CircularBuffer* cb)
     {
         return (cb->end - cb->start);
     }
-}
-
-/* Returns number of free elements*/
-uint64_t cbuffer_available(CircularBuffer* cb)
-{
-    return (cbuffer_size(cb) - cbuffer_used(cb));
 }
 
 /* Returns total number of elements*/
@@ -141,7 +128,6 @@ int cbuffer_write(CircularBuffer* cb, const ElemType elem)
 
     if ( cbuffer_is_full (cb))  /* full, return error */
     {
-        cb->over_run++;
         return CB_FAIL;
     }
 
@@ -150,7 +136,6 @@ int cbuffer_write(CircularBuffer* cb, const ElemType elem)
         w = 0;
 
     cb->end = w;
-    cb->total_write++;
 
     return CB_SUCCESS;
 }
@@ -171,7 +156,6 @@ int cbuffer_read(CircularBuffer* cb, ElemType* elem)
 
     if (cbuffer_is_empty(cb)) /* Empty, return error */
     {
-        cb->under_run++;
         return CB_FAIL;
     }
 
@@ -180,52 +164,7 @@ int cbuffer_read(CircularBuffer* cb, ElemType* elem)
         r = 0;
 
     cb->start = r;
-    cb->total_read++;
 
     return CB_SUCCESS;
-}
-
-/*
- * Read one element from the buffer and no change on buffer
- *
- * Args:
- *   CircularBuffer *: buffer
- *   ElemType *elem: the element pointer to be stored
- * Return:
- *   CB_FAIL
- *   CB_SUCCESS
- */
-int cbuffer_peek(CircularBuffer* cb, ElemType* elem)
-{
-    if (cbuffer_is_empty(cb)) /* Empty, return error */
-        return CB_FAIL;
-
-    *elem = cb->elems[cb->start];
-
-    return CB_SUCCESS;
-}
-
-/* Returns total number of reads*/
-uint64_t cbuffer_num_reads(CircularBuffer* cb)
-{
-    return (cb->total_read);
-}
-
-/* Returns total number of writes*/
-uint64_t cbuffer_num_writes(CircularBuffer* cb)
-{
-    return (cb->total_write);
-}
-
-/* Returns total number of writer overruns*/
-uint64_t cbuffer_num_over_runs(CircularBuffer* cb)
-{
-    return (cb->over_run);
-}
-
-/* Returns total number of reader overruns*/
-uint64_t cbuffer_num_under_runs(CircularBuffer* cb)
-{
-    return (cb->under_run);
 }
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -22,8 +22,8 @@
 
 #include "conversion_state.h"
 #include "helpers/converter.h"
-#include "rule_states/rule_api.h"
 #include "helpers/s2l_util.h"
+#include "rule_api.h"
 
 namespace rules
 {
@@ -33,16 +33,14 @@ class HttpEncode : public ConversionState
 {
 public:
     HttpEncode(Converter& c) : ConversionState(c) { }
-    virtual ~HttpEncode() { }
-    virtual bool convert(std::istringstream& data);
+    bool convert(std::istringstream& data) override;
 };
 } // namespace
 
 bool HttpEncode::convert(std::istringstream& data_stream)
 {
-    std::string tmp;
     rule_api.add_comment("option deleted: http_encode");
-    tmp = util::get_rule_option_args(data_stream);
+    util::get_rule_option_args(data_stream);
     return set_next_rule_state(data_stream);
 }
 

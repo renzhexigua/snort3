@@ -5,12 +5,14 @@ set( FILE_LIST
     ssh_config.h
     ssh_module.cc
     ssh_module.h
+    ssh_splitter.cc
+    ssh_splitter.h
 )
 
 if (STATIC_INSPECTORS)
-    add_library( ssh STATIC ${FILE_LIST})
+    add_library( ssh OBJECT ${FILE_LIST})
 
 else (STATIC_INSPECTORS)
-    add_shared_library(ssh inspectors ${FILE_LIST})
+    add_dynamic_module(ssh inspectors ${FILE_LIST})
 
 endif (STATIC_INSPECTORS)

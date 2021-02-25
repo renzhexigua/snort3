@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,29 +20,31 @@
 #include "data/data_types/dt_rule_option.h"
 #include "data/data_types/dt_rule_suboption.h"
 
-RuleOption::RuleOption(std::string n) :
+RuleOption::RuleOption(const std::string& n) :
     name(n),
     value(std::string())
 { }
 
-RuleOption::RuleOption(std::string n, std::string v)
+RuleOption::RuleOption(const std::string& n, const std::string& v)
     :   name(n),
     value(v)
 { }
 
 RuleOption::~RuleOption()
 {
+    for (auto rso : sub_options)
+        delete rso;
 }
 
-bool RuleOption::add_suboption(std::string subopt_name)
+bool RuleOption::add_suboption(const std::string& subopt_name)
 {
     RuleSubOption* subopt = new RuleSubOption(subopt_name);
     sub_options.push_back(subopt);
     return true;
 }
 
-bool RuleOption::add_suboption(std::string subopt_name,
-    std::string val)
+bool RuleOption::add_suboption(const std::string& subopt_name,
+    const std::string& val)
 {
     RuleSubOption* subopt = new RuleSubOption(subopt_name, val);
     sub_options.push_back(subopt);

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,12 +17,18 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "rule_port_tables.h"
+
+#include "log/messages.h"
 
 #include "port_object.h"
 #include "port_table.h"
-#include "parser/parser.h"
-#include "utils/util.h"
+
+using namespace snort;
 
 #define DEFAULT_LARGE_RULE_GROUP 9
 
@@ -33,9 +39,6 @@ PortProto::PortProto()
 
     any = PortObjectNew();
     nfp = PortObjectNew();
-
-    if ( !src or !dst or !any or !nfp )
-        ParseAbort("can't allocate port structs");
 
    // someday these could be read from snort.conf, something like...
    // 'config portlist: large-rule-count <val>'
@@ -48,26 +51,17 @@ PortProto::PortProto()
 
 PortProto::~PortProto()
 {
-    if (src)
-        PortTableFree(src);
-
-    if (dst)
-        PortTableFree(dst);
-
-    if (any)
-        PortObjectFree(any);
-
-    if (nfp)
-        PortObjectFree(nfp);
+    PortTableFree(src);
+    PortTableFree(dst);
+    PortObjectFree(any);
+    PortObjectFree(nfp);
 }
 
 RulePortTables* PortTablesNew()
 {
     RulePortTables* rpt = new RulePortTables;
 
-    if ( !(rpt->svc_any = PortObjectNew()) )
-        ParseAbort("ParseRulesFile udp any-any PortObjectNew() failed");
-
+    rpt->svc_any = PortObjectNew();
     PortObjectAddPortAny(rpt->svc_any);
 
     return rpt;

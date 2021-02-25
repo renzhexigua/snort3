@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -26,14 +26,15 @@
 *   3/06 - Added AC_BNFA search
 */
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include "framework/mpse.h"
+
 #include "bnfa_search.h"
 
-#include "snort_debug.h"
-#include "snort_types.h"
-#include "util.h"
-#include "profiler.h"
-#include "snort_config.h"
-#include "framework/mpse.h"
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // "ac_bnfa"
@@ -45,52 +46,45 @@ private:
     bnfa_struct_t* obj;
 
 public:
-    AcBnfaMpse(
-        SnortConfig*,
-        bool use_gc,
-        void (* user_free)(void*),
-        void (* tree_free)(void**),
-        void (* list_free)(void**))
-        : Mpse("ac_bnfa", use_gc)
+    AcBnfaMpse(const MpseAgent* agent) : Mpse("ac_bnfa")
     {
-        obj=bnfaNew(user_free, tree_free, list_free);
+        obj=bnfaNew(agent);
         if ( obj ) obj->bnfaMethod = 1;
     }
 
-    ~AcBnfaMpse()
+    ~AcBnfaMpse() override
     {
         if (obj)
             bnfaFree(obj);
     }
 
-    void set_opt(int flag)
+    void set_opt(int flag) override
     {
         if (obj)
             bnfaSetOpt(obj, flag);
     }
 
     int add_pattern(
-        SnortConfig*, const uint8_t* P, unsigned m,
-        bool noCase, bool negative, void* ID, int) override
+        const uint8_t* P, unsigned m, const PatternDescriptor& desc, void* user) override
     {
-        return bnfaAddPattern(obj, P, m, noCase, negative, ID);
+        return bnfaAddPattern(obj, P, m, desc.no_case, desc.negated, user);
     }
 
-    int prep_patterns(
-        SnortConfig* sc, mpse_build_f build_tree, mpse_negate_f neg_list) override
+    int prep_patterns(SnortConfig* sc) override
     {
-        return bnfaCompile(sc, obj, build_tree, neg_list);
+        return bnfaCompile(sc, obj);
     }
 
     int _search(
-        const uint8_t* T, int n, mpse_action_f action,
-        void* data, int* current_state) override
+        const uint8_t* T, int n, MpseMatch match,
+        void* context, int* current_state) override
     {
         /* return is actually the state */
         return _bnfa_search_csparse_nfa(
-            obj, T, n, (bnfa_match_f)action,
-            data, 0 /* start-state */, current_state);
+            obj, T, n, match, context, 0 /* start-state */, current_state);
     }
+
+    //  FIXIT-L Implement search_all method for AC_BNFA.
 
     int print_info() override
     {
@@ -98,7 +92,7 @@ public:
         return 0;
     }
 
-    int get_pattern_count() override
+    int get_pattern_count() const override
     {
         return bnfaPatternCount(obj);
     }
@@ -109,14 +103,9 @@ public:
 //-------------------------------------------------------------------------
 
 static Mpse* bnfa_ctor(
-    SnortConfig* sc,
-    class Module*,
-    bool use_gc,
-    void (* user_free)(void*),
-    void (* tree_free)(void**),
-    void (* list_free)(void**))
+    const SnortConfig*, class Module*, const MpseAgent* agent)
 {
-    return new AcBnfaMpse(sc, use_gc, user_free, tree_free, list_free);
+    return new AcBnfaMpse(agent);
 }
 
 static void bnfa_dtor(Mpse* p)
@@ -149,7 +138,7 @@ static const MpseApi bnfa_api =
         nullptr,
         nullptr
     },
-    false,
+    MPSE_BASE,
     nullptr,
     nullptr,
     nullptr,
@@ -158,7 +147,12 @@ static const MpseApi bnfa_api =
     bnfa_dtor,
     bnfa_init,
     bnfa_print,
+    nullptr,
 };
 
-const BaseApi* se_ac_bnfa = &bnfa_api.base;
+const BaseApi* se_ac_bnfa[] =
+{
+    &bnfa_api.base,
+    nullptr
+};
 

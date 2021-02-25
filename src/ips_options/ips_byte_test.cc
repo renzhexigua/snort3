@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,7 +22,7 @@
  *
  * Purpose:
  *      Test a byte field against a specific value (with opcode).  Capable
- *      of testing binary values or converting represenative byte strings
+ *      of testing binary values or converting representative byte strings
  *      to their binary equivalent and testing them.
  *
  *
@@ -37,9 +37,12 @@
  *      ["big"]: process data as big endian (default)
  *      ["little"]: process data as little endian
  *      ["string"]: converted bytes represented as a string needing conversion
- *      ["hex"]: converted string data is represented in hexidecimal
+ *      ["hex"]: converted string data is represented in hexadecimal
  *      ["dec"]: converted string data is represented in decimal
  *      ["oct"]: converted string data is represented in octal
+ *      ["bitmask"]: applies the AND operator on the bytes converted. The
+ *                   result will be right-shifted by the number of bits equal
+ *                   to the number of trailing zeros in the mask.
  *
  *   sample rules:
  *   alert udp $EXTERNAL_NET any -> $HOME_NET any \
@@ -74,6 +77,10 @@
  *      (byte_test: 8, =, 0xdeadbeef, 0, string, hex; \
  *      msg: "got DEADBEEF!";)
  *
+ * alert tcp any any -> any any \
+ *      (byte_test:2, =, 568, 0, bitmask 0x3FF0;      \
+ *      msg:"got 568 after applying bitmask 0x3FF0 on 2 bytes extracted";)
+ *
  * Effect:
  *
  *      Reads in the indicated bytes, converts them to an numeric
@@ -82,89 +89,116 @@
  *      0 if it is not.
  */
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <ctype.h>
-#include <errno.h>
 
-#include <string>
-using namespace std;
-
-#include "snort_types.h"
-#include "snort_bounds.h"
-#include "extract.h"
-#include "detection/treenodes.h"
-#include "protocols/packet.h"
-#include "parser.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "sfhashfcn.h"
-#include "ips_byte_extract.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
-#include "detection/detection_util.h"
 #include "framework/cursor.h"
+#include "framework/endianness.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "hash/hash_key_operations.h"
+#include "log/messages.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+#include "utils/util.h"
 
-#define PARSELEN 10
-#define TEXTLEN  (PARSELEN + 2)
+#include "extract.h"
+
+using namespace snort;
+using namespace std;
 
 static THREAD_LOCAL ProfileStats byteTestPerfStats;
 
 #define s_name "byte_test"
 
-#define CHECK_EQ            0
-#define CHECK_NEQ           1
-#define CHECK_LT            2
-#define CHECK_GT            3
-#define CHECK_LTE           4
-#define CHECK_GTE           5
-#define CHECK_AND           6
-#define CHECK_XOR           7
-#define CHECK_ALL           8
-#define CHECK_GT0    9
-#define CHECK_NONE          10
+enum ByteTestOper
+{
+    CHECK_EQ,
+    CHECK_LT,
+    CHECK_GT,
+    CHECK_LTE,
+    CHECK_GTE,
+    CHECK_AND,
+    CHECK_XOR
+};
 
-#define BIG    0
-#define LITTLE 1
-
-typedef struct _ByteTestData
+struct ByteTestData
 {
     uint32_t bytes_to_compare;
     uint32_t cmp_value;
-    uint32_t opcode;
+    ByteTestOper opcode;
     int32_t offset;
-    uint8_t not_flag;
-    uint8_t relative_flag;
-    uint8_t data_string_convert_flag;
-    int8_t endianess;
+    bool not_flag;
+    bool relative_flag;
+    bool data_string_convert_flag;
+    uint8_t endianness;
     uint32_t base;
+    uint32_t bitmask_val;
     int8_t cmp_value_var;
     int8_t offset_var;
-} ByteTestData;
+};
+
+// -----------------------------------------------------------------------------
+// static functions
+// -----------------------------------------------------------------------------
+
+static inline bool byte_test_check(ByteTestOper op, uint32_t val, uint32_t cmp, bool not_flag)
+{
+    bool success = false;
+
+    switch ( op )
+    {
+    case CHECK_LT:
+        success = (val < cmp);
+        break;
+
+    case CHECK_EQ:
+        success = (val == cmp);
+        break;
+
+    case CHECK_GT:
+        success = (val > cmp);
+        break;
+
+    case CHECK_AND:
+        success = ((val & cmp) > 0);
+        break;
+
+    case CHECK_XOR:
+        success = ((val ^ cmp) > 0);
+        break;
+
+    case CHECK_GTE:
+        success = (val >= cmp);
+        break;
+
+    case CHECK_LTE:
+        success = (val <= cmp);
+        break;
+    }
+
+    if ( not_flag )
+    {
+        success = !success;
+    }
+
+    return success;
+}
 
 class ByteTestOption : public IpsOption
 {
 public:
-    ByteTestOption(const ByteTestData& c) : IpsOption(s_name)
+    ByteTestOption(const ByteTestData& c) : IpsOption(s_name, RULE_OPTION_TYPE_BUFFER_USE)
     { config = c; }
-
-    ~ByteTestOption() { }
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
     bool is_relative() override
-    { return ( config.relative_flag == 1 ); }
+    { return config.relative_flag; }
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     ByteTestData config;
@@ -176,40 +210,40 @@ private:
 
 uint32_t ByteTestOption::hash() const
 {
-    uint32_t a,b,c;
-    const ByteTestData* data = (ByteTestData*)&config;
-
-    a = data->bytes_to_compare;
-    b = data->cmp_value;
-    c = data->opcode;
+    uint32_t a = config.bytes_to_compare;
+    uint32_t b = config.cmp_value;
+    uint32_t c = config.opcode;
 
     mix(a,b,c);
 
-    a += data->offset;
-    b += (data->not_flag << 24 |
-        data->relative_flag << 16 |
-        data->data_string_convert_flag << 8 |
-        data->endianess);
-    c += data->base;
+    a += config.offset;
+    b += config.not_flag ? (1 << 24) : 0;
+    b += config.relative_flag ? (1 << 16) : 0;
+    b += config.data_string_convert_flag ? (1 << 8) : 0;
+    b += config.endianness;
+    c += config.base;
 
     mix(a,b,c);
 
-    a += data->cmp_value_var;
-    b += data->offset_var;
+    a += config.cmp_value_var;
+    b += config.offset_var;
+    c += config.bitmask_val;
 
     mix(a,b,c);
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    a += IpsOption::hash();
+
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool ByteTestOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(s_name, ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    ByteTestOption& rhs = (ByteTestOption&)ips;
+    const ByteTestOption& rhs = (const ByteTestOption&)ips;
     const ByteTestData* left = &config;
     const ByteTestData* right = &rhs.config;
 
@@ -220,10 +254,11 @@ bool ByteTestOption::operator==(const IpsOption& ips) const
         ( left->not_flag == right->not_flag) &&
         ( left->relative_flag == right->relative_flag) &&
         ( left->data_string_convert_flag == right->data_string_convert_flag) &&
-        ( left->endianess == right->endianess) &&
+        ( left->endianness == right->endianness) &&
         ( left->base == right->base) &&
         ( left->cmp_value_var == right->cmp_value_var) &&
-        ( left->offset_var == right->offset_var))
+        ( left->offset_var == right->offset_var) &&
+        ( left->bitmask_val == right->bitmask_val))
     {
         return true;
     }
@@ -231,159 +266,97 @@ bool ByteTestOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int ByteTestOption::eval(Cursor& c, Packet*)
+IpsOption::EvalStatus ByteTestOption::eval(Cursor& c, Packet* p)
 {
+    RuleProfile profile(byteTestPerfStats);
+
     ByteTestData* btd = (ByteTestData*)&config;
-    int rval = DETECTION_OPTION_NO_MATCH;
-    uint32_t value = 0;
-    int success = 0;
-    const uint8_t* start_ptr;
-    int payload_bytes_grabbed;
-    int offset;
-    uint32_t cmp_value;
+    uint32_t cmp_value = 0;
 
-    PROFILE_VARS;
-    MODULE_PROFILE_START(byteTestPerfStats);
-
-    /* Get values from byte_extract variables, if present. */
-    if (btd->cmp_value_var >= 0 && btd->cmp_value_var < NUM_BYTE_EXTRACT_VARS)
+    // Get values from byte_extract variables, if present.
+    if (btd->cmp_value_var >= 0 && btd->cmp_value_var < NUM_IPS_OPTIONS_VARS)
     {
         uint32_t val;
-        GetByteExtractValue(&val, btd->cmp_value_var);
+        GetVarValueByIndex(&val, btd->cmp_value_var);
         cmp_value = val;
     }
     else
         cmp_value = btd->cmp_value;
 
-    if (btd->offset_var >= 0 && btd->offset_var < NUM_BYTE_EXTRACT_VARS)
+    int offset = 0;
+
+    if (btd->offset_var >= 0 && btd->offset_var < NUM_IPS_OPTIONS_VARS)
     {
         uint32_t val;
-        GetByteExtractValue(&val, btd->offset_var);
+        GetVarValueByIndex(&val, btd->offset_var);
         offset = (int32_t)val;
     }
     else
         offset = btd->offset;
 
-    if ( btd->relative_flag )
-        start_ptr = c.start();
-    else
-        start_ptr = c.buffer();
-
+    const uint8_t* start_ptr = btd->relative_flag ? c.start() : c.buffer();
     start_ptr += offset;
 
-    /* both of these functions below perform their own bounds checking within
-     * byte_extract.c
-     */
+    uint8_t endian = btd->endianness;
+    if (endian == ENDIAN_FUNC)
+    {
+        if (!p->endianness ||
+            !p->endianness->get_offset_endianness(start_ptr - p->data, endian))
+            return NO_MATCH;
+    }
+
+    uint32_t value = 0;
 
     if (!btd->data_string_convert_flag)
     {
         if ( byte_extract(
-            btd->endianess, btd->bytes_to_compare,
+            endian, btd->bytes_to_compare,
             start_ptr, c.buffer(), c.endo(), &value))
-        {
-            MODULE_PROFILE_END(byteTestPerfStats);
-            return rval;
-        }
-#ifdef DEBUG
-        payload_bytes_grabbed = (int)btd->bytes_to_compare;
-#endif
+            return NO_MATCH;
     }
     else
     {
-        payload_bytes_grabbed = string_extract(
-            btd->bytes_to_compare, btd->base,
-            start_ptr, c.buffer(), c.endo(), &value);
+        unsigned len = btd->relative_flag ? c.length() : c.size();
+
+        if ( len > btd->bytes_to_compare )
+            len = btd->bytes_to_compare;
+
+        int payload_bytes_grabbed = string_extract(
+            len, btd->base, start_ptr, c.buffer(), c.endo(), &value);
 
         if ( payload_bytes_grabbed < 0 )
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_PATTERN_MATCH,
-                "String Extraction Failed\n"); );
-
-            MODULE_PROFILE_END(byteTestPerfStats);
-            return rval;
+            return NO_MATCH;
         }
     }
 
-    DEBUG_WRAP(DebugMessage(DEBUG_PATTERN_MATCH,
-        "Grabbed %d bytes at offset %d, value = 0x%08X(%u)\n",
-        payload_bytes_grabbed, btd->offset, value, value); );
-
-    switch (btd->opcode)
+    if (btd->bitmask_val != 0 )
     {
-    case CHECK_LT:
-        success = (value < cmp_value);
-        break;
-
-    case CHECK_EQ:
-        success = (value == cmp_value);
-        break;
-
-    case CHECK_GT:
-        success = (value > cmp_value);
-        break;
-
-    case CHECK_AND:
-        success =  ((value & cmp_value) > 0);
-        break;
-
-    case CHECK_XOR:
-        success =  ((value ^ cmp_value) > 0);
-        break;
-
-    case CHECK_GTE:
-        success =  (value >= cmp_value);
-        break;
-
-    case CHECK_LTE:
-        success =  (value <= cmp_value);
-        break;
-
-    case CHECK_ALL:
-        success =  ((value & cmp_value) == cmp_value);
-        break;
-
-    case CHECK_GT0:
-        success =  ((value & cmp_value) != 0);
-        break;
-
-    case CHECK_NONE:
-        success =  ((value & cmp_value) == 0);
-        break;
-    }
-
-    if (btd->not_flag)
-    {
-        DEBUG_WRAP(DebugMessage(DEBUG_PATTERN_MATCH,
-            "checking for not success...flag\n"); );
-        if (!success)
+        uint32_t num_tailing_zeros_bitmask = getNumberTailingZerosInBitmask(btd->bitmask_val);
+        value = value & btd->bitmask_val;
+        if ( value && num_tailing_zeros_bitmask )
         {
-            rval = DETECTION_OPTION_MATCH;
+            value = value >> num_tailing_zeros_bitmask;
         }
     }
-    else if (success)
-    {
-        rval = DETECTION_OPTION_MATCH;
-    }
 
-    /* if the test isn't successful, this function *must* return 0 */
-    MODULE_PROFILE_END(byteTestPerfStats);
-    return rval;
+    if ( byte_test_check(btd->opcode, value, cmp_value, btd->not_flag) )
+        return MATCH;
+
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
 // api
 //-------------------------------------------------------------------------
 
-static void parse_operator(const char* cptr, ByteTestData& idx)
+static void parse_operator(const char* oper, ByteTestData& idx)
 {
-    while (isspace((int)*cptr))
-    {
-        cptr++;
-    }
+    const char* cptr = oper;
 
     if (*cptr == '!')
     {
-        idx.not_flag = 1;
+        idx.not_flag = true;
         cptr++;
     }
 
@@ -396,7 +369,8 @@ static void parse_operator(const char* cptr, ByteTestData& idx)
         /* set the opcode */
         switch (*cptr)
         {
-        case '<': idx.opcode = CHECK_LT;
+        case '<':
+            idx.opcode = CHECK_LT;
             cptr++;
             if (*cptr == '=')
                 idx.opcode = CHECK_LTE;
@@ -404,10 +378,12 @@ static void parse_operator(const char* cptr, ByteTestData& idx)
                 cptr--;
             break;
 
-        case '=': idx.opcode = CHECK_EQ;
+        case '=':
+            idx.opcode = CHECK_EQ;
             break;
 
-        case '>': idx.opcode = CHECK_GT;
+        case '>':
+            idx.opcode = CHECK_GT;
             cptr++;
             if (*cptr == '=')
                 idx.opcode = CHECK_GTE;
@@ -415,15 +391,22 @@ static void parse_operator(const char* cptr, ByteTestData& idx)
                 cptr--;
             break;
 
-        case '&': idx.opcode = CHECK_AND;
+        case '&':
+            idx.opcode = CHECK_AND;
             break;
 
-        case '^': idx.opcode = CHECK_XOR;
+        case '^':
+            idx.opcode = CHECK_XOR;
             break;
 
-        default: ParseError(
-                "byte_test unknown opcode ('%c)", *cptr);
+        default:
+            ParseError("byte_test unknown operator (%s)", oper);
+            return;
         }
+
+        cptr++;
+        if (strlen(cptr))
+            ParseError("byte_test unknown operator (%s)", oper);
     }
 }
 
@@ -437,7 +420,7 @@ static const Parameter s_params[] =
       "number of bytes to pick up from the buffer" },
 
     { "~operator", Parameter::PT_STRING, nullptr, nullptr,
-      "variable name or number of bytes into the buffer to start processing" },
+      "operation to perform to test the value" },
 
     { "~compare", Parameter::PT_STRING, nullptr, nullptr,
       "variable name or value to test the converted result against" },
@@ -469,6 +452,9 @@ static const Parameter s_params[] =
     { "dec", Parameter::PT_IMPLIED, nullptr, nullptr,
       "convert from decimal string" },
 
+    { "bitmask", Parameter::PT_INT, "0x1:0xFFFFFFFF", nullptr,
+      "applies as an AND prior to evaluation" },
+
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
 
@@ -487,7 +473,11 @@ public:
     ProfileStats* get_profile() const override
     { return &byteTestPerfStats; }
 
-    ByteTestData data;
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    ByteTestData data = {};
     string cmp_var;
     string off_var;
 };
@@ -503,46 +493,45 @@ bool ByteTestModule::begin(const char*, int, SnortConfig*)
 bool ByteTestModule::end(const char*, int, SnortConfig*)
 {
     if ( off_var.empty() )
-        data.offset_var = BYTE_EXTRACT_NO_VAR;
+        data.offset_var = IPS_OPTIONS_NO_VAR;
     else
     {
         data.offset_var = GetVarByName(off_var.c_str());
 
-        if (data.offset_var == BYTE_EXTRACT_NO_VAR)
+        if (data.offset_var == IPS_OPTIONS_NO_VAR)
         {
-            ParseError(BYTE_EXTRACT_INVALID_ERR_STR, "byte_test", off_var.c_str());
+            ParseError(INVALID_VAR_ERR_STR, "byte_test", off_var.c_str());
             return false;
         }
     }
     if ( cmp_var.empty() )
-        data.cmp_value_var = BYTE_EXTRACT_NO_VAR;
+        data.cmp_value_var = IPS_OPTIONS_NO_VAR;
     else
     {
         data.cmp_value_var = GetVarByName(cmp_var.c_str());
 
-        if (data.cmp_value_var == BYTE_EXTRACT_NO_VAR)
+        if (data.cmp_value_var == IPS_OPTIONS_NO_VAR)
         {
-            ParseError(BYTE_EXTRACT_INVALID_ERR_STR, "byte_test", cmp_var.c_str());
+            ParseError(INVALID_VAR_ERR_STR, "byte_test", cmp_var.c_str());
             return false;
         }
     }
-    unsigned e1 = ffs(data.endianess);
-    unsigned e2 = ffs(data.endianess >> e1);
+    if ( !data.endianness )
+        data.endianness = ENDIAN_BIG;
 
-    if ( e1 && e2 )
+    if (numBytesInBitmask(data.bitmask_val) > data.bytes_to_compare)
     {
-        ParseError("byte_test has multiple arguments "
-            "specifying the type of string conversion. Use only "
-            "one of 'dec', 'hex', or 'oct'.");
+        ParseError("Number of bytes in \"bitmask\" value is greater than bytes to extract.");
         return false;
     }
+
     return true;
 }
 
 bool ByteTestModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("~count") )
-        data.bytes_to_compare = v.get_long();
+        data.bytes_to_compare = v.get_uint8();
 
     else if ( v.is("~operator") )
         parse_operator(v.get_string(), data);
@@ -564,20 +553,20 @@ bool ByteTestModule::set(const char*, Value& v, SnortConfig*)
             off_var = v.get_string();
     }
     else if ( v.is("relative") )
-        data.relative_flag = 1;
+        data.relative_flag = true;
 
     else if ( v.is("big") )
-        data.endianess |= ENDIAN_BIG;
+        set_byte_order(data.endianness, ENDIAN_BIG, "byte_test");
 
     else if ( v.is("little") )
-        data.endianess |= ENDIAN_LITTLE;
+        set_byte_order(data.endianness, ENDIAN_LITTLE, "byte_test");
 
     else if ( v.is("dce") )
-        data.endianess |= ENDIAN_FUNC;
+        set_byte_order(data.endianness, ENDIAN_FUNC, "byte_test");
 
     else if ( v.is("string") )
     {
-        data.data_string_convert_flag = 1;
+        data.data_string_convert_flag = true;
         data.base = 10;
     }
     else if ( v.is("dec") )
@@ -588,6 +577,9 @@ bool ByteTestModule::set(const char*, Value& v, SnortConfig*)
 
     else if ( v.is("oct") )
         data.base = 8;
+
+    else if ( v.is("bitmask") )
+        data.bitmask_val = v.get_uint32();
 
     else
         return false;
@@ -647,11 +639,11 @@ static const IpsApi byte_test_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_byte_test[] =
+#endif
 {
     &byte_test_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_byte_test = &byte_test_api.base;
-#endif
 

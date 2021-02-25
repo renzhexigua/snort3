@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,10 +20,12 @@
 #ifndef CHUNK_H
 #define CHUNK_H
 
+// Lua chunk support
+
 #include <string>
 
-void init_chunk(struct lua_State*&, std::string& chunk, const char* name, std::string& args);
-void term_chunk(struct lua_State*&);
+// FIXIT-L merge with helpers/lua
+bool init_chunk(struct lua_State*, std::string& chunk, const char* name, std::string& args);
 
 #endif
 

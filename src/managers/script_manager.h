@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,13 +20,12 @@
 #ifndef SCRIPT_MANAGER_H
 #define SCRIPT_MANAGER_H
 
-#ifdef HAVE_CONFIG_H
-# include "config.h"
-#endif
+// Factory for Lua script plugins used for IpsOptions and Loggers implemented
+// in Lua.  Runtime use is via the actual plugin type manager.
 
 #include <string>
+#include <vector>
 
-#include "snort_types.h"
 #include "framework/base_api.h"
 
 //-------------------------------------------------------------------------
@@ -34,9 +33,9 @@
 class ScriptManager
 {
 public:
-    static void load_scripts(const std::string& paths);
+    static void load_scripts(const std::vector<std::string>& paths);
     static void release_scripts();
-    static const BaseApi** get_plugins();
+    static const snort::BaseApi** get_plugins();
     static std::string* get_chunk(const char* key);
 };
 

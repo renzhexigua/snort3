@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class Pop : public ConversionState
 {
 public:
     Pop(Converter& c) : ConversionState(c) { }
-    virtual ~Pop() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 
 };
 } // namespace
@@ -42,10 +41,9 @@ bool Pop::convert(std::istringstream& data_stream)
 {
     std::string keyword;
     bool retval = true;
-    bool ports_set = false;
-    Binder bind(table_api);
+    bool default_binding = true;
+    auto& bind = cv.make_binder();
 
-    bind.set_when_proto("tcp");
     bind.set_use_type("pop");
 
     table_api.open_table("pop");
@@ -56,60 +54,65 @@ bool Pop::convert(std::istringstream& data_stream)
     {
         bool tmpval = true;
 
-        if (!keyword.compare("disabled"))
+        if (keyword == "disabled")
         {
             table_api.add_deleted_comment("disabled");
         }
 
-        else if (!keyword.compare("memcap"))
+        else if (keyword == "memcap")
         {
             table_api.add_deleted_comment("memcap");
             data_stream >> keyword;
         }
 
-        else if (!keyword.compare("max_mime_mem"))
+        else if (keyword == "max_mime_mem")
         {
             table_api.add_deleted_comment("max_mime_mem");
             data_stream >> keyword;
         }
 
-        else if (!keyword.compare("b64_decode_depth"))
+        else if (keyword == "b64_decode_depth")
         {
-            tmpval = parse_int_option("b64_decode_depth", data_stream, false);
+            tmpval = parse_int_option_reverse_m10("b64_decode_depth", data_stream);
         }
 
-        else if (!keyword.compare("qp_decode_depth"))
+        else if (keyword == "qp_decode_depth")
         {
-            tmpval = parse_int_option("qp_decode_depth", data_stream, false);
+            tmpval = parse_int_option_reverse_m10("qp_decode_depth", data_stream);
         }
 
-        else if (!keyword.compare("bitenc_decode_depth"))
+        else if (keyword == "bitenc_decode_depth")
         {
-            tmpval = parse_int_option("bitenc_decode_depth", data_stream, false);
+            tmpval = parse_int_option_reverse_m10("bitenc_decode_depth", data_stream);
         }
 
-        else if (!keyword.compare("uu_decode_depth"))
+        else if (keyword == "uu_decode_depth")
         {
-            tmpval = parse_int_option("uu_decode_depth", data_stream, false);
+            tmpval = parse_int_option_reverse_m10("uu_decode_depth", data_stream);
         }
 
-        else if (!keyword.compare("ports"))
+        else if (keyword == "ports")
         {
-            std::string tmp = "";
-            table_api.add_diff_option_comment("ports", "bindings");
-
-            if ((data_stream >> keyword) && !keyword.compare("{"))
-            {
-                while (data_stream >> keyword && keyword.compare("}"))
-                {
-                    ports_set = true;
-                    bind.add_when_port(keyword);
-                }
-            }
+            if (!cv.get_bind_port())
+                default_binding = parse_bracketed_unsupported_list("ports", data_stream);
             else
             {
-                data_api.failed_conversion(data_stream, "ports <bracketed_port_list>");
-                retval = false;
+                table_api.add_diff_option_comment("ports", "bindings");
+
+                if ((data_stream >> keyword) && keyword == "{")
+                {
+                    bind.set_when_proto("tcp");
+                    while (data_stream >> keyword && keyword != "}")
+                    {
+                        default_binding = false;
+                        bind.add_when_port(keyword);
+                    }
+                }
+                else
+                {
+                    data_api.failed_conversion(data_stream, "ports <bracketed_port_list>");
+                    retval = false;
+                }
             }
         }
 
@@ -125,8 +128,8 @@ bool Pop::convert(std::istringstream& data_stream)
         }
     }
 
-    if (!ports_set)
-        bind.add_when_port("110");
+    if (default_binding)
+        bind.set_when_service("pop3");
 
     return retval;
 }

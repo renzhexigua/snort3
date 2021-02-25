@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,34 +16,19 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-/*
- * Description:
- *
- * Header file for FTPTelnet telnet Module
- *
- * This file defines the telnet checking functions
- *
- * NOTES:
- *  - 20.09.04:  Initial Development.  SAS
- *
- * Steven A. Sturges <ssturges@sourcefire.com>
- */
+
+// pp_telnet.h author Steven A. Sturges <ssturges@sourcefire.com>
+
 #ifndef PP_TELNET_H
 #define PP_TELNET_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
-#include <sys/types.h>
+// declares the telnet checking functions
 
 /* RFC 885 defines an End of Record telnet option */
 #define RFC885
-/* RFC 1184 defines Abort, Suspend, and End of File telnet optinos */
+/* RFC 1184 defines Abort, Suspend, and End of File telnet options */
 #define RFC1184
 
-//#include "protocols/packet.h"
-#include "ftpp_ui_config.h"
 #include "ftpp_si.h"
 
 /* define the telnet negotiation codes (TNC) that we're interested in */
@@ -75,11 +60,12 @@
 #define FTPP_APPLY_TNC_ERASE_CMDS 0
 #define FTPP_IGNORE_TNC_ERASE_CMDS 1
 
+struct DataBuffer;
 /* list of function prototypes for this preprocessor */
-extern int normalize_telnet(TELNET_SESSION*, Packet*, int iMode, char ignoreEraseCmd);
+extern int normalize_telnet(TELNET_SESSION*, snort::Packet*, DataBuffer&, int iMode, char ignoreEraseCmd, bool on_ftp_channel);
 
-void reset_telnet_buffer();
-const uint8_t* get_telnet_buffer(unsigned&);
+void reset_telnet_buffer(snort::Packet*);
+const uint8_t* get_telnet_buffer(snort::Packet*, unsigned&);
 
 #endif
 

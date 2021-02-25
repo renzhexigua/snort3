@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,62 +20,83 @@
 #ifndef MPSE_H
 #define MPSE_H
 
+// MPSE = Multi-Pattern Search Engine - ie fast pattern matching. The key
+// methods of an MPSE are the ability to add patterns, compile a state
+// machine from the patterns, and search either a single buffer or a set
+// of (related) buffers for patterns.
+
+#include <cassert>
 #include <string>
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
+#include "framework/base_api.h"
 #include "main/snort_types.h"
 #include "main/thread.h"
-#include "framework/base_api.h"
-#include "time/profiler.h"
+#include "search_engines/search_common.h"
 
-/*
-*   Move these defines to a generic Win32/Unix compatability file,
-*   there must be one somewhere...
-*/
-#ifndef CDECL
-#define CDECL
-#endif
-
+namespace snort
+{
 // this is the current version of the api
 #define SEAPI_VERSION ((BASE_API_VERSION << 16) | 0)
 
 struct SnortConfig;
+class Mpse;
 struct MpseApi;
-
-typedef int (* mpse_build_f)(SnortConfig*, void* id, void** existing_tree);
-typedef int (* mpse_negate_f)(void* id, void** list);
-typedef int (* mpse_action_f)(void* id, void* tree, int index, void* data, void* neg_list);
+struct MpseBatch;
+struct ProfileStats;
 
 class SO_PUBLIC Mpse
 {
 public:
-    static uint64_t get_pattern_byte_count();
-    static void reset_pattern_byte_count();
+    enum MpseType
+    {
+        MPSE_TYPE_NORMAL = 0,
+        MPSE_TYPE_OFFLOAD = 1
+    };
 
-public:
-    virtual ~Mpse() { }
+    enum MpseRespType
+    {
+        MPSE_RESP_COMPLETE_FAIL    = -1,
+        MPSE_RESP_NOT_COMPLETE     = 0,
+        MPSE_RESP_COMPLETE_SUCCESS = 1
+    };
+
+    virtual ~Mpse() = default;
+
+    struct PatternDescriptor
+    {
+        bool no_case;
+        bool negated;
+        bool literal;
+        unsigned flags;
+
+        PatternDescriptor(
+            bool noc = false, bool neg = false, bool lit = false, unsigned f = 0)
+        { no_case = noc; negated = neg; literal = lit; flags = f; }
+    };
 
     virtual int add_pattern(
-        SnortConfig* sc, const uint8_t* pat, unsigned len,
-        bool noCase, bool negate, void* ID, int IID) = 0;
+        const uint8_t* pat, unsigned len, const PatternDescriptor&, void* user) = 0;
 
-    virtual int prep_patterns(
-    SnortConfig*, mpse_build_f, mpse_negate_f) = 0;
+    virtual int prep_patterns(SnortConfig*) = 0;
+
+    virtual void reuse_search() { }
 
     int search(
-    const unsigned char* T, int n, mpse_action_f,
-    void* data, int* current_state);
+        const uint8_t* T, int n, MpseMatch, void* context, int* current_state);
 
     virtual int search_all(
-    const unsigned char* T, int n, mpse_action_f,
-    void* data, int* current_state);
+        const uint8_t* T, int n, MpseMatch, void* context, int* current_state);
+
+    void search(MpseBatch&, MpseType);
+
+    virtual MpseRespType receive_responses(MpseBatch&, MpseType)
+    { return MPSE_RESP_COMPLETE_SUCCESS; }
+
+    static MpseRespType poll_responses(MpseBatch*&, MpseType);
 
     virtual void set_opt(int) { }
     virtual int print_info() { return 0; }
-    virtual int get_pattern_count() { return 0; }
+    virtual int get_pattern_count() const { return 0; }
 
     const char* get_method() { return method.c_str(); }
     void set_verbose(bool b = true) { verbose = b; }
@@ -84,40 +105,36 @@ public:
     const MpseApi* get_api() { return api; }
 
 protected:
-    Mpse(const char* method, bool use_gc);
+    Mpse(const char* method);
 
     virtual int _search(
-    const unsigned char* T, int n, mpse_action_f,
-    void* data, int* current_state) = 0;
+        const uint8_t* T, int n, MpseMatch, void* context, int* current_state) = 0;
+
+    virtual void _search(MpseBatch&, MpseType);
 
 private:
     std::string method;
-    bool inc_global_counter;
     int verbose;
     const MpseApi* api;
 };
 
-#ifdef PERF_PROFILING
-extern THREAD_LOCAL ProfileStats mpsePerfStats;
-#endif
-
 typedef void (* MpseOptFunc)(SnortConfig*);
 typedef void (* MpseExeFunc)();
 
-typedef Mpse* (* MpseNewFunc)(
-    SnortConfig* sc,
-    class Module*,
-    bool use_gc,
-    void (* user_free)(void*),
-    void (* tree_free)(void**),
-    void (* list_free)(void**));
-
+typedef Mpse* (* MpseNewFunc)(const SnortConfig*, class Module*, const MpseAgent*);
 typedef void (* MpseDelFunc)(Mpse*);
+
+typedef Mpse::MpseRespType (* MpsePollFunc)(MpseBatch*&, Mpse::MpseType);
+
+#define MPSE_BASE   0x00  // no optional features
+#define MPSE_REGEX  0x02  // supports regex patterns
+#define MPSE_ASYNC  0x04  // does asynchronous (lookaside) searches
+#define MPSE_MTBLD  0x08  // support multithreaded / parallel compilation
 
 struct MpseApi
 {
     BaseApi base;
-    bool trim;
+    uint32_t flags;
 
     MpseOptFunc activate;
     MpseOptFunc setup;
@@ -127,7 +144,8 @@ struct MpseApi
     MpseDelFunc dtor;
     MpseExeFunc init;
     MpseExeFunc print;
+    MpsePollFunc poll;
 };
-
+}
 #endif
 

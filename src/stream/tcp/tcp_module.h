@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,13 +21,9 @@
 #ifndef TCP_MODULE_H
 #define TCP_MODULE_H
 
-#include <string>
-#include <vector>
-
-#include "snort_types.h"
+#include "flow/session.h"
 #include "framework/module.h"
-#include "main/thread.h"
-#include "stream/stream.h"
+#include "stream/tcp/tcp_stream_config.h"
 
 #define GID_STREAM_TCP  129
 
@@ -51,53 +47,109 @@
 #define STREAM_TCP_DATA_AFTER_RST_RCVD            18
 #define STREAM_TCP_WINDOW_SLAM                    19
 #define STREAM_TCP_NO_3WHS                        20
+#define STREAM_TCP_MAX_EVENTS                     32
 
 extern const PegInfo tcp_pegs[];
+
+extern THREAD_LOCAL const snort::Trace* stream_tcp_trace;
+extern THREAD_LOCAL snort::ProfileStats s5TcpPerfStats;
+
+struct TcpStats
+{
+    SESSION_STATS;
+    PegCount instantiated;
+    PegCount setups;
+    PegCount restarts;
+    PegCount resyns;
+    PegCount discards;
+    PegCount discards_skipped;
+    PegCount invalid_seq_num;
+    PegCount invalid_ack;
+    PegCount no_flags_set;
+    PegCount events;
+    PegCount ignored;
+    PegCount no_pickups;
+    PegCount sessions_on_syn;
+    PegCount sessions_on_syn_ack;
+    PegCount sessions_on_3way;
+    PegCount sessions_on_data;
+    PegCount segs_queued;
+    PegCount segs_released;
+    PegCount segs_split;
+    PegCount segs_used;
+    PegCount rebuilt_packets;
+    PegCount rebuilt_buffers;
+    PegCount rebuilt_bytes;
+    PegCount overlaps;
+    PegCount gaps;
+    PegCount exceeded_max_segs;
+    PegCount exceeded_max_bytes;
+    PegCount payload_fully_trimmed;
+    PegCount internalEvents;
+    PegCount client_cleanups;
+    PegCount server_cleanups;
+    PegCount mem_in_use;
+    PegCount sessions_initializing;
+    PegCount sessions_established;
+    PegCount sessions_closing;
+    PegCount syns;
+    PegCount syn_acks;
+    PegCount resets;
+    PegCount fins;
+    PegCount meta_acks;
+    PegCount total_packets_held;
+    PegCount held_packet_rexmits;
+    PegCount held_packets_dropped;
+    PegCount held_packets_passed;
+    PegCount held_packet_timeouts;
+    PegCount held_packet_purges;
+    PegCount current_packets_held;
+    PegCount max_packets_held;
+    PegCount partial_flushes;
+    PegCount partial_flush_bytes;
+    PegCount inspector_fallbacks;
+    PegCount partial_fallbacks;
+};
+
 extern THREAD_LOCAL struct TcpStats tcpStats;
-extern THREAD_LOCAL ProfileStats s5TcpPerfStats;
-extern THREAD_LOCAL ProfileStats s5TcpNewSessPerfStats;
-extern THREAD_LOCAL ProfileStats s5TcpStatePerfStats;
-extern THREAD_LOCAL ProfileStats s5TcpDataPerfStats;
-extern THREAD_LOCAL ProfileStats s5TcpInsertPerfStats;
-extern THREAD_LOCAL ProfileStats s5TcpPAFPerfStats;
-extern THREAD_LOCAL ProfileStats s5TcpFlushPerfStats;
-extern THREAD_LOCAL ProfileStats s5TcpBuildPacketPerfStats;
-extern THREAD_LOCAL ProfileStats s5TcpProcessRebuiltPerfStats;
-extern THREAD_LOCAL ProfileStats streamSizePerfStats;
 
 //-------------------------------------------------------------------------
 // stream_tcp module
 //-------------------------------------------------------------------------
 
-#define MOD_NAME "stream_tcp"
-#define MOD_HELP "stream inspector for TCP flow tracking and stream normalization and reassembly"
+#define STREAM_TCP_MOD_NAME "stream_tcp"
+#define STREAM_TCP_MOD_HELP "stream inspector for TCP flow tracking and stream normalization and reassembly"
 
-struct SnortConfig;
-struct StreamTcpConfig;
-
-class StreamTcpModule : public Module
+class StreamTcpModule : public snort::Module
 {
 public:
     StreamTcpModule();
-    ~StreamTcpModule();
 
-    bool set(const char*, Value&, SnortConfig*) override;
-    bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
+    bool begin(const char*, int, snort::SnortConfig*) override;
+    bool end(const char*, int, snort::SnortConfig*) override;
 
-    const RuleMap* get_rules() const override;
+    const snort::RuleMap* get_rules() const override;
 
     unsigned get_gid() const override
     { return GID_STREAM_TCP; }
 
-    StreamTcpConfig* get_data();
-
-    ProfileStats* get_profile(unsigned, const char*&, const char*&) const override;
+    TcpStreamConfig* get_data();
+    snort::ProfileStats* get_profile(unsigned, const char*&, const char*&) const override;
     const PegInfo* get_pegs() const override;
     PegCount* get_counts() const override;
 
+    Usage get_usage() const override
+    { return INSPECT; }
+
+    bool is_bindable() const override
+    { return true; }
+
+    void set_trace(const snort::Trace*) const override;
+    const snort::TraceOption* get_trace_options() const override;
+
 private:
-    StreamTcpConfig* config;
+    TcpStreamConfig* config;
 };
 
 #endif

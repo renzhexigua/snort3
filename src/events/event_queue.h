@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,46 +20,29 @@
 #ifndef EVENT_QUEUE_H
 #define EVENT_QUEUE_H
 
-#include "main/snort_types.h"
 #include "actions/actions.h"
+#include "main/snort_types.h"
 
 #define SNORT_EVENTQ_PRIORITY    1
 #define SNORT_EVENTQ_CONTENT_LEN 2
 
-struct Packet;
-struct OptTreeNode;
-
 struct EventQueueConfig
 {
-    int max_events;
-    int log_events;
+    unsigned max_events;
+    unsigned log_events;
     int order;
     int process_all_events;
 };
 
 struct EventNode
 {
-    struct OptTreeNode* otn;
-    struct RuleTreeNode* rtn;
-    RuleType type;
+    const struct OptTreeNode* otn;
+    const struct RuleTreeNode* rtn;
+    snort::Actions::Type type;
 };
 
-EventQueueConfig* EventQueueConfigNew(void);
+EventQueueConfig* EventQueueConfigNew();
 void EventQueueConfigFree(EventQueueConfig*);
-
-void SnortEventqNew(EventQueueConfig*);
-void SnortEventqFree();
-
-void SnortEventqReset(void);
-void SnortEventqResetCounts(void);
-
-SO_PUBLIC int SnortEventqLog(struct Packet*);
-SO_PUBLIC int SnortEventqAdd(struct OptTreeNode*);
-SO_PUBLIC int SnortEventqAdd(uint32_t gid, uint32_t sid, RuleType = RULE_TYPE__NONE);
-SO_PUBLIC bool event_is_enabled(uint32_t gid, uint32_t sid);
-
-void SnortEventqPush(void);
-void SnortEventqPop(void);
 
 #endif
 

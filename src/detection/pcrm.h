@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,17 +16,21 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-/*
-** Marc Norton <mnorton@sourcefire.com>
-** Dan Roelker <droelker@sourcefire.com>
-**
-** Packet Classification-Rule Manager
-*/
+
+// pcrm.h is a heavily refactored version of work by:
+//
+// Marc Norton <mnorton@sourcefire.com>
+// Dan Roelker <droelker@sourcefire.com>
+
 #ifndef PCRM_H
 #define PCRM_H
 
-#include "protocols/packet.h"
+// Packet Classification-Rule Manager
+// rule groups by source and dest ports as well as any
+// (generic refers to any)
+
 #include "ports/port_group.h"
+#include "protocols/packet.h"
 
 #define ANYPORT (-1)
 
@@ -39,16 +43,12 @@ struct PORT_RULE_MAP
     int prmNumDstGroups;
     int prmNumSrcGroups;
 
-    PortGroup* prmSrcPort[MAX_PORTS];
-    PortGroup* prmDstPort[MAX_PORTS];
+    PortGroup* prmSrcPort[snort::MAX_PORTS];
+    PortGroup* prmDstPort[snort::MAX_PORTS];
     PortGroup* prmGeneric;
 };
 
 PORT_RULE_MAP* prmNewMap();
-
-int prmShowEventStats(PORT_RULE_MAP*);
-
-int prmFindGenericRuleGroup(PORT_RULE_MAP*, PortGroup**);
 
 int prmFindRuleGroupTcp(PORT_RULE_MAP*, int, int, PortGroup**, PortGroup**, PortGroup**);
 int prmFindRuleGroupUdp(PORT_RULE_MAP*, int, int, PortGroup**, PortGroup**, PortGroup**);

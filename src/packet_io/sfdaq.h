@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,86 +17,56 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-// @file    sfdaq.h
-// @author  Russ Combs <rcombs@sourcefire.com>
+// sfdaq.h author Michael Altizer <mialtize@cisco.com>
 
 #ifndef SFDAQ_H
 #define SFDAQ_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+#include <daq_common.h>
 
-#include <stdio.h>
+#include <ostream>
 
-extern "C" {
-#include <daq.h>
-}
 #include "main/snort_types.h"
 
-#define PKT_TIMEOUT  1000  // ms, worst daq resolution is 1 sec
+struct SFDAQConfig;
 
-struct SnortConfig;
 namespace snort
 {
-void DAQ_Load(const SnortConfig*);
-void DAQ_Unload(void);
+class SFDAQInstance;
 
-void DAQ_Init(const SnortConfig*);
-void DAQ_Term(void);
-void DAQ_Abort(void);
-
-int DAQ_PrintTypes(FILE*);
-const char* DAQ_GetType(void);
-
-int DAQ_Unprivileged(void);
-int DAQ_UnprivilegedStart(void);
-int DAQ_CanReplace(void);
-int DAQ_CanInject(void);
-int DAQ_CanWhitelist(void);
-int DAQ_RawInjection(void);
-
-SO_PUBLIC const char* DAQ_GetInterfaceSpec(void);
-SO_PUBLIC uint32_t DAQ_GetSnapLen(void);
-SO_PUBLIC int DAQ_GetBaseProtocol(void);
-int DAQ_SetFilter(const char*);
-
-// total stats are accumulated when daq is deleted
-int DAQ_New(const SnortConfig*, const char* intf);
-int DAQ_Delete(void);
-
-int DAQ_Start(void);
-int DAQ_WasStarted(void);
-int DAQ_Stop(void);
-
-// TBD some stuff may be inlined once encapsulations are straight
-// (but only where performance justifies exposing implementation!)
-int DAQ_Acquire(int max, DAQ_Analysis_Func_t, uint8_t* user);
-int DAQ_Inject(const DAQ_PktHdr_t*, int rev, const uint8_t* buf, uint32_t len);
-
-void* DAQ_GetHandle();
-int DAQ_BreakLoop(int error, void* handle = nullptr);
-
-#ifdef HAVE_DAQ_ACQUIRE_WITH_META
-void DAQ_Set_MetaCallback(DAQ_Meta_Func_t meta_callback);
-#endif
-SO_PUBLIC DAQ_Mode DAQ_GetInterfaceMode(const DAQ_PktHdr_t* h);
-
-int DAQ_ModifyFlow(const void* h, uint32_t id);
-
-#ifdef HAVE_DAQ_ADDRESS_SPACE_ID
-static inline uint16_t DAQ_GetAddressSpaceID(const DAQ_PktHdr_t* h)
+class SFDAQ
 {
-    return h->address_space_id;
-}
+public:
+    static void load(const SFDAQConfig*);
+    static void unload();
 
+    static void print_types(std::ostream&);
+    static const char* verdict_to_string(DAQ_Verdict verdict);
+    static bool init(const SFDAQConfig*, unsigned total_instances);
+    static void term();
+
+    static bool init_instance(SFDAQInstance*, const std::string& bpf_string);
+
+    static const char* get_input_spec(const SFDAQConfig*, unsigned instance_id);
+    static const char* default_type();
+    SO_PUBLIC static const DAQ_Stats_t* get_stats();
+
+    static bool can_inject();
+    static bool can_inject_raw();
+    static bool can_replace();
+    static bool can_run_unprivileged();
+    SO_PUBLIC static bool get_tunnel_bypass(uint16_t proto);
+
+    // FIXIT-M X Temporary thread-local instance helpers to be removed when no longer needed
+    static void set_local_instance(SFDAQInstance*);
+
+    SO_PUBLIC static SFDAQInstance* get_local_instance();
+    SO_PUBLIC static const char* get_input_spec();
+    SO_PUBLIC static int get_base_protocol();
+
+    static int inject(DAQ_Msg_h, int rev, const uint8_t* buf, uint32_t len);
+    SO_PUBLIC static bool forwarding_packet(const DAQ_PktHdr_t*);
+};
+}
 #endif
-
-// returns total stats if no daq else current stats
-// returns statically allocated stats - don't free
-const DAQ_Stats_t* DAQ_GetStats(void);
-}
-using namespace snort;
-
-#endif // SFDAQ_H
 

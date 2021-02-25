@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "conversion_state.h"
+#include "helpers/util_binder.h"
 #include "helpers/converter.h"
 #include "helpers/s2l_util.h"
 
@@ -31,41 +32,89 @@ namespace
 class Gtp : public ConversionState
 {
 public:
-    Gtp(Converter& c) : ConversionState(c) { }
-    virtual ~Gtp() { }
-    virtual bool convert(std::istringstream& data_stream);
+    Gtp(Converter& c) : ConversionState(c)
+    { converted_args = false; }
+
+    ~Gtp() override;
+    bool convert(std::istringstream& data_stream) override;
+
+private:
+    bool converted_args;
 };
 } // namespace
 
+Gtp::~Gtp()
+{
+    if (converted_args)
+        return;
+
+    auto& bind = cv.make_binder();
+    bind.set_when_proto("udp");
+    bind.set_when_role("server");
+    bind.add_when_port("2123");
+    bind.add_when_port("3386");
+    bind.set_use_type("gtp_inspect");
+
+    table_api.open_table("gtp_inspect");
+    table_api.close_table();
+}
+
 bool Gtp::convert(std::istringstream& data_stream)
 {
-    std::string args;
+    std::string keyword;
     bool retval = true;
+    bool ports_set = false;
+    auto& bind = cv.make_binder();
 
-    table_api.open_table("udp");
+    bind.set_when_proto("udp");
+    bind.set_use_type("gtp_inspect");
 
-    while (util::get_string(data_stream, args, ",;"))
+    converted_args = true;
+
+    table_api.open_table("gtp_inspect");
+
+    // parse the file configuration
+    while (data_stream >> keyword)
     {
-        std::string keyword;
         bool tmpval = true;
-        std::istringstream arg_stream(args);
 
-        if (!(arg_stream >> keyword))
+        if (keyword == "ports")
         {
-            tmpval = false;
+            table_api.add_diff_option_comment("ports", "bindings");
+
+            if ((data_stream >> keyword) && keyword == "{")
+            {
+                while (data_stream >> keyword && keyword != "}")
+                {
+                    ports_set = true;
+                    bind.set_when_role("server");
+                    bind.add_when_port(keyword);
+                }
+            }
+            else
+            {
+                data_api.failed_conversion(data_stream, "ports <bracketed_port_list>");
+                retval = false;
+            }
         }
-        else if (!keyword.compare("ports"))
-        {
-            table_api.add_diff_option_comment("ports", "gtp_ports");
-            tmpval = parse_curly_bracket_list("gtp_ports", arg_stream);
-        }
+
         else
         {
             tmpval = false;
         }
 
-        if (retval && !tmpval)
+        if (!tmpval)
+        {
+            data_api.failed_conversion(data_stream, keyword);
             retval = false;
+        }
+    }
+
+    if (!ports_set)
+    {
+        bind.set_when_role("server");
+        bind.add_when_port("2123");
+        bind.add_when_port("3386");
     }
 
     table_api.close_table();
@@ -89,4 +138,3 @@ static const ConvertMap preprocessor_gtp =
 
 const ConvertMap* gtp_map = &preprocessor_gtp;
 } // namespace preprocessors
-

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class Sip : public ConversionState
 {
 public:
     Sip(Converter& c) : ConversionState(c) { }
-    virtual ~Sip() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 
 };
 } // namespace
@@ -42,14 +41,11 @@ bool Sip::convert(std::istringstream& data_stream)
 {
     std::string keyword;
     bool retval = true;
-    bool ports_set = false;
-    Binder bind(table_api);
+    bool default_binding = true;
+    auto& bind = cv.make_binder();
 
-    bind.set_when_proto("udp");
     bind.set_use_type("sip");
-
     table_api.open_table("sip");
-
 
     // parse the file configuration
     while (util::get_string(data_stream, keyword, ",;"))
@@ -57,88 +53,92 @@ bool Sip::convert(std::istringstream& data_stream)
         bool tmpval = true;
         std::istringstream arg_stream(keyword);
 
-        // should be gauranteed to happen.  Checking for error just cause
+        // should be guaranteed to happen.  Checking for error just cause
         if (!(arg_stream >> keyword))
             tmpval = false;
 
-        else if (!keyword.compare("disabled"))
+        else if (keyword == "disabled")
             table_api.add_deleted_comment("disabled");
 
-        else if (!keyword.compare("ignore_call_channel"))
+        else if (keyword == "ignore_call_channel")
         {
             tmpval = table_api.add_option("ignore_call_channel", true);
         }
 
-        else if (!keyword.compare("methods"))
+        else if (keyword == "methods")
             tmpval = parse_curly_bracket_list("methods", arg_stream);
 
-        else if (!keyword.compare("max_call_id_len"))
+        else if (keyword == "max_call_id_len")
         {
             tmpval = parse_int_option("max_call_id_len", arg_stream, false);
         }
 
-        else if (!keyword.compare("max_contact_len"))
+        else if (keyword == "max_contact_len")
         {
             tmpval = parse_int_option("max_contact_len", arg_stream, false);
         }
 
-        else if (!keyword.compare("max_content_len"))
+        else if (keyword == "max_content_len")
         {
             tmpval = parse_int_option("max_content_len", arg_stream, false);
         }
 
-        else if (!keyword.compare("max_dialogs"))
+        else if (keyword == "max_dialogs")
         {
             tmpval = parse_int_option("max_dialogs", arg_stream, false);
         }
 
-        else if (!keyword.compare("max_from_len"))
+        else if (keyword == "max_from_len")
         {
             tmpval = parse_int_option("max_from_len", arg_stream, false);
         }
 
-        else if (!keyword.compare("max_requestName_len"))
+        else if (keyword == "max_requestName_len")
         {
             tmpval = parse_int_option("max_requestName_len", arg_stream, false);
         }
 
-        else if (!keyword.compare("max_sessions"))
+        else if (keyword == "max_sessions")
         {
-            tmpval = parse_int_option("max_sessions", arg_stream, false);
+            table_api.add_deleted_comment("max_sessions");
         }
 
-        else if (!keyword.compare("max_to_len"))
+        else if (keyword == "max_to_len")
         {
             tmpval = parse_int_option("max_to_len", arg_stream, false);
         }
 
-        else if (!keyword.compare("max_uri_len"))
+        else if (keyword == "max_uri_len")
         {
             tmpval = parse_int_option("max_uri_len", arg_stream, false);
         }
 
-        else if (!keyword.compare("max_via_len"))
+        else if (keyword == "max_via_len")
         {
             tmpval = parse_int_option("max_via_len", arg_stream, false);
         }
 
-        else if (!keyword.compare("ports"))
+        else if (keyword == "ports")
         {
-            std::string tmp = "";
-            table_api.add_diff_option_comment("ports", "bindings");
-
-            if ((arg_stream >> keyword) && !keyword.compare("{"))
-            {
-                while (arg_stream >> keyword && keyword.compare("}"))
-                {
-                    ports_set = true;
-                    bind.add_when_port(keyword);
-                }
-            }
+            if (!cv.get_bind_port())
+                default_binding = parse_bracketed_unsupported_list("ports", arg_stream);
             else
             {
-                data_api.failed_conversion(arg_stream, "ports <bracketed_port_list>");
-                retval = false;
+                table_api.add_diff_option_comment("ports", "bindings");
+
+                if ((arg_stream >> keyword) && keyword == "{")
+                {
+                    while (arg_stream >> keyword && keyword != "}")
+                    {
+                        default_binding = false;
+                        bind.add_when_port(keyword);
+                    }
+                }
+                else
+                {
+                    data_api.failed_conversion(arg_stream, "ports <bracketed_port_list>");
+                    retval = false;
+                }
             }
         }
 
@@ -154,12 +154,8 @@ bool Sip::convert(std::istringstream& data_stream)
         }
     }
 
-    if (!ports_set)
-    {
-        bind.add_when_port("5060");
-        bind.add_when_port("5061");
-        bind.add_when_port("5600");
-    }
+    if (default_binding)
+        bind.set_when_service("sip");
 
     return retval;
 }

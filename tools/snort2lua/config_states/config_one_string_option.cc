@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -35,17 +35,18 @@ public:
     ConfigStringOption(Converter& c,
         const std::string* snort_opt,
         const std::string* table,
-        const std::string* lua_opt) :
+        const std::string* lua_opt,
+        bool string_array) :
         ConversionState(c),
         snort_option(snort_opt),
         lua_table(table),
-        lua_option(lua_opt)
+        lua_option(lua_opt),
+        use_string_array(string_array)
     {
     }
 
-    virtual ~ConfigStringOption() { }
 
-    virtual bool convert(std::istringstream& stream)
+    bool convert(std::istringstream& stream) override
     {
         if ((snort_option == nullptr) ||
             (snort_option->empty()) ||
@@ -66,15 +67,29 @@ public:
 
         table_api.open_table(*lua_table);
 
-        if ((lua_option != nullptr) && snort_option->compare(*lua_option))
+        if ((lua_option != nullptr) && *snort_option != *lua_option)
         {
             table_api.add_diff_option_comment("config " + *snort_option +
                 ":", *lua_option);
-            table_api.add_option(*lua_option, arg_s);
+            if (use_string_array)
+            {
+                table_api.open_table(*lua_option);
+                table_api.add_option(arg_s);
+                table_api.close_table();
+            }
+            else
+                table_api.add_option(*lua_option, arg_s);
         }
         else
         {
-            table_api.add_option(*snort_option, arg_s);
+            if (use_string_array)
+            {
+                table_api.open_table(*snort_option);
+                table_api.add_option(arg_s);
+                table_api.close_table();
+            }
+            else
+                table_api.add_option(*snort_option, arg_s);
         }
 
         table_api.close_table();
@@ -86,17 +101,16 @@ private:
     const std::string* snort_option;
     const std::string* lua_table;
     const std::string* lua_option;
+    bool use_string_array;
 };
 
 template<const std::string* snort_option,
 const std::string* lua_table,
-const std::string* lua_option = nullptr>
+const std::string* lua_option = nullptr,
+bool use_string_array = false>
 static ConversionState* config_string_ctor(Converter& c)
 {
-    return new ConfigStringOption(c,
-        snort_option,
-        lua_table,
-        lua_option);
+    return new ConfigStringOption(c, snort_option, lua_table, lua_option, use_string_array);
 }
 } // namespace
 
@@ -105,8 +119,6 @@ static ConversionState* config_string_ctor(Converter& c)
  *************************************************/
 
 static const std::string alerts = "alerts";
-static const std::string daq = "daq";
-static const std::string ips = "ips";
 static const std::string mode = "mode";
 static const std::string packets = "packets";
 static const std::string process = "process";
@@ -140,58 +152,19 @@ static const ConvertMap chroot_api =
 const ConvertMap* chroot_map = &chroot_api;
 
 /*************************************************
- *********************  daq  *********************
- *************************************************/
-
-static const std::string type = "type";
-static const ConvertMap daq_api =
-{
-    daq,
-    config_string_ctor<& daq, & daq, & type>,
-};
-
-const ConvertMap* daq_map = &daq_api;
-
-/*************************************************
  *******************  daq_dir  *******************
  *************************************************/
 
+static const std::string daq = "daq";
 static const std::string daq_dir = "daq_dir";
-static const std::string dir = "dir";
+static const std::string module_dirs = "module_dirs";
 static const ConvertMap daq_dir_api =
 {
     daq_dir,
-    config_string_ctor<& daq_dir, & daq, & dir>,
+    config_string_ctor<& daq_dir, & daq, & module_dirs, true>,
 };
 
 const ConvertMap* daq_dir_map = &daq_dir_api;
-
-/*************************************************
- *******************  daq_mode  *******************
- *************************************************/
-
-static const std::string daq_mode = "daq_mode";
-static const ConvertMap daq_mode_api =
-{
-    daq_mode,
-    config_string_ctor<& daq_mode, & daq, & mode>,
-};
-
-const ConvertMap* daq_mode_map = &daq_mode_api;
-
-/*************************************************
- *******************  daq_var  *******************
- *************************************************/
-
-static const std::string daq_var = "daq_var";
-static const std::string var = "var";
-static const ConvertMap daq_var_api =
-{
-    daq_var,
-    config_string_ctor<& daq_var, & daq, & var>,
-};
-
-const ConvertMap* daq_var_map = &daq_var_api;
 
 /*************************************************
  *******************  logdir  ********************
@@ -257,18 +230,5 @@ static const ConvertMap set_uid_api =
 };
 
 const ConvertMap* set_uid_map = &set_uid_api;
-
-/**************************************************
- ********************* umask  *********************
- **************************************************/
-
-static const std::string umask = "umask";
-static const ConvertMap umask_api =
-{
-    umask,
-    config_string_ctor<& umask, & process>,
-};
-
-const ConvertMap* umask_map = &umask_api;
 } // namespace config
 

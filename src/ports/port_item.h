@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,15 +22,17 @@
 #ifndef PORT_ITEM_H
 #define PORT_ITEM_H
 
-#include "framework/bits.h"
-#include "utils/sflsq.h"
+#include <cstdint>
 
 #define SFPO_MAX_LPORTS 500
 #define SFPO_MAX_PORTS 65536
 
 //-------------------------------------------------------------------------
 // Port Object Item supports
-// port, lowport:highport (inclusive), portlist
+// port, lowport:highport (inclusive)
+//
+// so it indicates a single port, a consecutive range of ports, or the any
+// port.  can also be negated.
 //-------------------------------------------------------------------------
 
 struct PortObjectItem
@@ -45,9 +47,6 @@ struct PortObjectItem
 
     uint16_t hport;   /* hi port */
     uint16_t lport;   /* lo port */
-
-    uint16_t cur_port; /* internal - first/next */
-    uint16_t tmp;
 };
 
 PortObjectItem* PortObjectItemNew();

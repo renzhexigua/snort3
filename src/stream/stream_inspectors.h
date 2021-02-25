@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,7 +20,7 @@
 #ifndef STREAM_INSPECTORS_H
 #define STREAM_INSPECTORS_H
 
-extern const struct BaseApi* stream_inspectors[];
+void load_stream_inspectors();
 
 #endif
 

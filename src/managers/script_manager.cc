@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,20 +17,28 @@
 //--------------------------------------------------------------------------
 // script_manager.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "script_manager.h"
 
-#include <string.h>
+#include <sys/stat.h>
 
-#include <string>
-#include <vector>
-#include <luajit-2.0/lua.hpp>
-
-#include "ips_manager.h"
 #include "framework/ips_option.h"
 #include "framework/logger.h"
-#include "managers/plugin_manager.h"
-#include "parser/parser.h"
+#include "framework/lua_api.h"
 #include "helpers/directory.h"
+#include "log/messages.h"
+#include "lua/lua.h"
+#include "lua/lua_util.h"
+
+#ifdef PIGLET
+#include "piglet/piglet_manager.h"
+#endif
+
+using namespace snort;
+using namespace std;
 
 // FIXIT-P this approach results in N * K lua states where
 // N ::= number of instances of script + args and
@@ -40,32 +48,11 @@
 // ultimately should look into changing detection engine to
 // keep just one copy of rule option + args
 
-using namespace std;
-#define script_ext ".lua"
+#define script_pattern "*.lua"
 
 //-------------------------------------------------------------------------
 // lua api stuff
 //-------------------------------------------------------------------------
-
-class LuaApi
-{
-protected:
-    LuaApi(string& t, string& s, string& c)
-    {
-        type = t;
-        name = s;
-        chunk = c;
-    }
-
-public:
-    virtual ~LuaApi() { }
-    virtual const BaseApi* get_base() const = 0;
-
-public:
-    string type;
-    string name;
-    string chunk;
-};
 
 static vector<const BaseApi*> base_api;
 static vector<LuaApi*> lua_api;
@@ -77,16 +64,19 @@ static vector<LuaApi*> lua_api;
 class IpsLuaApi : public LuaApi
 {
 public:
-    IpsLuaApi(string& t, string& n, string& c, unsigned v);
+    IpsLuaApi(string& n, string& c, unsigned v);
 
-    const BaseApi* get_base() const
+    const BaseApi* get_base() const override
     { return &api.base; }
 
 public:
     IpsApi api;
+    static const char* type;
 };
 
-IpsLuaApi::IpsLuaApi(string& t, string& s, string& c, unsigned v) : LuaApi(t, s, c)
+const char* IpsLuaApi::type = "ips_option";
+
+IpsLuaApi::IpsLuaApi(string& s, string& c, unsigned v) : LuaApi(s, c)
 {
     extern const IpsApi* ips_luajit;
     api = *ips_luajit;
@@ -101,16 +91,19 @@ IpsLuaApi::IpsLuaApi(string& t, string& s, string& c, unsigned v) : LuaApi(t, s,
 class LogLuaApi : public LuaApi
 {
 public:
-    LogLuaApi(string& t, string& n, string& c, unsigned v);
+    LogLuaApi(string& n, string& c, unsigned v);
 
-    const BaseApi* get_base() const
+    const BaseApi* get_base() const override
     { return &api.base; }
 
 public:
     LogApi api;
+    static const char* type;
 };
 
-LogLuaApi::LogLuaApi(string& t, string& s, string& c, unsigned v) : LuaApi(t, s, c)
+const char* LogLuaApi::type = "logger";
+
+LogLuaApi::LogLuaApi(string& s, string& c, unsigned v) : LuaApi(s, c)
 {
     extern const LogApi* log_luajit;
     api = *log_luajit;
@@ -122,6 +115,7 @@ LogLuaApi::LogLuaApi(string& t, string& s, string& c, unsigned v) : LuaApi(t, s,
 // lua foo
 //-------------------------------------------------------------------------
 
+// could be a template
 static bool get_field(lua_State* L, const char* key, int& value)
 {
     lua_pushstring(L, key);
@@ -158,17 +152,22 @@ static bool get_field(lua_State* L, const char* key, string& value)
     return true;
 }
 
+// FIXIT-L move to helpers/lua
 static int dump(lua_State*, const void* p, size_t sz, void* ud)
 {
-    string* s = (string*)ud;
-    s->append((char*)p, sz);
+    string* s = static_cast<string*>(ud);
+    s->append(static_cast<const char*>(p), sz);
     return 0;
 }
 
+// FIXIT-L use Lua::State to wrap lua_State
 static void load_script(const char* f)
 {
-    lua_State* L = luaL_newstate();
-    luaL_openlibs(L);
+    Lua::State lua;
+    auto L = lua.get_ptr();
+
+    // Set this now so that dependent dofile()s can work correctly
+    Lua::set_script_dir(L, SCRIPT_DIR_VARNAME, f);
 
     if ( luaL_loadfile(L, f) )
     {
@@ -203,12 +202,6 @@ static void load_script(const char* f)
         return;
     }
 
-    if ( type != "ips_option" && type != "logger" )
-    {
-        ParseError("unknown plugin type in %s = '%s'", f, type.c_str());
-        return;
-    }
-
     if ( !get_field(L, "name", name) )
     {
         ParseError("%s::%s needs name", f, type.c_str());
@@ -226,38 +219,65 @@ static void load_script(const char* f)
         return;
     }
 
-    if ( type == "ips_option" )
-        lua_api.push_back(new IpsLuaApi(type, name, chunk, ver));
-    else
-        lua_api.push_back(new LogLuaApi(type, name, chunk, ver));
+    if ( type == IpsLuaApi::type )
+        lua_api.emplace_back(new IpsLuaApi(name, chunk, ver));
 
-    lua_close(L);
+    else if ( type == LogLuaApi::type )
+        lua_api.emplace_back(new LogLuaApi(name, chunk, ver));
+
+#ifdef PIGLET
+    else if ( type == "piglet" )
+        Piglet::Manager::add_chunk(f, name, chunk);
+#endif
+
+    else
+    {
+        ParseError("unknown plugin type in %s = '%s'", f, type.c_str());
+        return;
+    }
 }
 
 //-------------------------------------------------------------------------
 // public methods
 //-------------------------------------------------------------------------
 
-void ScriptManager::load_scripts(const std::string& paths)
+void ScriptManager::load_scripts(const std::vector<std::string>& paths)
 {
+    struct stat s;
+
     if ( paths.empty() )
         return;
 
-    const char* t = paths.c_str();
-    vector<char> buf(t, t+strlen(t)+1);
-    char* last, * s;
-
-    s = strtok_r(&buf[0], ":", &last);
-
-    while ( s )
+    for ( const auto& path : paths )
     {
-        Directory d(s);
-        const char* f;
+        size_t pos = path.find_first_not_of(':');
 
-        while ( (f = d.next(script_ext)) )
-            load_script(f);
+        while ( pos != std::string::npos )
+        {
+            size_t end_pos = path.find_first_of(':', pos);
 
-        s = strtok_r(nullptr, ":", &last);
+            std::string d = path.substr(
+                pos, (end_pos == std::string::npos) ? end_pos : end_pos - pos);
+
+            pos = ( end_pos == std::string::npos ) ? end_pos : end_pos + 1;
+
+            if ( d.empty() )
+                continue;
+
+            if ( stat(d.c_str(), &s) )
+                continue;
+
+            if ( s.st_mode & S_IFDIR )
+            {
+                Directory dir(d.c_str(), script_pattern);
+                const char* f;
+                while ( (f = dir.next()) )
+                    load_script(f);
+            }
+
+            else
+                load_script(d.c_str());
+        }
     }
 }
 
@@ -266,9 +286,9 @@ const BaseApi** ScriptManager::get_plugins()
     base_api.clear();
 
     for ( auto p : lua_api )
-        base_api.push_back(p->get_base());
+        base_api.emplace_back(p->get_base());
 
-    base_api.push_back(nullptr);
+    base_api.emplace_back(nullptr);
 
     return (const BaseApi**)&base_api[0];
 }

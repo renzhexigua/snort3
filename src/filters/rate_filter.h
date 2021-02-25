@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2009-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,36 +17,27 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+// rate_filter.h author Dilbagh Chahal <dchahal@sourcefire.com>
+
 #ifndef RATE_FILTER_H
 #define RATE_FILTER_H
 
-/* @file  rate_filter.h
- * @brief rate filter interface for Snort
- * @ingroup rate_filter
- * @author Dilbagh Chahal
-*/
-
-/* @ingroup rate_filter
- * @{
- */
-
-struct RateFilterConfig;
-struct SnortConfig;
-struct tSFRFConfigNode;
+// rate filter interface for Snort
+namespace snort
+{
 struct Packet;
+struct SnortConfig;
+}
+struct RateFilterConfig;
+struct tSFRFConfigNode;
 struct OptTreeNode;
 
-RateFilterConfig* RateFilter_ConfigNew(void);
+RateFilterConfig* RateFilter_ConfigNew();
 void RateFilter_ConfigFree(RateFilterConfig*);
-void RateFilter_Cleanup(void);
+void RateFilter_Cleanup();
 
-struct SnortConfig;
-int RateFilter_Create(SnortConfig* sc, RateFilterConfig*, tSFRFConfigNode*);
-void RateFilter_PrintConfig(RateFilterConfig*);
+int RateFilter_Create(snort::SnortConfig* sc, RateFilterConfig*, tSFRFConfigNode*);
+int RateFilter_Test(const OptTreeNode*, snort::Packet*);
 
-int RateFilter_Test(OptTreeNode*, Packet*);
-void RateFilter_ResetActive(void);
-
-/*@}*/
 #endif
 

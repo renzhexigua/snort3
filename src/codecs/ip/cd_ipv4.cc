@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,43 +22,45 @@
 #include "config.h"
 #endif
 
-#include <arpa/inet.h>
-#include <array>
+#include <daq.h>
+#include <daq_dlt.h>
 
-#include "utils/dnet_header.h"
-#include "main/snort_config.h"
+#include <random>
 
-#include "protocols/tcp.h"
-#include "protocols/ipv4.h"
-#include "protocols/packet_manager.h"
-
-#include "utils/stats.h"
-#include "packet_io/active.h"
-#include "codecs/ip/checksum.h"
-#include "main/thread.h"
-#include "stream/stream_api.h"
 #include "codecs/codec_module.h"
-#include "protocols/ip.h"
-#include "protocols/ipv4_options.h"
-#include "log/text_log.h"
+#include "framework/codec.h"
 #include "log/log_text.h"
-#include "sfip/sf_ipvar.h"
+#include "log/messages.h"
+#include "main/snort_config.h"
 #include "parser/parse_ip.h"
+#include "protocols/ip.h"
+#include "protocols/ipv4.h"
+#include "protocols/ipv4_options.h"
+#include "protocols/tcp.h"
+#include "sfip/sf_ipvar.h"
+#include "utils/util.h"
+
+#include "checksum.h"
+
+using namespace snort;
 
 #define CD_IPV4_NAME "ipv4"
-#define CD_IPV4_HELP "support for Internet protocol v4"
+#define CD_IPV4_HELP_STR "support for Internet protocol v4"
+#define CD_IPV4_HELP ADD_DLT(CD_IPV4_HELP_STR, DLT_IPV4)
 
 namespace
 {
 const PegInfo pegs[]
 {
-    { "bad checksum", "nonzero ip checksums" },
-    { nullptr, nullptr }
+    { CountType::SUM, "bad_checksum", "nonzero ip checksums" },
+    { CountType::SUM, "checksum_bypassed", "checksum calculations bypassed" },
+    { CountType::END, nullptr, nullptr }
 };
 
 struct Stats
 {
     PegCount bad_cksum;
+    PegCount cksum_bypassed;
 };
 
 static THREAD_LOCAL Stats stats;
@@ -66,34 +68,34 @@ static sfip_var_t* MulticastReservedIp = nullptr;
 
 static const RuleMap ipv4_rules[] =
 {
-    { DECODE_NOT_IPV4_DGRAM, "Not IPv4 datagram" },
-    { DECODE_IPV4_INVALID_HEADER_LEN, "hlen < minimum" },
-    { DECODE_IPV4_DGRAM_LT_IPHDR, "IP dgm len < IP Hdr len" },
-    { DECODE_IPV4OPT_BADLEN, "Ipv4 Options found with bad lengths" },
-    { DECODE_IPV4OPT_TRUNCATED, "Truncated Ipv4 Options" },
-    { DECODE_IPV4_DGRAM_GT_CAPLEN, "IP dgm len > captured len" },
-    { DECODE_ZERO_TTL, "IPV4 packet with zero TTL" },
-    { DECODE_BAD_FRAGBITS, "IPV4 packet with bad frag bits (both MF and DF set)" },
-    { DECODE_IP4_LEN_OFFSET, "IPV4 packet frag offset + length exceed maximum" },
-    { DECODE_IP4_SRC_THIS_NET, "IPV4 packet from 'current net' source address" },
-    { DECODE_IP4_DST_THIS_NET, "IPV4 packet to 'current net' dest address" },
-    { DECODE_IP4_SRC_MULTICAST, "IPV4 packet from multicast source address" },
-    { DECODE_IP4_SRC_RESERVED, "IPV4 packet from reserved source address" },
-    { DECODE_IP4_DST_RESERVED, "IPV4 packet to reserved dest address" },
-    { DECODE_IP4_SRC_BROADCAST, "IPV4 packet from broadcast source address" },
-    { DECODE_IP4_DST_BROADCAST, "IPV4 packet to broadcast dest address" },
-    { DECODE_IP4_MIN_TTL, "IPV4 packet below TTL limit" },
-    { DECODE_IP4_DF_OFFSET, "IPV4 packet both DF and offset set" },
-    { DECODE_IP_RESERVED_FRAG_BIT, "BAD-TRAFFIC IP reserved bit set" },
-    { DECODE_IP_OPTION_SET, "MISC IP option set" },
-    { DECODE_IP4_HDR_TRUNC, "truncated IP4 header" },
+    { DECODE_NOT_IPV4_DGRAM, "not IPv4 datagram" },
+    { DECODE_IPV4_INVALID_HEADER_LEN, "IPv4 header length < minimum" },
+    { DECODE_IPV4_DGRAM_LT_IPHDR, "IPv4 datagram length < header field" },
+    { DECODE_IPV4OPT_BADLEN, "IPv4 options found with bad lengths" },
+    { DECODE_IPV4OPT_TRUNCATED, "truncated IPv4 options" },
+    { DECODE_IPV4_DGRAM_GT_CAPLEN, "IPv4 datagram length > captured length" },
+    { DECODE_ZERO_TTL, "IPv4 packet with zero TTL" },
+    { DECODE_BAD_FRAGBITS, "IPv4 packet with bad frag bits (both MF and DF set)" },
+    { DECODE_IP4_LEN_OFFSET, "IPv4 packet frag offset + length exceed maximum" },
+    { DECODE_IP4_SRC_THIS_NET, "IPv4 packet from 'current net' source address" },
+    { DECODE_IP4_DST_THIS_NET, "IPv4 packet to 'current net' dest address" },
+    { DECODE_IP4_SRC_MULTICAST, "IPv4 packet from multicast source address" },
+    { DECODE_IP4_SRC_RESERVED, "IPv4 packet from reserved source address" },
+    { DECODE_IP4_DST_RESERVED, "IPv4 packet to reserved dest address" },
+    { DECODE_IP4_SRC_BROADCAST, "IPv4 packet from broadcast source address" },
+    { DECODE_IP4_DST_BROADCAST, "IPv4 packet to broadcast dest address" },
+    { DECODE_IP4_MIN_TTL, "IPv4 packet below TTL limit" },
+    { DECODE_IP4_DF_OFFSET, "IPv4 packet both DF and offset set" },
+    { DECODE_IP_RESERVED_FRAG_BIT, "IPv4 reserved bit set" },
+    { DECODE_IP_OPTION_SET, "IPv4 option set" },
+    { DECODE_IP4_HDR_TRUNC, "truncated IPv4 header" },
     { 0, nullptr }
 };
 
-class Ipv4Module : public CodecModule
+class Ipv4Module : public BaseCodecModule
 {
 public:
-    Ipv4Module() : CodecModule(CD_IPV4_NAME, CD_IPV4_HELP) { }
+    Ipv4Module() : BaseCodecModule(CD_IPV4_NAME, CD_IPV4_HELP) { }
 
     const RuleMap* get_rules() const override
     { return ipv4_rules; }
@@ -109,35 +111,51 @@ class Ipv4Codec : public Codec
 {
 public:
     Ipv4Codec() : Codec(CD_IPV4_NAME) { }
-    ~Ipv4Codec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_data_link_type(std::vector<int>&) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
     void log(TextLog* const, const uint8_t* pkt, const uint16_t len) override;
     bool encode(const uint8_t* const raw_in, const uint16_t raw_len,
-        EncState&, Buffer&) override;
+        EncState&, Buffer&, Flow*) override;
     void update(const ip::IpApi&, const EncodeFlags, uint8_t* raw_pkt,
         uint16_t lyr_len, uint32_t& updated_len) override;
     void format(bool reverse, uint8_t* raw_pkt, DecodeData& snort) override;
 
 private:
-    void IP4AddrTests(const IP4Hdr*, const CodecData&, DecodeData&);
-    void IPMiscTests(const IP4Hdr* const ip4h, const CodecData& codec, uint16_t len);
+    bool valid_checksum_from_daq(const RawData&);
+    void IP4AddrTests(const ip::IP4Hdr*, const CodecData&, DecodeData&);
+    void IPMiscTests(const ip::IP4Hdr* const ip4h, const CodecData& codec, uint16_t len);
     void DecodeIPOptions(const uint8_t* start, uint8_t& o_len, CodecData& data);
-};
-
-const uint16_t IP_ID_COUNT = 8192;
-static THREAD_LOCAL rand_t* s_rand = 0;
-static THREAD_LOCAL uint16_t s_id_index = 0;
-static THREAD_LOCAL std::array<uint16_t, IP_ID_COUNT> s_id_pool {
-    { 0 }
 };
 }  // namespace
 
-void Ipv4Codec::get_protocol_ids(std::vector<uint16_t>& v)
+inline bool Ipv4Codec::valid_checksum_from_daq(const RawData& raw)
 {
-    v.push_back(ETHERTYPE_IPV4);
-    v.push_back(IPPROTO_ID_IPIP);
+    const DAQ_PktDecodeData_t* pdd =
+        (const DAQ_PktDecodeData_t*) daq_msg_get_meta(raw.daq_msg, DAQ_PKT_META_DECODE_DATA);
+    if (!pdd || !pdd->flags.bits.l3_checksum || !pdd->flags.bits.ipv4 || !pdd->flags.bits.l3)
+        return false;
+    // Sanity check to make sure we're talking about the same thing if offset is available
+    if (pdd->l3_offset != DAQ_PKT_DECODE_OFFSET_INVALID)
+    {
+        const uint8_t* data = daq_msg_get_data(raw.daq_msg);
+        if (raw.data - data != pdd->l3_offset)
+            return false;
+    }
+    stats.cksum_bypassed++;
+    return true;
+}
+
+void Ipv4Codec::get_data_link_type(std::vector<int>& v)
+{
+    v.emplace_back(DLT_IPV4);
+}
+
+void Ipv4Codec::get_protocol_ids(std::vector<ProtocolId>& v)
+{
+    v.emplace_back(ProtocolId::ETHERTYPE_IPV4);
+    v.emplace_back(ProtocolId::IPIP);
 }
 
 bool Ipv4Codec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
@@ -145,7 +163,6 @@ bool Ipv4Codec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
     uint32_t ip_len; /* length from the start of the ip hdr to the pkt end */
     uint16_t hlen;  /* ip header length */
 
-    /* do a little validation */
     if (raw.len < ip::IP4_HEADER_LEN)
     {
         if ((codec.codec_flags & CODEC_UNSURE_ENCAP) == 0)
@@ -153,7 +170,7 @@ bool Ipv4Codec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
         return false;
     }
 
-    if ( snort_conf->hit_ip_maxlayers(codec.ip_layer_cnt) )
+    if ( codec.conf->hit_ip_maxlayers(codec.ip_layer_cnt) )
     {
         codec_event(codec, DECODE_IP_MULTIPLE_ENCAPSULATION);
         return false;
@@ -161,7 +178,7 @@ bool Ipv4Codec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
 
     ++codec.ip_layer_cnt;
     /* lay the IP struct over the raw data */
-    const IP4Hdr* const iph = reinterpret_cast<const IP4Hdr*>(raw.data);
+    const ip::IP4Hdr* const iph = reinterpret_cast<const ip::IP4Hdr*>(raw.data);
 
     /*
      * with datalink DLT_RAW it's impossible to differ ARP datagrams from IP.
@@ -174,80 +191,76 @@ bool Ipv4Codec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
         return false;
     }
 
-    /* get the IP datagram length */
     ip_len = iph->len();
     hlen = iph->hlen();
 
-    /* header length sanity check */
     if (hlen < ip::IP4_HEADER_LEN)
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_DECODE,
-            "Bogus IP header length of %i bytes\n", hlen); );
-
         codec_event(codec, DECODE_IPV4_INVALID_HEADER_LEN);
         return false;
     }
 
     if (ip_len > raw.len)
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_DECODE,
-            "IP Len field is %d bytes bigger than captured length.\n"
-            "    (ip.len: %lu, cap.len: %lu)\n",
-            ip_len - raw.len, ip_len, raw.len); );
-
         codec_event(codec, DECODE_IPV4_DGRAM_GT_CAPLEN);
+        // FIXIT-L we should decode this layer if possible instead of stopping now
+        // ip6 etc may have similar issues
         return false;
     }
 #if 0
-    // There is no need to alert when (ip_len < len).
-    // Libpcap will capture more bytes than are part of the IP payload.
-    // These could be Ethernet trailers, ESP trailers, etc.
-    // This code is left in, commented, to keep us from re-writing it later.
     else if (ip_len < len)
     {
-        if (SnortConfig::log_verbose())
-            ErrorMessage("IP Len field is %d bytes "
-                "smaller than captured length.\n"
-                "    (ip.len: %lu, cap.len: %lu)\n",
-                len - ip_len, ip_len, len);
+        // There is no need to alert when (ip_len < len).
+        // Libpcap will capture more bytes than are part of the IP payload.
+        // These could be Ethernet trailers, ESP trailers, etc.
     }
 #endif
 
     if (ip_len < hlen)
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_DECODE,
-            "IP dgm len (%d bytes) < IP hdr "
-            "len (%d bytes), packet discarded\n", ip_len, hlen); );
-
         codec_event(codec, DECODE_IPV4_DGRAM_LT_IPHDR);
         return false;
     }
 
     if ( snort.ip_api.is_ip6() )
     {
-        /*  If Teredo or GRE seen, this is not an 4in6 tunnel */
+        /* If the previous layer was not IP-in-IP, this is not a 4-in-6 tunnel */
         if ( codec.codec_flags & CODEC_NON_IP_TUNNEL )
             codec.codec_flags &= ~CODEC_NON_IP_TUNNEL;
-        else if ( SnortConfig::tunnel_bypass_enabled(TUNNEL_4IN6) )
-            Active::set_tunnel_bypass();
+        else if ( codec.conf->tunnel_bypass_enabled(TUNNEL_4IN6) )
+            codec.tunnel_bypass = true;
+    }
+    else if (snort.ip_api.is_ip4())
+    {
+        /* If the previous layer was not IP-in-IP, this is not a 4-in-4 tunnel */
+        if ( codec.codec_flags & CODEC_NON_IP_TUNNEL )
+            codec.codec_flags &= ~CODEC_NON_IP_TUNNEL;
+        else if (codec.conf->tunnel_bypass_enabled(TUNNEL_4IN4))
+            codec.tunnel_bypass = true;
     }
 
     // set the api now since this layer has been verified as valid
     snort.ip_api.set(iph);
+    // update to real IP when needed
+    const DAQ_NAPTInfo_t* napti = (const DAQ_NAPTInfo_t*) daq_msg_get_meta(raw.daq_msg, DAQ_PKT_META_NAPT_INFO);
+    if (napti && codec.ip_layer_cnt == 1)
+    {
+        SfIp real_src;
+        SfIp real_dst;
+        real_src.set(&napti->src_addr, daq_napt_info_src_addr_family(napti));
+        real_dst.set(&napti->dst_addr, daq_napt_info_dst_addr_family(napti));
+        snort.ip_api.update(real_src, real_dst);
+    }
 
     /*
      * IP Header tests: Land attack, and Loop back test
      */
     IP4AddrTests(iph, codec, snort);
 
-    if (SnortConfig::ip_checksums())
+    if (snort::get_network_policy()->ip_checksums() && !valid_checksum_from_daq(raw))
     {
-        /* routers drop packets with bad IP checksums, we don't really
-         * need to check them (should make this a command line/config
-         * option
-         */
-        int16_t csum = checksum::ip_cksum((uint16_t*)iph, hlen);
-
+        // routers drop packets with bad IP checksums, we don't really need to check them...
+        int16_t csum = checksum::ip_cksum((const uint16_t*)iph, hlen);
         if (csum && !codec.is_cooked())
         {
             if ( !(codec.codec_flags & CODEC_UNSURE_ENCAP) )
@@ -284,7 +297,10 @@ bool Ipv4Codec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
     }
 
     if (frag_off & 0x4000)
+    {
         codec.codec_flags |= CODEC_DF;
+        snort.decode_flags |= DECODE_DF;
+    }
 
     if (frag_off & 0x2000)
         snort.decode_flags |= DECODE_MF;
@@ -308,7 +324,6 @@ bool Ipv4Codec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
         if ( !ip_len)
             codec_event(codec, DECODE_ZERO_LENGTH_FRAG);
 
-        /* set the packet fragment flag */
         snort.decode_flags |= DECODE_FRAG;
     }
     else
@@ -322,29 +337,28 @@ bool Ipv4Codec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
     snort.set_pkt_type(PktType::IP);
     codec.proto_bits |= PROTO_BIT__IP;
     IPMiscTests(iph, codec, ip::IP4_HEADER_LEN + ip_opt_len);
+
     codec.lyr_len = hlen - codec.invalid_bytes;
+    codec.curr_ip6_extension = 0;  // necessary since next protos numbers share
+    codec.ip6_extension_count = 0; // same space for both ip4 and ip6
 
     /* if this packet isn't a fragment
      * or if it is, its a UDP packet and offset is 0 */
     if (!(snort.decode_flags & DECODE_FRAG) /*||
         ((frag_off == 0) &&  // FIXIT-M this forces flow to udp instead of ip
-         (iph->proto() == IPPROTO_UDP))*/)
+         (iph->proto() == IpProtocol::UDP))*/)
     {
-        if (iph->proto() >= MIN_UNASSIGNED_IP_PROTO)
+        if (to_utype(iph->proto()) >= to_utype(ProtocolId::MIN_UNASSIGNED_IP_PROTO))
             codec_event(codec, DECODE_IP_UNASSIGNED_PROTO);
         else
-            codec.next_prot_id = iph->proto();
+            codec.next_prot_id = (ProtocolId)iph->proto();
     }
 
     return true;
 }
 
-//------------------------------------------------------------------
-// decode.c::IP4 misc
-//--------------------------------------------------------------------
-
 void Ipv4Codec::IP4AddrTests(
-    const IP4Hdr* iph, const CodecData& codec, DecodeData& snort)
+    const ip::IP4Hdr* iph, const CodecData& codec, DecodeData& snort)
 {
     uint8_t msb_src, msb_dst;
 
@@ -364,8 +378,8 @@ void Ipv4Codec::IP4AddrTests(
     /* Loopback traffic  - don't use htonl for speed reasons -
      * s_addr is always in network order */
 #ifdef WORDS_BIGENDIAN
-    msb_src = (iph.ip_src >> 24);
-    msb_dst = (iph.ip_dst >> 24);
+    msb_src = (uint8_t)(iph->ip_src >> 24);
+    msb_dst = (uint8_t)(iph->ip_dst >> 24);
 #else
     msb_src = (uint8_t)(iph->ip_src & 0xff);
     msb_dst = (uint8_t)(iph->ip_dst & 0xff);
@@ -389,15 +403,18 @@ void Ipv4Codec::IP4AddrTests(
     if ( msb_src == ip::IP4_MULTICAST )
         codec_event(codec, DECODE_IP4_SRC_MULTICAST);
 
-    if ( msb_src == ip::IP4_RESERVED || sfvar_ip_in(MulticastReservedIp, snort.ip_api.get_src()) )
-        codec_event(codec, DECODE_IP4_SRC_RESERVED);
+    if ( codec.conf->is_address_anomaly_check_enabled() )
+    {
+        if ( msb_src == ip::IP4_RESERVED || sfvar_ip_in(MulticastReservedIp, snort.ip_api.get_src()) )
+            codec_event(codec, DECODE_IP4_SRC_RESERVED);
 
-    if ( msb_dst == ip::IP4_RESERVED || sfvar_ip_in(MulticastReservedIp, snort.ip_api.get_dst()) )
-        codec_event(codec, DECODE_IP4_DST_RESERVED);
+        if ( msb_dst == ip::IP4_RESERVED || sfvar_ip_in(MulticastReservedIp, snort.ip_api.get_dst()) )
+            codec_event(codec, DECODE_IP4_DST_RESERVED);
+    }
 }
 
 /* IPv4-layer decoder rules */
-void Ipv4Codec::IPMiscTests(const IP4Hdr* const ip4h, const CodecData& codec, uint16_t len)
+void Ipv4Codec::IPMiscTests(const ip::IP4Hdr* const ip4h, const CodecData& codec, uint16_t len)
 {
     /* Yes, it's an ICMP-related vuln in IP options. */
     int cnt = 0;
@@ -467,17 +484,6 @@ void Ipv4Codec::IPMiscTests(const IP4Hdr* const ip4h, const CodecData& codec, ui
         codec_event(codec, DECODE_IP_OPTION_SET);
 }
 
-/*
- * Function: DecodeIPOptions(uint8_t *, uint32_t, Packet *)
- *
- * Purpose: Once again, a fairly self-explainatory name
- *
- * Arguments: o_list => ptr to the option list
- *            o_len => length of the option list
- *            p     => pointer to decoded packet struct
- *
- * Returns: void function
- */
 void Ipv4Codec::DecodeIPOptions(const uint8_t* start, uint8_t& o_len, CodecData& codec)
 {
     uint32_t tot_len = 0;
@@ -515,7 +521,7 @@ default_case:
             if ((tot_len + 1) >= o_len)
                 code = tcp::OPT_TRUNC;
 
-            /* RFC sez that we MUST have atleast this much data */
+            /* RFC says that we MUST have at least this much data */
             else if (option->len < 2)
                 code = tcp::OPT_BADLEN;
 
@@ -551,30 +557,20 @@ default_case:
  *********************  L O G G E R  ******************************
 *******************************************************************/
 
-struct ip4_addr
+void Ipv4Codec::log(TextLog* const text_log, const uint8_t* raw_pkt, const uint16_t lyr_len)
 {
-    union
-    {
-        uint32_t addr32;
-        uint8_t addr8[4];
-    };
-};
+    const ip::IP4Hdr* const ip4h = reinterpret_cast<const ip::IP4Hdr*>(raw_pkt);
 
-void Ipv4Codec::log(TextLog* const text_log, const uint8_t* raw_pkt,
-    const uint16_t lyr_len)
-{
-    const IP4Hdr* const ip4h = reinterpret_cast<const IP4Hdr*>(raw_pkt);
-
-    // FIXIT-L  -->  This does NOT obfuscate correctly
-    if (SnortConfig::obfuscate())
+    // FIXIT-RC this does NOT obfuscate correctly
+    if (SnortConfig::get_conf()->obfuscate())
     {
         TextLog_Print(text_log, "xxx.xxx.xxx.xxx -> xxx.xxx.xxx.xxx");
     }
     else
     {
-        ip4_addr src, dst;
-        src.addr32 = ip4h->get_src();
-        dst.addr32 = ip4h->get_dst();
+        struct in_addr src, dst;
+        src.s_addr = ip4h->get_src();
+        dst.s_addr = ip4h->get_dst();
 
         char src_buf[INET_ADDRSTRLEN];
         char dst_buf[INET_ADDRSTRLEN];
@@ -632,33 +628,24 @@ void Ipv4Codec::log(TextLog* const text_log, const uint8_t* raw_pkt,
  ******************** E N C O D E R  ******************************
 *******************************************************************/
 
+static THREAD_LOCAL std::mt19937* thread_rand = nullptr;
+
 static inline uint16_t IpId_Next()
 {
-#if defined(REG_TEST) || defined(VALGRIND_TESTING)
-    uint16_t id = htons(s_id_index + 1);
-#else
-    uint16_t id = s_id_pool[s_id_index];
-#endif
-    s_id_index = (s_id_index + 1) % IP_ID_COUNT;
-
-#ifndef VALGRIND_TESTING
-    if ( !s_id_index )
-        rand_shuffle(s_rand, &s_id_pool[0], sizeof(s_id_pool), 1);
-#endif
-    return id;
+    return (*thread_rand)() % UINT16_MAX;
 }
 
 /******************************************************************
  ******************** E N C O D E R  ******************************
  ******************************************************************/
 bool Ipv4Codec::encode(const uint8_t* const raw_in, const uint16_t /*raw_len*/,
-    EncState& enc, Buffer& buf)
+    EncState& enc, Buffer& buf, Flow*)
 {
     if (!buf.allocate(ip::IP4_HEADER_LEN))
         return false;
 
-    const ip::IP4Hdr* const ip4h_in = reinterpret_cast<const IP4Hdr*>(raw_in);
-    ip::IP4Hdr* const ip4h_out = reinterpret_cast<IP4Hdr*>(buf.data());
+    const ip::IP4Hdr* const ip4h_in = reinterpret_cast<const ip::IP4Hdr*>(raw_in);
+    ip::IP4Hdr* const ip4h_out = reinterpret_cast<ip::IP4Hdr*>(buf.data());
 
     /* IPv4 encoded header is hardcoded 20 bytes */
     ip4h_out->ip_verhl = 0x45;
@@ -689,15 +676,15 @@ bool Ipv4Codec::encode(const uint8_t* const raw_in, const uint16_t /*raw_len*/,
      * cycles and use the literal header size for checksum */
     ip4h_out->ip_csum = checksum::ip_cksum((uint16_t*)ip4h_out, ip::IP4_HEADER_LEN);
 
-    enc.next_proto = IPPROTO_ID_IPIP;
-    enc.next_ethertype = ETHERTYPE_IPV4;
+    enc.next_proto = IpProtocol::IPIP;
+    enc.next_ethertype = ProtocolId::ETHERTYPE_IPV4;
     return true;
 }
 
 void Ipv4Codec::update(const ip::IpApi&, const EncodeFlags flags,
     uint8_t* raw_pkt, uint16_t /*lyr_len*/, uint32_t& updated_len)
 {
-    IP4Hdr* h = reinterpret_cast<IP4Hdr*>(raw_pkt);
+    ip::IP4Hdr* h = reinterpret_cast<ip::IP4Hdr*>(raw_pkt);
     uint16_t hlen = h->hlen();
 
     updated_len += hlen;
@@ -712,7 +699,7 @@ void Ipv4Codec::update(const ip::IpApi&, const EncodeFlags flags,
 
 void Ipv4Codec::format(bool reverse, uint8_t* raw_pkt, DecodeData& snort)
 {
-    IP4Hdr* ip4h = reinterpret_cast<IP4Hdr*>(raw_pkt);
+    ip::IP4Hdr* ip4h = reinterpret_cast<ip::IP4Hdr*>(raw_pkt);
 
     if ( reverse )
     {
@@ -735,50 +722,34 @@ static Module* mod_ctor()
 static void mod_dtor(Module* m)
 { delete m; }
 
-//-------------------------------------------------------------------------
-// ip id considerations:
-//
-// we use dnet's rand services to generate a vector of random 16-bit values and
-// iterate over the vector as IDs are assigned.  when we wrap to the beginning,
-// the vector is randomly reordered.
-//-------------------------------------------------------------------------
 static void ipv4_codec_ginit()
 {
-#ifndef VALGRIND_TESTING
-    if ( s_rand )
-        rand_close(s_rand);
-
-    // rand_open() can yield valgrind errors because the
-    // starting seed may come from "random stack contents"
-    // (see man 3 dnet)
-    s_rand = rand_open();
-
-    if ( !s_rand )
-        FatalError("rand_open() failed.\n");
-
-    rand_get(s_rand, &s_id_pool[0], sizeof(s_id_pool));
-#endif
-
     // Reserved addresses within multicast address space (See RFC 5771)
     MulticastReservedIp = sfip_var_from_string(
         "[224.1.0.0/16,224.5.0.0/16,224.6.0.0/15,224.8.0.0/13,224.16.0.0/12,"
         "224.32.0.0/11,224.64.0.0/10,224.128.0.0/9,225.0.0.0/8,226.0.0.0/7,"
-        "228.0.0.0/6,234.0.0.0/7,236.0.0.0/7,238.0.0.0/8]");
+        "228.0.0.0/6,234.0.0.0/7,236.0.0.0/7,238.0.0.0/8]", "ipv4");
 
-    if ( MulticastReservedIp == nullptr )
-        FatalError("Could not initialize IPv4 MulticastReservedIp\n");
+    assert(MulticastReservedIp);
 }
 
 static void ipv4_codec_gterm()
 {
-    if ( s_rand )
-        rand_close(s_rand);
-
     if ( MulticastReservedIp )
         sfvar_free(MulticastReservedIp);
 
-    s_rand = nullptr;
     MulticastReservedIp = nullptr;
+}
+
+static void ipv4_codec_tinit()
+{
+    thread_rand = new std::mt19937(SnortConfig::static_hash() ? 1 : get_random_seed());
+}
+
+static void ipv4_codec_tterm()
+{
+    delete thread_rand;
+    thread_rand = nullptr;
 }
 
 static Codec* ctor(Module*)
@@ -803,24 +774,19 @@ static const CodecApi ipv4_api =
     },
     ipv4_codec_ginit, // pinit
     ipv4_codec_gterm, // pterm
-    nullptr, // tinit
-    nullptr, // tterm
+    ipv4_codec_tinit, // tinit
+    ipv4_codec_tterm, // tterm
     ctor, // ctor
     dtor, // dtor
 };
 
-#if 0
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_ipv4[] =
+#endif
 {
     &ipv4_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_ipv4 = &ipv4_api.base;
-#endif
-#endif
-
-// Currently needs to be static
-const BaseApi* cd_ipv4 = &ipv4_api.base;
 

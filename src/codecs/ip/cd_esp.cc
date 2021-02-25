@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,10 +22,11 @@
 #include "config.h"
 #endif
 
+#include "codecs/codec_module.h"
 #include "framework/codec.h"
 #include "main/snort_config.h"
-#include "protocols/protocol_ids.h"
-#include "codecs/codec_module.h"
+
+using namespace snort;
 
 #define CD_ESP_NAME "esp"
 #define CD_ESP_HELP "support for encapsulating security payload"
@@ -46,10 +47,10 @@ static const Parameter esp_params[] =
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
 
-class EspModule : public CodecModule
+class EspModule : public BaseCodecModule
 {
 public:
-    EspModule() : CodecModule(CD_ESP_NAME, CD_ESP_HELP, esp_params) { }
+    EspModule() : BaseCodecModule(CD_ESP_NAME, CD_ESP_HELP, esp_params) { }
 
     const RuleMap* get_rules() const override
     { return esp_rules; }
@@ -69,9 +70,8 @@ class EspCodec : public Codec
 {
 public:
     EspCodec() : Codec(CD_ESP_NAME) { }
-    ~EspCodec() { }
 
-    void get_protocol_ids(std::vector<uint16_t>& v) override;
+    void get_protocol_ids(std::vector<ProtocolId>& v) override;
     bool decode(const RawData&, CodecData&, DecodeData&) override;
 };
 
@@ -81,25 +81,23 @@ constexpr uint32_t ESP_AUTH_DATA_LEN = 12;
 constexpr uint32_t ESP_TRAILER_LEN = 2;
 } // anonymous namespace
 
-void EspCodec::get_protocol_ids(std::vector<uint16_t>& v)
-{ v.push_back(IPPROTO_ID_ESP); }
+void EspCodec::get_protocol_ids(std::vector<ProtocolId>& v)
+{ v.emplace_back(ProtocolId::ESP); }
 
 /*
- * Function: DecodeESP(const uint8_t *, uint32_t, Packet *)
- *
- * Purpose: Attempt to decode Encapsulated Security Payload.
- *          The contents are probably encrypted, but ESP is sometimes used
- *          with "null" encryption, solely for Authentication.
- *          This is more of a heuristic -- there is no ESP field that specifies
- *          the encryption type (or lack thereof).
- *
+ * Attempt to decode Encapsulated Security Payload.
+ * The contents are probably encrypted, but ESP is sometimes used
+ * with "null" encryption, solely for Authentication.
+ * This is more of a heuristic -- there is no ESP field that specifies
+ * the encryption type (or lack thereof).
  */
 bool EspCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
 {
     const uint8_t* esp_payload;
     uint8_t pad_length;
+    uint8_t ip_proto;
 
-    if (!SnortConfig::esp_decoding())
+    if (!codec.conf->esp_decoding())
         return false;
 
     /* The ESP header contains a crypto Initialization Vector (IV) and
@@ -122,24 +120,25 @@ bool EspCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
     codec.lyr_len = ESP_HEADER_LEN;
     esp_payload = raw.data + ESP_HEADER_LEN;
     pad_length = *(esp_payload + guessed_len);
-    codec.next_prot_id = *(esp_payload + guessed_len + 1);
+    ip_proto = *(esp_payload + guessed_len + 1);
+    codec.next_prot_id = (ProtocolId)ip_proto;
 
     // must be called AFTER setting next_prot_id
     if (snort.ip_api.is_ip6())
     {
-        if ( snort_conf->hit_ip6_maxopts(codec.ip6_extension_count) )
+        if ( codec.conf->hit_ip6_maxopts(codec.ip6_extension_count) )
         {
             codec_event(codec, DECODE_IP6_EXCESS_EXT_HDR);
             return false;
         }
 
-        CheckIPv6ExtensionOrder(codec, IPPROTO_ID_ESP);
+        CheckIPv6ExtensionOrder(codec, IpProtocol::ESP);
         codec.proto_bits |= PROTO_BIT__IP6_EXT;
-        codec.ip6_csum_proto = codec.next_prot_id;
+        codec.ip6_csum_proto = (IpProtocol)ip_proto;
         codec.ip6_extension_count++;
     }
 
-    // TODO:  Leftover from Snort. Do we really want thsi?
+    // FIXIT-L shouldn't this be raw.len = guessed_len ?
     const_cast<uint32_t&>(raw.len) -= (ESP_AUTH_DATA_LEN + ESP_TRAILER_LEN);
 
     /* Adjust the packet length to account for the padding.
@@ -152,7 +151,7 @@ bool EspCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
     {
         snort.decode_flags |= DECODE_PKT_TRUST;
         codec.lyr_len = ESP_HEADER_LEN;  // we want data to begin at (pkt + ESP_HEADER_LEN)
-        codec.next_prot_id = FINISHED_DECODE;
+        codec.next_prot_id = ProtocolId::FINISHED_DECODE;
         return true;
     }
 
@@ -162,9 +161,12 @@ bool EspCodec::decode(const RawData& raw, CodecData& codec, DecodeData& snort)
        decoder stage to silently ignore invalid headers. */
 
     // highest valid protocol id == 255.
-    if (codec.next_prot_id > 0xFF)
+
+    //  FIXIT-L the next_prot_id will never be > 0xFF since it came from
+    //  a uint8_t originally...
+    if (to_utype(codec.next_prot_id) > 0xFF)
     {
-        codec.next_prot_id = FINISHED_DECODE;
+        codec.next_prot_id = ProtocolId::FINISHED_DECODE;
         snort.decode_flags |= DECODE_PKT_TRUST;
     }
     else
@@ -215,11 +217,11 @@ static const CodecApi esp_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* cd_esp[] =
+#endif
 {
     &esp_api.base,
     nullptr
 };
-#else
-const BaseApi* cd_esp = &esp_api.base;
-#endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -25,157 +25,91 @@
  **
  */
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <assert.h>
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "file_mempool.h"
-#include "util.h"
-#include "main/snort_debug.h"
+
+#include "log/messages.h"
+#include "utils/util.h"
+
+using namespace snort;
 
 /*This magic is used for double free detection*/
 
 #define FREE_MAGIC    0x2525252525252525
 typedef uint64_t MagicType;
-#ifdef DEBUG
 
-static inline void file_mempool_verify(FileMemPool* mempool)
+
+void FileMemPool::free_pools()
 {
-    uint64_t free_size;
-    uint64_t release_size;
-
-    free_size = cbuffer_used(mempool->free_list);
-    release_size = cbuffer_used(mempool->released_list);
-
-    if (free_size > cbuffer_size(mempool->free_list))
+    if (datapool != nullptr)
     {
-        ErrorMessage("%s(%d) file_mempool: failed to verify free list!\n",
-            __FILE__, __LINE__);
+        snort_free(datapool);
+        datapool = nullptr;
     }
 
-    if (release_size > cbuffer_size(mempool->released_list))
-    {
-        ErrorMessage("%s(%d) file_mempool: failed to verify release list!\n",
-            __FILE__, __LINE__);
-    }
-
-    /* The free mempool and size of release mempool should be smaller than
-     * or equal to the size of mempool
-     */
-    if (free_size + release_size > mempool->total)
-    {
-        ErrorMessage("%s(%d) file_mempool: failed to verify mempool size!\n",
-            __FILE__, __LINE__);
-    }
+    cbuffer_free(free_list);
+    cbuffer_free(released_list);
 }
 
-#endif
-
-static inline void file_mempool_free_pools(FileMemPool* mempool)
-{
-    if (mempool == NULL)
-        return;
-
-    if (mempool->datapool != NULL)
-    {
-        free(mempool->datapool);
-        mempool->datapool = NULL;
-    }
-
-    cbuffer_free(mempool->free_list);
-    cbuffer_free(mempool->released_list);
-}
-
-/* Function: int file_mempool_init(FileMemPool *FileMemPool,
- *                            PoolCount num_objects, size_t obj_size)
- *
+/*
  * Purpose: initialize a FileMemPool object and allocate memory for it
  * Args:
- *   FileMemPool - pointer to a FileMemPool struct
  *   num_objects - number of items in this pool
  *   obj_size    - size of the items
- *
- * Returns:
- *   FILE_MEM_SUCCESS
- *   FILE_MEM_FAIL
  */
 
-int file_mempool_init(FileMemPool* mempool, uint64_t num_objects, size_t obj_size)
+FileMemPool::FileMemPool(uint64_t num_objects, size_t o_size)
 {
     unsigned int i;
 
-    if ((mempool == NULL) || (num_objects < 1) || (obj_size < 1))
-        return FILE_MEM_FAIL;
+    if ((num_objects < 1) || (o_size < 1))
+        return;
 
-    mempool->obj_size = obj_size;
+    obj_size = o_size;
 
-    /* this is the basis pool that represents all the *data pointers
-     * in the list
-     */
-    mempool->datapool = (void**)calloc(num_objects, obj_size);
-    if (mempool->datapool == NULL)
-    {
-        ErrorMessage("%s(%d) file_mempool_init(): Failed to init datapool\n",
-            __FILE__, __LINE__);
-        file_mempool_free_pools(mempool);
-        return FILE_MEM_FAIL;
-    }
+    // this is the basis pool that represents all the *data pointers in the list
+    datapool = (void**)snort_calloc(num_objects, obj_size);
 
     /* sets up the memory list */
-    mempool->free_list = cbuffer_init(num_objects);
-    if (!mempool->free_list)
+    free_list = cbuffer_init(num_objects);
+    if (!free_list)
     {
-        ErrorMessage("%s(%d) file_mempool_init(): Failed to init free list\n",
-            __FILE__, __LINE__);
-        file_mempool_free_pools(mempool);
-        return FILE_MEM_FAIL;
+        free_pools();
+        return;
     }
 
-    mempool->released_list = cbuffer_init(num_objects);
-    if (!mempool->released_list)
+    released_list = cbuffer_init(num_objects);
+    if (!released_list)
     {
-        ErrorMessage("%s(%d) file_mempool_init(): "
-            "Failed to init release list\n", __FILE__, __LINE__);
-        file_mempool_free_pools(mempool);
-        return FILE_MEM_FAIL;
+        free_pools();
+        return;
     }
 
+    total = 0;
     for (i=0; i<num_objects; i++)
     {
-        void* data = ((char*)mempool->datapool) + (i * mempool->obj_size);
+        void* data = ((char*)datapool) + (i * obj_size);
 
-        if (cbuffer_write(mempool->free_list,  data))
+        if (cbuffer_write(free_list,  data))
         {
-            ErrorMessage("%s(%d) file_mempool_init(): "
-                "Failed to add to free list\n",
-                __FILE__, __LINE__);
-            file_mempool_free_pools(mempool);
-            return FILE_MEM_FAIL;
+            free_pools();
+            return;
         }
         *(MagicType*)data = FREE_MAGIC;
-        mempool->total++;
+        total++;
     }
-
-    return FILE_MEM_SUCCESS;
 }
 
 /*
  * Destroy a set of FileMemPool objects
  *
- * Args:
- *   FileMemPool: pointer to a FileMemPool struct
- *
- * Return:
- *   FILE_MEM_SUCCESS
- *   FILE_MEM_FAIL
  */
-int file_mempool_destroy(FileMemPool* mempool)
+FileMemPool::~FileMemPool()
 {
-    if (mempool == NULL)
-        return FILE_MEM_FAIL;
-
-    file_mempool_free_pools(mempool);
-
-    return FILE_MEM_SUCCESS;
+    free_pools();
 }
 
 /*
@@ -184,33 +118,22 @@ int file_mempool_destroy(FileMemPool* mempool)
  * Args:
  *   FileMemPool: pointer to a FileMemPool struct
  *
- * Returns: a pointer to the FileMemPool object on success, NULL on failure
+ * Returns: a pointer to the FileMemPool object on success, nullptr on failure
  */
 
-void* file_mempool_alloc(FileMemPool* mempool)
+void* FileMemPool::m_alloc()
 {
-    void* b = NULL;
+    void* b = nullptr;
 
-    if (mempool == NULL)
-    {
-        return NULL;
-    }
+    std::lock_guard<std::mutex> lock(pool_mutex);
 
-    if (cbuffer_read(mempool->free_list, &b))
+    if (cbuffer_read(free_list, &b))
     {
-        if (cbuffer_read(mempool->released_list, &b))
+        if (cbuffer_read(released_list, &b))
         {
-            return NULL;
+            return nullptr;
         }
     }
-
-    if (*(MagicType*)b != FREE_MAGIC)
-    {
-        ErrorMessage("%s(%d) file_mempool_alloc(): Allocation errors! \n",
-            __FILE__, __LINE__);
-    }
-
-    DEBUG_WRAP(file_mempool_verify(mempool); );
 
     return b;
 }
@@ -218,18 +141,10 @@ void* file_mempool_alloc(FileMemPool* mempool)
 /*
  * Free a new object from the buffer
  * We use circular buffer to synchronize one reader and one writer
- *
- * Args:
- *   FileMemPool: pointer to a circular buffer struct
- *   void *obj  : memory object
- *
- * Return:
- *   FILE_MEM_SUCCESS
- *   FILE_MEM_FAIL
  */
-static inline int _file__mempool_remove(CircularBuffer* cb, void* obj)
+int FileMemPool::remove(CircularBuffer* cb, void* obj)
 {
-    if (obj == NULL)
+    if (obj == nullptr)
         return FILE_MEM_FAIL;
 
     if (cbuffer_write(cb, obj))
@@ -239,8 +154,6 @@ static inline int _file__mempool_remove(CircularBuffer* cb, void* obj)
 
     if (*(MagicType*)obj == FREE_MAGIC)
     {
-        DEBUG_WRAP(ErrorMessage("%s(%d) file_mempool_remove(): Double free! \n",
-                __FILE__, __LINE__); );
         return FILE_MEM_FAIL;
     }
 
@@ -249,27 +162,12 @@ static inline int _file__mempool_remove(CircularBuffer* cb, void* obj)
     return FILE_MEM_SUCCESS;
 }
 
-/*
- * Free a new object from the FileMemPool
- *
- * Args:
- *   FileMemPool: pointer to a FileMemPool struct
- *   void *obj  : memory object
- *
- * Return:
- *   FILE_MEM_SUCCESS
- *   FILE_MEM_FAIL
- */
-
-int file_mempool_free(FileMemPool* mempool, void* obj)
+int FileMemPool::m_free(void* obj)
 {
-    int ret;
+    std::lock_guard<std::mutex> lock(pool_mutex);
 
-    assert(mempool);
+    int ret = remove(free_list, obj);
 
-    ret = _file__mempool_remove(mempool->free_list, obj);
-
-    DEBUG_WRAP(file_mempool_verify(mempool); );
 
     return ret;
 }
@@ -279,47 +177,35 @@ int file_mempool_free(FileMemPool* mempool, void* obj)
  * This can be called by a different thread calling
  * file_mempool_alloc()
  *  *
- * Args:
- *   FileMemPool: pointer to a FileMemPool struct
- *   void *obj  : memory object
- *
- * Return:
- *   FILE_MEM_SUCCESS
- *   FILE_MEM_FAIL
  */
 
-int file_mempool_release(FileMemPool* mempool, void* obj)
+int FileMemPool::m_release(void* obj)
 {
-    int ret;
-
-    if (mempool == NULL)
-        return FILE_MEM_FAIL;
+    std::lock_guard<std::mutex> lock(pool_mutex);
 
     /*A writer that might from different thread*/
-    ret = _file__mempool_remove(mempool->released_list, obj);
+    int ret = remove(released_list, obj);
 
-    DEBUG_WRAP(file_mempool_verify(mempool); );
 
     return ret;
 }
 
 /* Returns number of elements allocated in current buffer*/
-uint64_t file_mempool_allocated(FileMemPool* mempool)
+uint64_t FileMemPool::allocated()
 {
-    uint64_t total_freed =
-        file_mempool_released(mempool) + file_mempool_freed(mempool);
-    return (mempool->total - total_freed);
+    uint64_t total_freed = released() + freed();
+    return (total - total_freed);
 }
 
 /* Returns number of elements freed in current buffer*/
-uint64_t file_mempool_freed(FileMemPool* mempool)
+uint64_t FileMemPool::freed()
 {
-    return (cbuffer_used(mempool->free_list));
+    return (cbuffer_used(free_list));
 }
 
 /* Returns number of elements released in current buffer*/
-uint64_t file_mempool_released(FileMemPool* mempool)
+uint64_t FileMemPool::released()
 {
-    return (cbuffer_used(mempool->released_list));
+    return (cbuffer_used(released_list));
 }
 

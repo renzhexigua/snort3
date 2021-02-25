@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -31,8 +31,7 @@ class ArpSpoof : public ConversionState
 {
 public:
     ArpSpoof(Converter& c) : ConversionState(c) { }
-    virtual ~ArpSpoof() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -46,7 +45,7 @@ bool ArpSpoof::convert(std::istringstream& data_stream)
     {
         bool tmpval = true;
 
-        if (!keyword.compare("-unicast"))
+        if (keyword == "-unicast")
             table_api.add_deleted_comment("unicast");
 
         else
@@ -87,8 +86,7 @@ class ArpSpoofHost : public ConversionState
 {
 public:
     ArpSpoofHost(Converter& c) : ConversionState(c) { }
-    virtual ~ArpSpoofHost() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 

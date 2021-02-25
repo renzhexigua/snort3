@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -29,13 +29,19 @@ class DataApi;
 class Variable
 {
 public:
-    Variable(std::string name, int depth);
-    Variable(std::string name);
+    Variable(const std::string& name, int depth = 0);
     virtual ~Variable();
 
-    inline std::string get_name() { return name; }
+    inline const std::string& get_name() const { return name; }
     std::string get_value(DataApi*);
     bool add_value(std::string);
+    void set_value(const std::string&, bool quoted);
+    void set_comment(const std::string& c)
+    { comment = c; }
+
+    void set_print_whitespace(bool w)
+    { print_whitespace = w; }
+
     friend std::ostream& operator<<(std::ostream&, const Variable&);
 
 private:
@@ -49,8 +55,10 @@ private:
 
     std::vector<VarData*> vars;
     std::string name;
+    std::string comment;
     int depth;
-    const std::size_t max_line_length = 77; // leave room for additional text
+    bool print_whitespace = true;
+    static const std::size_t max_line_length = 77; // leave room for additional text
 };
 
 #endif

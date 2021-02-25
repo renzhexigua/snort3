@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,6 +20,8 @@
 #ifndef FRAMEWORK_RANGE_H
 #define FRAMEWORK_RANGE_H
 
+// RangeCheck supports common IpsOption evaluation syntax and semantics.
+
 #include "main/snort_types.h"
 
 // unfortunately, <> was implemented inconsistently.  eg:
@@ -30,6 +32,8 @@
 // <=> for dsize style and >< for icode style so rule options
 // can coerce <> if needed for backwards compatibility
 
+namespace snort
+{
 class SO_PUBLIC RangeCheck
 {
 public:
@@ -39,17 +43,21 @@ public:
         EQ, NOT, LT, LE, GT, GE, LG, LEG, MAX
     };
 
-    Op op;
-    long min;
-    long max;
+    // Warning: FragOffsetOption computes its hash function using all the data members of
+    // RangeCheck. Any change to the following may require changes in ips_fragoffset.cc.
+    Op op = MAX;
+    long min = 0;
+    long max = 0;
 
     bool operator==(const RangeCheck&) const;
 
     void init();
+    bool is_set() const;
     // FIXIT-L add ttl style syntax
     bool parse(const char* s);
-    bool eval(long);
+    bool eval(long) const;
+    bool validate(const char* s, const char* r);
 };
-
+}
 #endif
 

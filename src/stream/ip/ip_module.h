@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,12 +21,16 @@
 #ifndef IP_MODULE_H
 #define IP_MODULE_H
 
-#include "snort_types.h"
+#include "flow/session.h"
 #include "framework/module.h"
-#include "main/thread.h"
-#include "stream/stream.h"
 
+namespace snort
+{
+class Trace;
 struct SnortConfig;
+}
+
+extern THREAD_LOCAL const snort::Trace* stream_ip_trace;
 
 #define GLOBAL_KEYWORD "defrag"
 #define ENGINE_KEYWORD "defrag_engine"
@@ -54,12 +58,33 @@ struct SnortConfig;
 #define DEFRAG_EXCESSIVE_OVERLAP  12
 #define DEFRAG_TINY_FRAGMENT      13
 
+/* statistics tracking struct */
+struct IpStats
+{
+    SESSION_STATS;
+    PegCount total_bytes;        // total_ip_bytes_processed
+    PegCount total;             // total_ipfragmented_packets
+    PegCount current_frags;     // iCurrentFrags
+    PegCount max_frags;         // iMaxFrags
+    PegCount reassembles;       // total_ipreassembled_packets / iFragFlushes
+    PegCount discards;
+    PegCount frag_timeouts;     // iFragTimeouts
+    PegCount overlaps;
+    PegCount anomalies;
+    PegCount alerts;
+    PegCount drops;
+    PegCount trackers_created;  // iFragCreates
+    PegCount trackers_released;
+    PegCount trackers_cleared;  // iFragDeletes - delete meant dump the frag list
+    PegCount trackers_completed;// iFragComplete
+    PegCount nodes_created;     // iFragInserts tracked a similar stat (# calls to insert)
+    PegCount nodes_released;
+    PegCount reassembled_bytes; // total_ipreassembled_bytes
+    PegCount fragmented_bytes;  // total_ipfragmented_bytes
+};
+
 extern const PegInfo ip_pegs[];
-extern THREAD_LOCAL struct IpStats ip_stats;
-extern THREAD_LOCAL ProfileStats ip_perf_stats;
-extern THREAD_LOCAL ProfileStats fragPerfStats;
-extern THREAD_LOCAL ProfileStats fragInsertPerfStats;
-extern THREAD_LOCAL ProfileStats fragRebuildPerfStats;
+extern THREAD_LOCAL snort::ProfileStats ip_perf_stats;
 
 //-------------------------------------------------------------------------
 // stream_ip module
@@ -70,24 +95,32 @@ extern THREAD_LOCAL ProfileStats fragRebuildPerfStats;
 
 struct StreamIpConfig;
 
-class StreamIpModule : public Module
+class StreamIpModule : public snort::Module
 {
 public:
     StreamIpModule();
-    ~StreamIpModule();
+    ~StreamIpModule() override;
 
-    bool set(const char*, Value&, SnortConfig*) override;
-    bool begin(const char*, int, SnortConfig*) override;
-    bool end(const char*, int, SnortConfig*) override;
+    bool set(const char*, snort::Value&, snort::SnortConfig*) override;
+    bool begin(const char*, int, snort::SnortConfig*) override;
 
-    const RuleMap* get_rules() const override;
-    ProfileStats* get_profile(unsigned, const char*&, const char*&) const override;
+    const snort::RuleMap* get_rules() const override;
+    snort::ProfileStats* get_profile() const override;
     const PegInfo* get_pegs() const override;
     PegCount* get_counts() const override;
     StreamIpConfig* get_data();
 
     unsigned get_gid() const override
     { return GID_DEFRAG; }
+
+    Usage get_usage() const override
+    { return INSPECT; }
+
+    bool is_bindable() const override
+    { return true; }
+
+    void set_trace(const snort::Trace*) const override;
+    const snort::TraceOption* get_trace_options() const override;
 
 private:
     StreamIpConfig* config;

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -22,31 +22,26 @@
 #include "config.h"
 #endif
 
-#include <assert.h>
-#include <string>
-using namespace std;
-
-#include "snort_types.h"
-#include "snort_bounds.h"
-#include "snort_debug.h"
-#include "protocols/packet.h"
-#include "parser.h"
-#include "parser/parse_utils.h"
-#include "ips_content.h"
-#include "packet_io/sfdaq.h"
+#include "detection/detection_engine.h"
+#include "detection/treenodes.h"
 #include "framework/cursor.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
-#include "detection/detection_defines.h"
-#include "actions/act_replace.h"
-#include "hash/sfhashfcn.h"
-#include "time/profiler.h"
+#include "hash/hash_key_operations.h"
+#include "log/messages.h"
+#include "main/snort_config.h"
+#include "main/thread_config.h"
+#include "packet_io/sfdaq.h"
+#include "parser/parse_utils.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+
+using namespace snort;
+using namespace std;
 
 static void replace_parse(const char* args, string& s)
 {
     bool negated;
-    std::string buf;
 
     if ( !parse_byte_code(args, negated, s) )
         return;
@@ -55,24 +50,20 @@ static void replace_parse(const char* args, string& s)
         ParseError("can't negate replace string");
 }
 
-static bool replace_ok()
+static bool replace_ok(const SnortConfig* sc)
 {
-    static int warned = 0;
+    if ( sc->inline_mode() and SFDAQ::can_replace() )
+        return true;
 
-    if ( !SnortConfig::inline_mode() )
-        return false;
+    static THREAD_LOCAL bool warned = false;
 
-    if ( !DAQ_CanReplace() )
+    if ( !warned )
     {
-        if ( !warned )
-        {
-            ParseWarning(WARN_DAQ, "payload replacements disabled because DAQ "
-                " can't replace packets.\n");
-            warned = 1;
-        }
-        return false;
+        WarningMessage("%s\n",
+            "WARNING: replace requires inline mode and DAQ with replace capability");
+        warned = true;
     }
-    return true;
+    return false;
 }
 
 //-------------------------------------------------------------------------
@@ -86,14 +77,20 @@ static THREAD_LOCAL ProfileStats replacePerfStats;
 class ReplaceOption : public IpsOption
 {
 public:
-    ReplaceOption(string&);
-    ~ReplaceOption();
+    ReplaceOption(const string&);
+    ~ReplaceOption() override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
     void action(Packet*) override;
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
+
+    bool is_agent() override
+    { return true; }
+
+    bool is_relative() override
+    { return true; }
 
     void store(int off)
     { offset[get_instance_id()] = off; }
@@ -109,9 +106,9 @@ private:
     int* offset; /* >=0 is offset to start of replace */
 };
 
-ReplaceOption::ReplaceOption(string& s) : IpsOption(s_name)
+ReplaceOption::ReplaceOption(const string& s) : IpsOption(s_name)
 {
-    unsigned n = get_instance_max();
+    unsigned n = ThreadConfig::get_instance_max();
     offset = new int[n];
 
     for ( unsigned i = 0; i < n; i++ )
@@ -127,29 +124,23 @@ ReplaceOption::~ReplaceOption()
 
 uint32_t ReplaceOption::hash() const
 {
-    uint32_t a,b,c;
-
-    const char* s = repl.c_str();
-    unsigned n = repl.size();
-
-    a = 0;
-    b = n;
-    c = 0;
+    uint32_t a = IpsOption::hash();
+    uint32_t b = repl.size();
+    uint32_t c = 0;
 
     mix(a,b,c);
-    mix_str(a,b,c,s,n);
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    mix_str(a,b,c,repl.c_str());
+    finalize(a,b,c);
 
     return c;
 }
 
 bool ReplaceOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    ReplaceOption& rhs = (ReplaceOption&)ips;
+    const ReplaceOption& rhs = (const ReplaceOption&)ips;
 
     if ( repl != rhs.repl )
         return false;
@@ -157,35 +148,31 @@ bool ReplaceOption::operator==(const IpsOption& ips) const
     return true;
 }
 
-int ReplaceOption::eval(Cursor& c, Packet* p)
+IpsOption::EvalStatus ReplaceOption::eval(Cursor& c, Packet* p)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(replacePerfStats);
+    RuleProfile profile(replacePerfStats);
 
     if ( p->is_cooked() )
-        return false;
+        return NO_MATCH;
 
     if ( !c.is("pkt_data") )
-        return DETECTION_OPTION_NO_MATCH;
+        return NO_MATCH;
 
     if ( c.get_pos() < repl.size() )
-        return DETECTION_OPTION_NO_MATCH;
+        return NO_MATCH;
 
-    store(c.get_pos() - repl.size());
+    if ( replace_ok(p->context->conf) )
+        store(c.get_pos() - repl.size());
 
-    MODULE_PROFILE_END(replacePerfStats);
-    return DETECTION_OPTION_MATCH;
+    return MATCH;
 }
 
 void ReplaceOption::action(Packet*)
 {
-    PROFILE_VARS;
-    MODULE_PROFILE_START(replacePerfStats);
+    RuleProfile profile(replacePerfStats);
 
     if ( pending() )
-        Replace_QueueChange(repl, (unsigned)pos());
-
-    MODULE_PROFILE_END(replacePerfStats);
+        DetectionEngine::add_replacement(repl, (unsigned)pos());
 }
 
 //-------------------------------------------------------------------------
@@ -214,6 +201,10 @@ public:
     ProfileStats* get_profile() const override
     { return &replacePerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     string data;
 };
 
@@ -248,21 +239,10 @@ static void mod_dtor(Module* m)
     delete m;
 }
 
-static IpsOption* replace_ctor(Module* p, OptTreeNode* otn)
+static IpsOption* replace_ctor(Module* p, OptTreeNode*)
 {
-    if ( !replace_ok() )
-        ParseError("inline mode and DAQ with replace capabilities required "
-            "to use rule option 'replace'.");
-
     ReplModule* m = (ReplModule*)p;
-    ReplaceOption* opt = new ReplaceOption(m->data);
-
-    if ( otn_set_agent(otn, opt) )
-        return opt;
-
-    delete opt;
-    ParseError("at most one action per rule is allowed");
-    return nullptr;
+    return new ReplaceOption(m->data);
 }
 
 static void replace_dtor(IpsOption* p)
@@ -297,11 +277,11 @@ static const IpsApi replace_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_replace[] =
+#endif
 {
     &replace_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_replace = &replace_api.base;
-#endif
 

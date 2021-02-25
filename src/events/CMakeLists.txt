@@ -4,12 +4,10 @@ set (INCLUDES
     event_queue.h
 )
 
-add_library (events STATIC
+add_library (events OBJECT
     event.cc
-    event_queue.cc 
-    event_wrapper.cc 
-    event_wrapper.h 
-    sfeventq.cc 
+    event_queue.cc
+    sfeventq.cc
     sfeventq.h
     ${INCLUDES}
 )

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -18,29 +18,20 @@
 //--------------------------------------------------------------------------
 // ips_flow.cc derived from sp_clientserver.c by Martin Roesch
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
 
-#include "main/snort_types.h"
-#include "main/snort_debug.h"
 #include "detection/treenodes.h"
-#include "protocols/packet.h"
-#include "parser/parser.h"
-#include "utils/util.h"
-#include "hash/sfhashfcn.h"
-#include "stream/stream_api.h"
-#include "time/profiler.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "hash/hash_key_operations.h"
+#include "log/messages.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
 #include "target_based/snort_protocols.h"
+
+using namespace snort;
 
 #define s_name "flow"
 
@@ -71,10 +62,10 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
-//private:  // FIXTHIS-L privatize
-    FlowCheckData config;
+//private:
+    FlowCheckData config;  // FIXIT-L privatize
 };
 
 //-------------------------------------------------------------------------
@@ -83,30 +74,29 @@ public:
 
 uint32_t FlowCheckOption::hash() const
 {
-    uint32_t a,b,c;
-    const FlowCheckData* data = &config;
-
-    a = data->from_server || data->from_client << 16;
-    b = data->ignore_reassembled || data->only_reassembled << 16;
-    c = data->stateless || data->established << 16;
+    uint32_t a = config.from_server | (config.from_client << 16);
+    uint32_t b = config.ignore_reassembled | (config.only_reassembled << 16);
+    uint32_t c = config.stateless | (config.established << 16);
 
     mix(a,b,c);
-    mix_str(a,b,c,get_name());
 
-    a += data->unestablished;
-    final(a,b,c);
+    a += config.unestablished;
+    b += IpsOption::hash();
+
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool FlowCheckOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    FlowCheckOption& rhs = (FlowCheckOption&)ips;
-    FlowCheckData* left = (FlowCheckData*)&config;
-    FlowCheckData* right = (FlowCheckData*)&rhs.config;
+    const FlowCheckOption& rhs = (const FlowCheckOption&)ips;
+    const FlowCheckData* left = &config;
+    const FlowCheckData* right = &rhs.config;
 
     if (( left->from_server == right->from_server) &&
         ( left->from_client == right->from_client) &&
@@ -122,70 +112,58 @@ bool FlowCheckOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int FlowCheckOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus FlowCheckOption::eval(Cursor&, Packet* p)
 {
+    RuleProfile profile(flowCheckPerfStats);
+
     FlowCheckData* fcd = &config;
-    PROFILE_VARS;
 
-    MODULE_PROFILE_START(flowCheckPerfStats);
-
-    /* Check established/unestablished first */
+    // Check established/unestablished first
     {
         if ((fcd->established == 1) && !(p->packet_flags & PKT_STREAM_EST))
         {
-            /*
-            ** This option requires an established connection and it isn't
-            ** in that state yet, so no match.
-            */
-            MODULE_PROFILE_END(flowCheckPerfStats);
-            return DETECTION_OPTION_NO_MATCH;
+            // This option requires an established connection and it isn't
+            // in that state yet, so no match.
+            return NO_MATCH;
         }
         else if ((fcd->unestablished == 1) && (p->packet_flags & PKT_STREAM_EST))
         {
-            /*
-            **  We're looking for an unestablished stream, and this is
-            **  established, so don't continue processing.
-            */
-            MODULE_PROFILE_END(flowCheckPerfStats);
-            return DETECTION_OPTION_NO_MATCH;
+            //  We're looking for an unestablished stream, and this is
+            //  established, so don't continue processing.
+            return NO_MATCH;
         }
     }
 
-    /* Now check from client */
+    // Now check from client
     if (fcd->from_client)
     {
         {
-            if (!(p->packet_flags & PKT_FROM_CLIENT) &&
-                (p->packet_flags & PKT_FROM_SERVER))
+            if (!p->is_from_application_client() && p->is_from_application_server())
             {
-                /* No match on from_client */
-                MODULE_PROFILE_END(flowCheckPerfStats);
-                return DETECTION_OPTION_NO_MATCH;
+                // No match on from_client
+                return NO_MATCH;
             }
         }
     }
 
-    /* And from server */
+    // And from server
     if (fcd->from_server)
     {
         {
-            if (!(p->packet_flags & PKT_FROM_SERVER) &&
-                (p->packet_flags & PKT_FROM_CLIENT))
+            if (!p->is_from_application_server() && p->is_from_application_client())
             {
-                /* No match on from_server */
-                MODULE_PROFILE_END(flowCheckPerfStats);
-                return DETECTION_OPTION_NO_MATCH;
+                // No match on from_server
+                return NO_MATCH;
             }
         }
     }
 
-    /* ...ignore_reassembled */
+    // ...ignore_reassembled
     if (fcd->ignore_reassembled & IGNORE_STREAM)
     {
         if (p->packet_flags & PKT_REBUILT_STREAM)
         {
-            MODULE_PROFILE_END(flowCheckPerfStats);
-            return DETECTION_OPTION_NO_MATCH;
+            return NO_MATCH;
         }
     }
 
@@ -193,18 +171,16 @@ int FlowCheckOption::eval(Cursor&, Packet* p)
     {
         if (p->packet_flags & PKT_REBUILT_FRAG)
         {
-            MODULE_PROFILE_END(flowCheckPerfStats);
-            return DETECTION_OPTION_NO_MATCH;
+            return NO_MATCH;
         }
     }
 
-    /* ...only_reassembled */
+    // ...only_reassembled
     if (fcd->only_reassembled & ONLY_STREAM)
     {
-        if ( !(p->packet_flags & PKT_REBUILT_STREAM) && !p->is_full_pdu() )
+        if ( !p->has_paf_payload() )
         {
-            MODULE_PROFILE_END(flowCheckPerfStats);
-            return DETECTION_OPTION_NO_MATCH;
+            return NO_MATCH;
         }
     }
 
@@ -212,121 +188,64 @@ int FlowCheckOption::eval(Cursor&, Packet* p)
     {
         if (!(p->packet_flags & PKT_REBUILT_FRAG))
         {
-            MODULE_PROFILE_END(flowCheckPerfStats);
-            return DETECTION_OPTION_NO_MATCH;
+            return NO_MATCH;
         }
     }
 
-    MODULE_PROFILE_END(flowCheckPerfStats);
-    return DETECTION_OPTION_MATCH;
-}
-
-//-------------------------------------------------------------------------
-// public methods
-//-------------------------------------------------------------------------
-
-int OtnFlowFromServer(OptTreeNode* otn)
-{
-    FlowCheckOption* fco =
-        (FlowCheckOption*)get_rule_type_data(otn, s_name);
-
-    if (fco )
-    {
-        if ( fco->config.from_server )
-            return 1;
-    }
-    return 0;
-}
-
-int OtnFlowFromClient(OptTreeNode* otn)
-{
-    FlowCheckOption* fco =
-        (FlowCheckOption*)get_rule_type_data(otn, s_name);
-
-    if (fco )
-    {
-        if ( fco->config.from_client )
-            return 1;
-    }
-    return 0;
-}
-
-int OtnFlowIgnoreReassembled(OptTreeNode* otn)
-{
-    FlowCheckOption* fco =
-        (FlowCheckOption*)get_rule_type_data(otn, s_name);
-
-    if ( fco )
-    {
-        if ( fco->config.ignore_reassembled )
-            return 1;
-    }
-    return 0;
-}
-
-int OtnFlowOnlyReassembled(OptTreeNode* otn)
-{
-    FlowCheckOption* fco =
-        (FlowCheckOption*)get_rule_type_data(otn, s_name);
-
-    if ( fco )
-    {
-        if ( fco->config.only_reassembled )
-            return 1;
-    }
-    return 0;
+    return MATCH;
 }
 
 //-------------------------------------------------------------------------
 // support methods
 //-------------------------------------------------------------------------
 
-static void flow_verify(FlowCheckData* fcd)
+static bool flow_verify(FlowCheckData* fcd)
 {
     if (fcd->from_client && fcd->from_server)
     {
         ParseError("can't use both from_client and flow_from server");
-        return;
+        return false;
     }
 
     if ((fcd->ignore_reassembled & IGNORE_STREAM) && (fcd->only_reassembled & ONLY_STREAM))
     {
         ParseError("can't use no_stream and only_stream");
-        return;
+        return false;
     }
 
     if ((fcd->ignore_reassembled & IGNORE_FRAG) && (fcd->only_reassembled & ONLY_FRAG))
     {
         ParseError("can't use no_frag and only_frag");
-        return;
+        return false;
     }
 
     if (fcd->stateless && (fcd->from_client || fcd->from_server))
     {
         ParseError("can't use flow: stateless option with other options");
-        return;
+        return false;
     }
 
     if (fcd->stateless && fcd->established)
     {
         ParseError("can't specify established and stateless "
             "options in same rule");
-        return;
+        return false;
     }
 
     if (fcd->stateless && fcd->unestablished)
     {
         ParseError("can't specify unestablished and stateless "
             "options in same rule");
-        return;
+        return false;
     }
 
     if (fcd->established && fcd->unestablished)
     {
         ParseError("can't specify unestablished and established "
             "options in same rule");
-        return;
+        return false;
     }
+    return true;
 }
 
 //-------------------------------------------------------------------------
@@ -380,18 +299,28 @@ public:
     FlowModule() : Module(s_name, s_help, s_params) { }
 
     bool begin(const char*, int, SnortConfig*) override;
+    bool end(const char*, int, SnortConfig*) override;
     bool set(const char*, Value&, SnortConfig*) override;
 
     ProfileStats* get_profile() const override
     { return &flowCheckPerfStats; }
 
-    FlowCheckData data;
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    FlowCheckData data = {};
 };
 
 bool FlowModule::begin(const char*, int, SnortConfig*)
 {
     memset(&data, 0, sizeof(data));
     return true;
+}
+
+bool FlowModule::end(const char*, int, SnortConfig*)
+{
+    return flow_verify(&data);
 }
 
 bool FlowModule::set(const char*, Value& v, SnortConfig*)
@@ -432,7 +361,6 @@ bool FlowModule::set(const char*, Value& v, SnortConfig*)
     else
         return false;
 
-    flow_verify(&data);
     return true;
 }
 
@@ -455,15 +383,15 @@ static IpsOption* flow_ctor(Module* p, OptTreeNode* otn)
     FlowModule* m = (FlowModule*)p;
 
     if ( m->data.stateless )
-        otn->stateless = 1;
+        otn->set_stateless();
 
-    if ( m->data.established )
-        otn->established = 1;
+    if ( m->data.from_server )
+        otn->set_to_client();
 
-    if ( m->data.unestablished )
-        otn->unestablished = 1;
+    else if ( m->data.from_client )
+        otn->set_to_server();
 
-    if (otn->proto == SNORT_PROTO_ICMP)
+    if (otn->snort_protocol_id == SNORT_PROTO_ICMP)
     {
         if ( (m->data.only_reassembled != ONLY_FRAG) &&
             (m->data.ignore_reassembled != IGNORE_FRAG) )

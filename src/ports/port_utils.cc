@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,25 +17,18 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "port_utils.h"
 
-#include <stdlib.h>
-#include <string.h>
-#include <sys/types.h>
-#include <ctype.h>
-
-#include <memory>
+#include "utils/util.h"
 
 #include "port_item.h"
 #include "port_object.h"
-#include "port_table.h"
-#include "snort_types.h"
-#include "snort_config.h"
-#include "snort_bounds.h"
-#include "snort_debug.h"
-#include "detection/sfrim.h"
-#include "parser.h"
-#include "util.h"
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // bitset conversions
@@ -57,7 +50,7 @@ int PortObjectBits(PortBitSet& parray, PortObject* po)
     SF_LNODE* pos;
 
     for (poi=(PortObjectItem*)sflist_first(po->item_list,&pos);
-        poi != 0;
+        poi != nullptr;
         poi=(PortObjectItem*)sflist_next(&pos) )
     {
         /* Add ports that are not NOT'd */
@@ -74,13 +67,13 @@ int PortObjectBits(PortBitSet& parray, PortObject* po)
         {
             if ( !parray[i] )
                 cnt++;
-            parray[i] = 1;
+            parray[i] = true;
         }
     }
 
     /* Remove any NOT'd ports that may have been added above */
     for (poi=(PortObjectItem*)sflist_first(po->item_list,&pos);
-        poi != 0;
+        poi != nullptr;
         poi=(PortObjectItem*)sflist_next(&pos) )
     {
         if ( !poi->negate  )
@@ -93,25 +86,20 @@ int PortObjectBits(PortBitSet& parray, PortObject* po)
         {
             if ( parray[i] )
                 cnt--;
-            parray[i] = 0;
+            parray[i] = false;
         }
     }
 
     /* A pure Not list */
     if ( po->item_list->count == not_cnt )
     {
-        int i;
-
         /* enable all of the ports */
-        for (i=0; i<SFPO_MAX_PORTS; i++)
-        {
-            parray[i] = 1;
-            cnt++;
-        }
+        parray.set();
+        cnt += parray.count();
 
         /* disable the NOT'd ports */
         for (poi=(PortObjectItem*)sflist_first(po->item_list,&pos);
-            poi != 0;
+            poi != nullptr;
             poi=(PortObjectItem*)sflist_next(&pos) )
         {
             if ( !poi->negate  )
@@ -120,11 +108,11 @@ int PortObjectBits(PortBitSet& parray, PortObject* po)
             if ( poi->any() )
                 continue;
 
-            for ( int k = poi->lport; k <= poi->hport; k++ )
+            for ( int i = poi->lport; i <= poi->hport; i++ )
             {
-                if ( parray[k] )
+                if ( parray[i] )
                     cnt--;
-                parray[k] = 0;
+                parray[i] = false;
             }
         }
     }
@@ -132,18 +120,12 @@ int PortObjectBits(PortBitSet& parray, PortObject* po)
     return cnt;
 }
 
-/*
- *  Make a list of ports form the char array, each char is either
- *  on or off.
- */
 SF_LIST* PortObjectItemListFromBits(const PortBitSet& parray, int n)
 {
     SF_LIST* plist = sflist_new();
+    int nports = parray.count();
 
-    if ( !plist )
-        return 0;
-
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < n && nports > 0; i++)
     {
         if ( parray[i] == 0 )
             continue;
@@ -152,34 +134,24 @@ SF_LIST* PortObjectItemListFromBits(const PortBitSet& parray, int n)
 
         /* Either a port or the start of a range */
         lport = hport = i;
+        nports--;
 
-        for (i++; i<n; i++)
+        for (i++; i < n; i++)
         {
             if ( parray[i] )
             {
                 hport = i;
+                nports--;
                 continue;
             }
             break;
         }
 
         PortObjectItem* poi = PortObjectItemNew();
-
-        if ( !poi )
-        {
-            sflist_free_all(plist,free);
-            return 0;
-        }
-
-        poi->lport =(unsigned short)lport;
-        poi->hport =(unsigned short)hport;
-
-        if ( sflist_add_tail(plist, poi) )
-        {
-            sflist_free_all(plist, free);
-            return 0;
-        }
-    }
+        poi->lport = (unsigned short)lport;
+        poi->hport = (unsigned short)hport;
+        sflist_add_tail(plist, poi);
+     }
 
     return plist;
 }
@@ -190,10 +162,10 @@ SF_LIST* PortObjectItemListFromBits(const PortBitSet& parray, int n)
 
 int integer_compare(const void* arg1, const void* arg2)
 {
-    if ( *(int*)arg1 <  *(int*)arg2 )
+    if ( *(const int*)arg1 <  *(const int*)arg2 )
         return -1;
 
-    if ( *(int*)arg1 >  *(int*)arg2 )
+    if ( *(const int*)arg1 >  *(const int*)arg2 )
         return 1;
 
     return 0;
@@ -201,21 +173,21 @@ int integer_compare(const void* arg1, const void* arg2)
 
 int* RuleListToSortedArray(SF_LIST* rl)
 {
-    SF_LNODE* pos = NULL;
+    SF_LNODE* pos = nullptr;
     int* prid;
     int* ra;
     int k=0;
 
     if ( !rl )
-        return 0;
+        return nullptr;
 
     if (!rl->count)
-        return NULL;
+        return nullptr;
 
-    ra = (int*)SnortAlloc(rl->count * sizeof(int));
+    ra = (int*)snort_calloc(rl->count, sizeof(int));
 
     for ( prid = (int*)sflist_first(rl,&pos);
-        prid!= 0 && k < (int)rl->count;
+        prid!= nullptr && k < (int)rl->count;
         prid = (int*)sflist_next(&pos) )
     {
         ra[k++] = *prid;
@@ -231,5 +203,5 @@ int* RuleListToSortedArray(SF_LIST* rl)
 // printing
 //-------------------------------------------------------------------------
 
-char po_print_buf[MAXPORTS];
+char po_print_buf[MAX_PORTS];
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -18,44 +18,23 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "treenodes.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <sys/types.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <errno.h>
+#include "treenodes.h"
 
-#include "snort_types.h"
-#include "snort_debug.h"
-#include "detect.h"
 #include "framework/ips_option.h"
+#include "utils/util.h"
 
-/****************************************************************************
- *
- * Function: AddOptFuncToList(int (*func)(), OptTreeNode *)
- *
- * Purpose: Links the option detection module to the OTN
- *
- * Arguments: (*func)() => function pointer to the detection module
- *            otn =>  pointer to the current OptTreeNode
- *
- * Returns: void function
- *
- ***************************************************************************/
+using namespace snort;
+
 OptFpList* AddOptFuncToList(RuleOptEvalFunc ro_eval_func, OptTreeNode* otn)
 {
-    OptFpList* ofp = (OptFpList*)SnortAlloc(sizeof(OptFpList));
+    OptFpList* ofp = (OptFpList*)snort_calloc(sizeof(OptFpList));
+    ofp->OptTestFunc = ro_eval_func;
 
-    DEBUG_WRAP(DebugMessage(DEBUG_CONFIGRULES,"Adding new rule to list\n"); );
-
-    /* if there are no nodes on the function list... */
-    if (otn->opt_func == NULL)
+    if ( !otn->opt_func )
     {
         otn->opt_func = ofp;
     }
@@ -63,17 +42,12 @@ OptFpList* AddOptFuncToList(RuleOptEvalFunc ro_eval_func, OptTreeNode* otn)
     {
         OptFpList* tmp = otn->opt_func;
 
-        /* walk to the end of the list */
-        while (tmp->next != NULL)
+        // walk to the end of the list
+        while ( tmp->next )
             tmp = tmp->next;
 
         tmp->next = ofp;
     }
-
-    DEBUG_WRAP(DebugMessage(DEBUG_CONFIGRULES,"Set OptTestFunc to %p\n", ro_eval_func); );
-
-    ofp->OptTestFunc = ro_eval_func;
-
     return ofp;
 }
 
@@ -86,7 +60,7 @@ bool otn_set_agent(OptTreeNode* otn, IpsOption* opt)
     return true;
 }
 
-void otn_trigger_actions(OptTreeNode* otn, Packet* p)
+void otn_trigger_actions(const OptTreeNode* otn, Packet* p)
 {
     if ( otn->agent )
         otn->agent->action(p);
@@ -96,54 +70,38 @@ void otn_trigger_actions(OptTreeNode* otn, Packet* p)
 // rule FOO
 //-------------------------------------------------------------------------
 
-void* get_rule_type_data(OptTreeNode* otn, option_type_t type)
-{
-    OptFpList* fpl = otn->opt_func;
-
-    while ( fpl )
-    {
-        if ( fpl->type == type )
-            return fpl->context;
-
-        fpl = fpl->next;
-    }
-    return nullptr;
-}
-
 void* get_rule_type_data(OptTreeNode* otn, const char* name)
 {
     OptFpList* fpl = otn->opt_func;
 
     while ( fpl )
     {
-        if ( fpl->context )
+        if ( fpl->ips_opt )
         {
-            IpsOption* opt = (IpsOption*)fpl->context;
-
-            if ( !strcmp(opt->get_name(), name) )
-                return fpl->context;
+            if ( !strcmp(fpl->ips_opt->get_name(), name) )
+                return fpl->ips_opt;
         }
         fpl = fpl->next;
     }
     return nullptr;
 }
 
+namespace snort
+{
 bool otn_has_plugin(OptTreeNode* otn, const char* name)
 {
     OptFpList* fpl = otn->opt_func;
 
     while ( fpl )
     {
-        if ( !fpl->context )
+        if ( !fpl->ips_opt )
             continue;
 
-        IpsOption* opt = (IpsOption*)fpl->context;
-
-        if ( !strcmp(opt->get_name(), name) )
+        if ( !strcmp(fpl->ips_opt->get_name(), name) )
             return true;
 
         fpl = fpl->next;
     }
     return false;
 }
-
+}

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -35,9 +35,6 @@
 #ifndef FTPP_RETURN_CODES_H
 #define FTPP_RETURN_CODES_H
 
-#include "ftpp_include.h"
-
-#define FTPP_BOOL_FALSE 0
 #define FTPP_SUCCESS    0
 
 /*
@@ -64,16 +61,16 @@
 /*
  * Fatal errors are negative
  */
-#define FTPP_FATAL_ERR         -1
-#define FTPP_INVALID_ARG       -2
-#define FTPP_MEM_ALLOC_FAIL    -3
-#define FTPP_NOT_FOUND         -4
-#define FTPP_INVALID_FILE      -5
+#define FTPP_FATAL_ERR         (-1)
+#define FTPP_INVALID_ARG       (-2)
+#define FTPP_MEM_ALLOC_FAIL    (-3)
+#define FTPP_NOT_FOUND         (-4)
+#define FTPP_INVALID_FILE      (-5)
 
-#define FTPP_ALERT             -6
+#define FTPP_ALERT             (-6)
 
-#define FTPP_INVALID_DATE      -100
-#define FTPP_INVALID_PARAM     -101
+#define FTPP_INVALID_DATE      (-100)
+#define FTPP_INVALID_PARAM     (-101)
 
 #endif
 

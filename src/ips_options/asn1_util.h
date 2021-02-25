@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -125,7 +125,10 @@ struct ASN1_CONFIG
     int num_nodes;
 };
 
+namespace snort
+{
 struct SnortConfig;
+}
 
 /*
 **  Error Codes
@@ -136,20 +139,20 @@ struct SnortConfig;
 
 #define ASN1_OK      0
 
-#define ASN1_ERR_NULL_MEM            -1
-#define ASN1_ERR_INVALID_BER_TAG_LEN -3
-#define ASN1_ERR_MEM_ALLOC           -4
-#define ASN1_ERR_FATAL               -5
-#define ASN1_ERR_INVALID_INDEF_LEN   -6
-#define ASN1_ERR_INVALID_ARG         -7
-#define ASN1_ERR_STACK               -8
+#define ASN1_ERR_NULL_MEM            (-1)
+#define ASN1_ERR_INVALID_BER_TAG_LEN (-3)
+#define ASN1_ERR_MEM_ALLOC           (-4)
+#define ASN1_ERR_FATAL               (-5)
+#define ASN1_ERR_INVALID_INDEF_LEN   (-6)
+#define ASN1_ERR_INVALID_ARG         (-7)
+#define ASN1_ERR_STACK               (-8)
 
-void asn1_init_mem(SnortConfig*);
-void asn1_free_mem(SnortConfig*);
+void asn1_init_mem(int asn1_mem);
+void asn1_free_mem();
+
 int asn1_decode(const unsigned char* data, unsigned int len, ASN1_TYPE** asn1_type);
 int asn1_print_types(ASN1_TYPE* asn1_type, void* user);
-int asn1_traverse(ASN1_TYPE* asn1, void* user,
-    int (* DetectFunc)(ASN1_TYPE*, void*));
+int asn1_traverse(ASN1_TYPE* asn1, void* user, int (* DetectFunc)(ASN1_TYPE*, void*));
 
 #endif
 

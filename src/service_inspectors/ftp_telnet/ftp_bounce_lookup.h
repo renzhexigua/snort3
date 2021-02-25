@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -32,14 +32,13 @@
 #ifndef FTP_BOUNCE_LOOKUP_H
 #define FTP_BOUNCE_LOOKUP_H
 
-#include "ftpp_include.h"
 #include "ftpp_ui_config.h"
 
 int ftp_bounce_lookup_init(BOUNCE_LOOKUP** BounceLookup);
 int ftp_bounce_lookup_cleanup(BOUNCE_LOOKUP** BounceLookup);
-int ftp_bounce_lookup_add(BOUNCE_LOOKUP* BounceLookup, const sfip_t* ip, FTP_BOUNCE_TO* BounceTo);
+int ftp_bounce_lookup_add(BOUNCE_LOOKUP* BounceLookup, const snort::SfIp* ip, FTP_BOUNCE_TO* BounceTo);
 
-FTP_BOUNCE_TO* ftp_bounce_lookup_find(BOUNCE_LOOKUP* BounceLookup, const sfip_t* ip, int* iError);
+FTP_BOUNCE_TO* ftp_bounce_lookup_find(BOUNCE_LOOKUP* BounceLookup, const snort::SfIp* ip, int* iError);
 FTP_BOUNCE_TO* ftp_bounce_lookup_first(BOUNCE_LOOKUP* BounceLookup, int* iError);
 FTP_BOUNCE_TO* ftp_bounce_lookup_next(BOUNCE_LOOKUP* BounceLookup, int* iError);
 

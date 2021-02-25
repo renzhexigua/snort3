@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class AlertFast : public ConversionState
 {
 public:
     AlertFast(Converter& c) : ConversionState(c) { }
-    virtual ~AlertFast() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -52,7 +51,7 @@ bool AlertFast::convert(std::istringstream& data_stream)
     if (!(data_stream >> keyword))
         return retval;
 
-    if (!keyword.compare("packet"))
+    if (keyword == "packet")
     {
         retval = table_api.add_option("packet", true) && retval;
 
@@ -66,22 +65,24 @@ bool AlertFast::convert(std::istringstream& data_stream)
 
     int limit;
     char c = '\0';
-    std::string units = "B";
 
     std::istringstream tmp_stream(keyword);
-    tmp_stream >> limit;  // gauranteed success since keyword is non-empty
+    tmp_stream >> limit;  // guaranteed success since keyword is non-empty
     if (tmp_stream >> c)
     {
-        if (c == 'K' || c == 'k')
-            units = "K";
-        else if (c == 'M' || c == 'm')
-            units = "M";
+        if (limit <= 0)
+            limit = 0;
+        else if (c == 'K' || c == 'k')
+            limit = (limit + 1023) / 1024;
         else if (c == 'G' || c == 'g')
-            units = "G";
+            limit *= 1024;
     }
+    else
+        limit = (limit + 1024*1024 - 1) / (1024*1024);
 
     retval = table_api.add_option("limit", limit) && retval;
-    retval = table_api.add_option("units", units) && retval;
+    retval = table_api.add_comment("limit now in MB, converted") && retval;
+    retval = table_api.add_deleted_comment("units") && retval;
 
     // If we read something, more data available and bad input
     if (data_stream >> keyword)

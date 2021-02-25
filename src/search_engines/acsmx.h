@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -18,54 +18,48 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-/*
-**   ACSMX.H
-**
-**
-*/
-
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
-
-#include "snort_types.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "search_common.h"
+// acsmx.h author Marc Norton
 
 #ifndef ACSMX_H
 #define ACSMX_H
 
-/*
-*   Prototypes
-*/
+// version 1
+
+#include <cstdint>
+
+#include "search_common.h"
+
+namespace snort
+{
+struct SnortConfig;
+}
 
 #define ALPHABET_SIZE    256
+#define ACSM_FAIL_STATE   (-1)
 
-#define ACSM_FAIL_STATE   -1
-
-typedef struct _acsm_userdata
+struct ACSM_USERDATA
 {
-    uint32_t ref_count;
     void* id;
-} ACSM_USERDATA;
+    uint32_t ref_count;
+};
 
-typedef struct _acsm_pattern
+struct ACSM_PATTERN
 {
-    struct  _acsm_pattern* next;
-    unsigned char* patrn;
-    unsigned char* casepatrn;
+    ACSM_PATTERN* next;
+    ACSM_USERDATA* udata;
+
+    uint8_t* patrn;
+    uint8_t* casepatrn;
+
+    void* rule_option_tree;
+    void* neg_list;
+
     int n;
     int nocase;
     int negative;
-    int iid;
-    ACSM_USERDATA* udata;
-    void* rule_option_tree;
-    void* neg_list;
-} ACSM_PATTERN;
+};
 
-typedef struct
+struct ACSM_STATETABLE
 {
     /* Next state - based on input character */
     int NextState[ ALPHABET_SIZE ];
@@ -75,12 +69,12 @@ typedef struct
 
     /* List of patterns that end here, if any */
     ACSM_PATTERN* MatchList;
-}ACSM_STATETABLE;
+};
 
 /*
 * State machine Struct
 */
-typedef struct
+struct ACSM_STRUCT
 {
     int acsmMaxStates;
     int acsmNumStates;
@@ -92,45 +86,30 @@ typedef struct
     short bcShift[256];
 
     int numPatterns;
-    void (* userfree)(void* p);
-    void (* optiontreefree)(void** p);
-    void (* neg_list_free)(void** p);
-}ACSM_STRUCT;
+    const MpseAgent* agent;
+};
 
 /*
 *   Prototypes
 */
 void acsmx_init_xlatcase();
 
-ACSM_STRUCT* acsmNew(void (* userfree)(void* p),
-    void (* optiontreefree)(void** p),
-    void (* neg_list_free)(void** p));
+ACSM_STRUCT* acsmNew(const MpseAgent*);
 
 int acsmAddPattern(ACSM_STRUCT* p, const uint8_t* pat, unsigned n,
-    bool nocase, bool negative, void* id, int iid);
+    bool nocase, bool negative, void* id);
 
-int acsmCompile(ACSM_STRUCT* acsm,
-    int (* build_tree)(void* id, void** existing_tree),
-    int (* neg_list_func)(void* id, void** list));
+int acsmCompile(snort::SnortConfig*, ACSM_STRUCT*);
 
-struct SnortConfig;
-
-int acsmCompile(
-    SnortConfig*,
-    ACSM_STRUCT* acsm,
-    int (* build_tree)(SnortConfig*, void* id, void** existing_tree),
-    int (* neg_list_func)(void* id, void** list));
-
-int acsmSearch (
-ACSM_STRUCT * acsm,unsigned char* T, int n, MpseCallback,
-void* data, int* current_state);
+int acsmSearch(ACSM_STRUCT * acsm, const uint8_t* T,
+    int n, MpseMatch, void* context, int* current_state);
 
 void acsmFree(ACSM_STRUCT* acsm);
 int acsmPatternCount(ACSM_STRUCT* acsm);
 
 int acsmPrintDetailInfo(ACSM_STRUCT*);
 
-int acsmPrintSummaryInfo(void);
+int acsmPrintSummaryInfo();
 
 #endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -29,14 +29,16 @@ class RuleSubOption;
 class RuleOption
 {
 public:
-    RuleOption(std::string name);
-    RuleOption(std::string name, std::string val);
+    RuleOption(const std::string& name);
+    RuleOption(const std::string& name, const std::string& val);
     virtual ~RuleOption();
 
-    inline std::string get_name() { return name; }
+    inline const std::string& get_name() { return name; }
+    inline const std::string& get_value() { return value; }
+    inline void update_value(const std::string& new_value) { value = new_value; }
 
-    bool add_suboption(std::string name);
-    bool add_suboption(std::string name, std::string val);
+    bool add_suboption(const std::string& name);
+    bool add_suboption(const std::string& name, const std::string& val);
 
     // overloading operators
     friend std::ostream& operator<<(std::ostream&, const RuleOption&);

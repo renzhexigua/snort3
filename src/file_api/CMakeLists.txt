@@ -1,28 +1,39 @@
 
-
-add_subdirectory(libs)
-
-add_library ( file_api STATIC
-    file_api.h 
-    file_service.cc 
-    file_service.h 
-    file_service_config.cc 
-    file_service_config.h 
-    file_mime_process.h 
-    file_mime_process.cc 
-    file_resume_block.cc 
-    file_resume_block.h 
-    file_mime_config.cc 
-    file_mime_config.h
-    file_stats.cc 
-    file_stats.h
-    circular_buffer.cc 
-    circular_buffer.h
-    file_capture.cc
+set( FILE_API_INCLUDES
+    file_api.h
     file_capture.h
-    file_mempool.cc
-    file_mempool.h
+    file_config.h
+    file_flows.h
+    file_identifier.h
+    file_lib.h
+    file_module.h
+    file_policy.h
+    file_segment.h
+    file_service.h
 )
 
-target_link_libraries(file_api file)
+add_library ( file_api OBJECT
+    ${FILE_API_INCLUDES}
+    circular_buffer.cc
+    circular_buffer.h
+    file_capture.cc
+    file_cache.cc
+    file_cache.h
+    file_config.cc
+    file_flows.cc
+    file_identifier.cc
+    file_lib.cc
+    file_log.cc
+    file_mempool.cc
+    file_mempool.h
+    file_module.cc
+    file_policy.cc
+    file_segment.cc
+    file_service.cc
+    file_stats.cc
+    file_stats.h
+)
 
+install (FILES ${FILE_API_INCLUDES}
+    DESTINATION "${INCLUDE_INSTALL_PATH}/file_api"
+)

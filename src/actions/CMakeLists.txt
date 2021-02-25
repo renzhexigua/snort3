@@ -8,7 +8,6 @@ set (IPS_ACTION_SOURCES
     ips_actions.cc
     ips_actions.h
     act_replace.cc
-    act_replace.h
 )
 
 set( PLUGIN_LIST
@@ -17,19 +16,19 @@ set( PLUGIN_LIST
     )
 
 if (STATIC_IPS_ACTIONS)
-    add_library ( ips_actions STATIC
+    add_library ( ips_actions OBJECT
         ${IPS_ACTION_SOURCES}
         ${PLUGIN_LIST}
     )
 
 else (STATIC_IPS_ACTIONS)
 
-    add_library ( ips_actions STATIC
+    add_library ( ips_actions OBJECT
         ${IPS_ACTION_SOURCES}
     )
 
-    add_shared_library(act_react actions act_react.cc)
-    add_shared_library(act_reject actions act_reject.cc)
+    add_dynamic_module(act_react ips_actions act_react.cc)
+    add_dynamic_module(act_reject ips_actions act_reject.cc)
 
 endif (STATIC_IPS_ACTIONS)
 

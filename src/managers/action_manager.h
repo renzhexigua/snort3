@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,39 +20,61 @@
 #ifndef ACTION_MANAGER_H
 #define ACTION_MANAGER_H
 
-#ifdef HAVE_CONFIG_H
-# include "config.h"
-#endif
+// Factory for IpsActions.  Also manages their associated action queue,
+// which is just a single response deferred until end of current packet
+// processing.
 
-#include "snort_types.h"
 #include "actions/actions.h"
-#include "framework/base_api.h"
+#include "framework/ips_action.h"
+#include "framework/module.h"
 
+namespace snort
+{
 struct ActionApi;
 class IpsAction;
 struct SnortConfig;
 struct Packet;
+}
 
 //-------------------------------------------------------------------------
+
+#ifdef PIGLET
+struct IpsActionWrapper
+{
+    IpsActionWrapper(const snort::ActionApi* a, snort::IpsAction* p) :
+        api { a }, instance { p } { }
+
+    ~IpsActionWrapper()
+    {
+        if ( api && instance && api->dtor )
+            api->dtor(instance);
+    }
+
+    const snort::ActionApi* api;
+    snort::IpsAction* instance;
+};
+#endif
 
 class ActionManager
 {
 public:
-    static void add_plugin(const ActionApi*);
+    static void add_plugin(const snort::ActionApi*);
     static void release_plugins();
     static void dump_plugins();
 
-    static RuleType get_action_type(const char*);
+    static void new_config(snort::SnortConfig*);
+    static snort::Actions::Type get_action_type(const char*);
+    static void delete_config(snort::SnortConfig*);
 
-    static void instantiate(const ActionApi*, Module*, SnortConfig*);
+    static void instantiate(const snort::ActionApi*, snort::Module*, snort::SnortConfig*);
 
-    static void thread_init(SnortConfig*);
-    static void thread_term(SnortConfig*);
+    static void thread_init(const snort::SnortConfig*);
+    static void thread_reinit(const snort::SnortConfig*);
+    static void thread_term();
 
-    static void reset_queue();
-    static void queue_reject(const Packet*);
-    static void queue(IpsAction*);
-    static void execute(Packet*);
+#ifdef PIGLET
+    static IpsActionWrapper* instantiate(const char*, snort::Module*);
+#endif
 };
 
 #endif

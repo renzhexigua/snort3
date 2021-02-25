@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,7 +20,7 @@
 #ifndef ASN1_DETECT_H
 #define ASN1_DETECT_H
 
-#include <stdint.h>
+#include <cstdint>
 
 #define ABS_OFFSET 1
 #define REL_OFFSET 2

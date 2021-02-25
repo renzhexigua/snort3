@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -30,16 +30,33 @@
 #include "data/data_types/dt_rule.h"
 #include "data/data_types/dt_include.h"
 
-TableApi::TableApi() :  curr_data_bad(false) { }
-
 TableApi::~TableApi()
 {
     for (auto t : tables)
         delete t;
 }
 
+bool TableApi::should_delegate() const
+{ return delegating; }
+
+bool TableApi::should_delegate(const std::string& table_name) const
+{
+    if ( delegating )
+        return true;
+
+    if ( delegate == this )
+        return false;
+
+    auto d = delegations.find(table_name);
+    if ( d != delegations.end() )
+        return d->second;
+
+    return false;
+}
+
 void TableApi::reset_state()
 {
+    // DO NOT RESET DELEGATE STATE. IT HAS ITS OWN LIFECYCLE.
     std::stack<Table*> empty;
     open_tables.swap(empty);
     std::stack<unsigned> empty_two;
@@ -47,63 +64,114 @@ void TableApi::reset_state()
     curr_data_bad = false;
 }
 
-void TableApi::open_top_level_table(std::string table_name)
+void TableApi::open_top_level_table(const std::string& table_name, bool one_line)
 {
-    Table* t = util::find_table(tables, table_name);
+    if ( should_delegate(table_name) )
+    {
+        delegate->open_top_level_table(table_name, one_line);
+        delegating++;
+        return;
+    }
 
-    if (t == nullptr)
+    Table* t = util::find_table(tables, table_name);
+    bool existed = (t != nullptr);
+
+    if ( !existed )
     {
         t = new Table(table_name, 0);
         tables.push_back(t);
     }
 
+    t->set_one_line(one_line);
     open_tables.push(t);
 
     // ignore the initial table
-    if (open_tables.size() > 1)
+    if ( open_tables.size() > 1 )
         top_level_tables.push(open_tables.size());
-}
 
-void TableApi::open_table(std::string table_name)
-{
-    Table* t;
-
-    // if no open tables, create a top-level table
-    if (open_tables.size() > 0)
+    if ( !existed )
     {
-        t = open_tables.top()->open_table(table_name);
-    }
-    else
-    {
-        t = util::find_table(tables, table_name);
-
-        if (t == nullptr)
+        auto p = pending.find(table_name);
+        if ( p != pending.end() )
         {
-            t = new Table(table_name, 0);
-            tables.push_back(t);
+            auto& q = p->second;
+            while ( q.size() )
+            {
+                q.front()(*this);
+                q.pop();
+            }
+
+            pending.erase(p);
         }
     }
-
-    open_tables.push(t);
 }
 
-void TableApi::open_table()
+void TableApi::open_table(const std::string& table_name, bool one_line)
 {
+    if ( should_delegate(table_name) )
+    {
+        delegate->open_table(table_name, one_line);
+        delegating++;
+        return;
+    }
+
     // if no open tables, create a top-level table
-    if (open_tables.size() == 0)
+    if (!open_tables.empty())
+    {
+        Table* t = open_tables.top()->open_table(table_name);
+        t->set_one_line(one_line);
+        open_tables.push(t);
+    }
+    else
+        open_top_level_table(table_name, one_line);
+}
+
+void TableApi::open_table(bool one_line)
+{
+    if ( should_delegate() )
+    {
+        delegate->open_table(one_line);
+        delegating++;
+        return;
+    }
+
+    // if no open tables, create a top-level table
+    if (open_tables.empty())
     {
         DataApi::developer_error("A nameless table must be nested inside a table!!");
     }
     else
     {
         Table* t = open_tables.top()->open_table();
+        t->set_one_line(one_line);
         open_tables.push(t);
     }
 }
 
+void TableApi::open_associative_table(const char* name, const char* key)
+{
+    if ( should_delegate(name) )
+    {
+        delegate->open_associative_table(name, key);
+        delegating++;
+        return;
+    }
+
+    Table* t = new Table(name, key, 0);
+    tables.push_back(t);
+    open_tables.push(t);
+}
+
 void TableApi::close_table()
 {
-    if (open_tables.size() == 0)
+    if ( should_delegate() )
+    {
+        delegate->close_table();
+        delegating--;
+        return;
+    }
+
+    if (open_tables.empty())
         DataApi::developer_error("No open tables to close!!");
     else
     {
@@ -115,51 +183,56 @@ void TableApi::close_table()
     }
 }
 
-bool TableApi::add_option(const std::string option_name, const std::string val)
+template<typename T>
+bool TableApi::do_add_option(const std::string& opt_name, T val, const std::string& s_val)
 {
-    if (open_tables.size() == 0)
+    if ( should_delegate() )
+        return delegate->add_option(opt_name, val);
+
+    if (open_tables.empty())
     {
         DataApi::developer_error("Must open table before adding an option!!: " +
-            option_name + " = " + val);
+            opt_name + " = " + s_val);
         return false;
     }
 
     Table* t = open_tables.top();
-    t->add_option(option_name, val);
+    t->add_option(opt_name, val);
     return true;
 }
 
-bool TableApi::add_option(const std::string option_name, const int val)
+bool TableApi::add_option(const std::string& val)
 {
-    if (open_tables.size() == 0)
+    if ( should_delegate() )
+        return delegate->add_option(val);
+
+    if (open_tables.empty())
     {
-        DataApi::developer_error("Must open table before adding an option!!: " +
-            option_name + " = " + std::to_string(val));
+        DataApi::developer_error("Must open table before adding an option!!: "
+            "<anonymous> = " + val);
         return false;
     }
 
     Table* t = open_tables.top();
-    t->add_option(option_name, val);
+    t->add_option(val);
     return true;
 }
 
-bool TableApi::add_option(const std::string option_name, const bool val)
-{
-    if (open_tables.size() == 0)
-    {
-        DataApi::developer_error("Must open table before adding an option!!: " +
-            option_name + " = " + std::to_string(val));
-        return false;
-    }
+bool TableApi::add_option(const std::string& option_name, const std::string& val)
+{ return do_add_option(option_name, val, val); }
 
-    Table* t = open_tables.top();
-    t->add_option(option_name, val);
-    return true;
-}
+bool TableApi::add_option(const std::string& option_name, const int val)
+{ return do_add_option(option_name, val, std::to_string(val)); }
+
+bool TableApi::add_option(const std::string& option_name, const bool val)
+{ return do_add_option(option_name, val, std::to_string(val)); }
 
 // compilers are fickle and dangerous creatures.  Ensure a literal gets
 // sent here rather to become a bool
-bool TableApi::add_option(const std::string name, const char* const v)
+bool TableApi::add_option(const char* const v)
+{ return add_option(std::string(v)); }
+
+bool TableApi::add_option(const std::string& name, const char* const v)
 { return add_option(name, std::string(v)); }
 
 void TableApi::create_append_data(std::string& fqn, Table*& t)
@@ -172,7 +245,7 @@ void TableApi::create_append_data(std::string& fqn, Table*& t)
     // I need to iterate over the stack of open tables.  However,
     // stack's don't allow iteration without popping.  So, rather
     // than change the underlying stack data structure, I am going
-    // to just copy the entire data structure.  Innedficciant, but
+    // to just copy the entire data structure.  Inefficient, but
     // not pressed for speed here.
     std::stack<Table*> copy(open_tables);
 
@@ -184,72 +257,51 @@ void TableApi::create_append_data(std::string& fqn, Table*& t)
     }
 }
 
-void TableApi::append_option(const std::string option_name, const std::string val)
+template<typename T>
+void TableApi::do_append_option(const std::string& option_name, const T val, const std::string& s_val)
 {
-    if (open_tables.size() == 0)
+    if ( should_delegate() )
+    {
+        delegate->append_option(option_name, val);
+        return;
+    }
+
+    if (open_tables.empty())
     {
         DataApi::developer_error("Must open table before adding an option!!: " +
-            option_name + " = " + val);
+            option_name + " = " + s_val);
         return;
     }
 
     Table* t = nullptr;
-    std::string opt_name = option_name;
+    std::string opt_name(option_name);
     create_append_data(opt_name, t);
 
     if ( t != nullptr)
         t->append_option(opt_name, val);
     else
         DataApi::developer_error("Snort2lua cannot find a Table to append the option: "
-            + option_name + " = " + val);
+            + option_name + " = " + s_val);
 }
 
-void TableApi::append_option(const std::string option_name, const int val)
-{
-    if (open_tables.size() == 0)
-    {
-        DataApi::developer_error("Must open table before adding an option!!: " +
-            option_name + " = " + std::to_string(val));
-        return;
-    }
+void TableApi::append_option(const std::string& option_name, const std::string& val)
+{ do_append_option(option_name, val, val); }
 
-    Table* t = nullptr;
-    std::string opt_name = option_name;
-    create_append_data(opt_name, t);
+void TableApi::append_option(const std::string& option_name, const int val)
+{ do_append_option(option_name, val, std::to_string(val)); }
 
-    if ( t != nullptr)
-        t->append_option(opt_name, val);
-    else
-        DataApi::developer_error("Snort2lua cannot find a Table to append the option: "
-            + opt_name + " = " + std::to_string(val));
-}
+void TableApi::append_option(const std::string& option_name, const bool val)
+{ do_append_option(option_name, val, std::to_string(val)); }
 
-void TableApi::append_option(const std::string option_name, const bool val)
-{
-    if (open_tables.size() == 0)
-    {
-        DataApi::developer_error("Must open table before adding an option!!: " +
-            option_name + " = " + std::to_string(val));
-        return;
-    }
-
-    Table* t = nullptr;
-    std::string opt_name = option_name;
-    create_append_data(opt_name, t);
-
-    if ( t != nullptr)
-        t->append_option(opt_name, val);
-    else
-        DataApi::developer_error("Snort2lua cannot find a Table to append the option: "
-            + opt_name + " = " + std::to_string(val));
-}
-
-void TableApi::append_option(const std::string name, const char* const v)
+void TableApi::append_option(const std::string& name, const char* const v)
 { append_option(name, std::string(v)); }
 
-bool TableApi::add_list(std::string list_name, std::string next_elem)
+bool TableApi::add_list(const std::string& list_name, const std::string& next_elem)
 {
-    if (open_tables.size() == 0)
+    if ( should_delegate() )
+        return delegate->add_list(list_name, next_elem);
+
+    if (open_tables.empty())
     {
         DataApi::developer_error("Must open table before adding an option!!: " +
             list_name + " = " + next_elem);
@@ -271,9 +323,12 @@ bool TableApi::add_list(std::string list_name, std::string next_elem)
     }
 }
 
-bool TableApi::add_comment(std::string comment)
+bool TableApi::add_comment(const std::string& comment)
 {
-    if (open_tables.size() == 0)
+    if ( should_delegate() )
+        return delegate->add_comment(comment);
+
+    if (open_tables.empty())
     {
         DataApi::developer_error("Must open table before adding comment !!: '" +
             comment + "'");
@@ -286,9 +341,12 @@ bool TableApi::add_comment(std::string comment)
     return true;
 }
 
-bool TableApi::option_exists(const std::string name)
+bool TableApi::option_exists(const std::string& name)
 {
-    if (open_tables.size() == 0)
+    if ( should_delegate() )
+        return delegate->option_exists(name);
+
+    if (open_tables.empty())
     {
         DataApi::developer_error("Must open table before calling option_exists() !!");
         return false;
@@ -297,12 +355,15 @@ bool TableApi::option_exists(const std::string name)
     return open_tables.top()->has_option(name);
 }
 
-bool TableApi::add_diff_option_comment(std::string orig_var, std::string new_var)
+bool TableApi::add_diff_option_comment(const std::string& orig_var, const std::string& new_var)
 {
+    if ( should_delegate() )
+        return delegate->add_diff_option_comment(orig_var, new_var);
+
     std::string error_string = "option change: '" + orig_var + "' --> '"
         + new_var + "'";
 
-    if (open_tables.size() == 0)
+    if (open_tables.empty())
     {
         DataApi::developer_error("Must open table before adding an option!!: " +
             orig_var + " = " + new_var);
@@ -313,11 +374,14 @@ bool TableApi::add_diff_option_comment(std::string orig_var, std::string new_var
     return true;
 }
 
-bool TableApi::add_deleted_comment(std::string dep_var)
+bool TableApi::add_deleted_comment(const std::string& dep_var)
 {
+    if ( should_delegate() )
+        return delegate->add_deleted_comment(dep_var);
+
     std::string error_string = "option deleted: '" + dep_var + "'";
 
-    if (open_tables.size() == 0)
+    if (open_tables.empty())
     {
         DataApi::developer_error("Must open a table before adding "
             "deprecated comment!!: " + dep_var);
@@ -328,14 +392,17 @@ bool TableApi::add_deleted_comment(std::string dep_var)
     return true;
 }
 
-bool TableApi::add_unsupported_comment(std::string unsupported_var)
+bool TableApi::add_unsupported_comment(const std::string& unsupported_var)
 {
-    std::string unsupported_str = "option '" + unsupported_var +
-        "' is current unsupported";
+    if ( should_delegate() )
+        return delegate->add_unsupported_comment(unsupported_var);
 
-    if (open_tables.size() == 0)
+    std::string unsupported_str = "option '" + unsupported_var +
+        "' is currently unsupported";
+
+    if (open_tables.empty())
     {
-        DataApi::developer_error("Must open a tablebefore adding an "
+        DataApi::developer_error("Must open a table before adding an "
             "'unsupported' comment");
         return false;
     }
@@ -346,18 +413,17 @@ bool TableApi::add_unsupported_comment(std::string unsupported_var)
 
 std::ostream& operator<<(std::ostream& out, const TableApi& table)
 {
-    for (Table* t : table.tables)
-        out << (*t) << "\n\n";
-    out << "\n\n";
-
+    table.print_tables(out);
     return out;
 }
 
-void TableApi::print_tables(std::ostream& out)
+void TableApi::print_tables(std::ostream& out) const
 {
+    if ( empty() )
+        return;
+
     for (Table* t : tables)
         out << (*t) << "\n\n";
-    out << "\n\n";
 }
 
 void TableApi::swap_tables(std::vector<Table*>& new_tables)
@@ -365,3 +431,32 @@ void TableApi::swap_tables(std::vector<Table*>& new_tables)
     tables.swap(new_tables);
 }
 
+bool TableApi::get_option_value(const std::string& name, std::string& value)
+{
+    if ( should_delegate() )
+        return delegate->get_option_value(name, value);
+
+    if (open_tables.empty())
+    {
+        DataApi::developer_error("Must open table before calling option_exists() !!");
+        return false;
+    }
+
+    return open_tables.top()->get_option(name, value);
+}
+
+void TableApi::run_when_exists(const char* table_name, PendingFunction action)
+{
+    if ( should_delegate(table_name) )
+        delegate->run_when_exists(table_name, action);
+
+    if ( util::find_table(tables, table_name) )
+        action(*this);
+    else
+    {
+        if ( pending.find(table_name) == pending.end() )
+            pending[table_name] = std::queue<PendingFunction>();
+
+        pending[table_name].push(action);
+    }
+}

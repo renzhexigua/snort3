@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -32,8 +32,7 @@ class StreamUdp : public ConversionState
 {
 public:
     StreamUdp(Converter& c) : ConversionState(c) { }
-    virtual ~StreamUdp() { }
-    virtual bool convert(std::istringstream& data_stream);
+    bool convert(std::istringstream& data_stream) override;
 };
 } // namespace
 
@@ -54,10 +53,10 @@ bool StreamUdp::convert(std::istringstream& data_stream)
         if (keyword.empty())
             continue;
 
-        if (!keyword.compare("ignore_any_rules"))
-            tmpval = table_api.add_option("ignore_any_rules", true);
+        if (keyword == "ignore_any_rules")
+            table_api.add_deleted_comment("ignore_any_rules");
 
-        else if (!keyword.compare("timeout"))
+        else if (keyword == "timeout")
         {
             table_api.add_diff_option_comment("timeout", "session_timeout");
             tmpval = parse_int_option("session_timeout", data_stream, false);

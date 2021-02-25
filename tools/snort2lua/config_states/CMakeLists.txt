@@ -1,9 +1,12 @@
 
-add_library( config_states
+add_library( config_states OBJECT
     config_alertfile.cc
     config_binding.cc
     config_checksums.cc
     config_classification.cc
+    config_daq.cc
+    config_daq_mode.cc
+    config_daq_var.cc
     config_decode_esp.cc
     config_default_rule_state.cc
     config_deleted.cc
@@ -15,6 +18,7 @@ add_library( config_states
     config_ipv6_frag.cc
     config_memcaps.cc
     config_mpls_payload_type.cc
+    config_na_policy_mode.cc
     config_no_option.cc
     config_one_int_option.cc
     config_one_string_option.cc
@@ -22,6 +26,7 @@ add_library( config_states
     config_paf_max.cc
     config_policy_id.cc
     config_policy_mode.cc
+    config_policy_uuid.cc
     config_ppm.cc
     config_profile.cc
     config_reference.cc
@@ -31,7 +36,3 @@ add_library( config_states
     config_api.cc
 )
 
-target_link_libraries( config_states
-    snort2lua_helpers
-    conversion_data
-)

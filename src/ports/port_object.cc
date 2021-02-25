@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,82 +17,64 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include <cassert>
+
 #include "port_object.h"
 
-#include <stdlib.h>
-#include <string.h>
-#include <sys/types.h>
-#include <ctype.h>
+#include "log/messages.h"
+#include "parser/parser.h"
+#include "utils/util.h"
+#include "utils/util_cstring.h"
 
-#include <memory>
-
+#include "port_group.h"
 #include "port_item.h"
 #include "port_utils.h"
-#include "snort_types.h"
-#include "snort_config.h"
-#include "snort_bounds.h"
-#include "snort_debug.h"
-#include "detection/sfrim.h"
-#include "parser.h"
-#include "util.h"
-#include "hash/sfhashfcn.h"
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // PortObject - public
 //-------------------------------------------------------------------------
 
-/*
-    Create a new PortObject
-*/
-PortObject* PortObjectNew(void)
+PortObject* PortObjectNew()
 {
-    PortObject* po = (PortObject*)SnortAlloc(sizeof(PortObject));
-
+    PortObject* po = (PortObject*)snort_calloc(sizeof(PortObject));
     po->item_list =(SF_LIST*)sflist_new();
-
-    if ( !po->item_list )
-    {
-        free(po);
-        return 0;
-    }
-
     po->rule_list =(SF_LIST*)sflist_new();
-    if ( !po->rule_list )
-    {
-        sflist_free_all(po->item_list, free);
-        free(po);
-        return 0;
-    }
-
     return po;
 }
 
-/*
- *  Free the PortObject
- */
-void PortObjectFree(void* pvoid)
+void PortObjectFree(void* pv)
 {
-    PortObject* po = (PortObject*)pvoid;
-    DEBUG_WRAP(static int pof_cnt = 0; pof_cnt++; );
-
-    DEBUG_WRAP(DebugMessage(DEBUG_PORTLISTS,"PortObjectFree-Cnt: %d ptr=%p\n",pof_cnt,pvoid); );
-
-    if ( !po )
-        return;
+    assert(pv);
+    PortObject* po = (PortObject*)pv;
 
     if ( po->name )
-        free (po->name);
+        snort_free(po->name);
+
     if ( po->item_list)
-        sflist_free_all(po->item_list, free);
+        sflist_free_all(po->item_list, snort_free);
+
     if ( po->rule_list)
-        sflist_free_all(po->rule_list, free);
+        sflist_free_all(po->rule_list, snort_free);
 
-    if (po->data && po->data_free)
-    {
-        po->data_free(po->data);
-    }
+    if (po->group )
+        PortGroup::free(po->group);
 
-    free(po);
+    snort_free(po);
+}
+
+void PortObjectFinalize(PortObject* po)
+{
+    sflist_free_all(po->item_list, snort_free);
+    sflist_free_all(po->rule_list, snort_free);
+
+    po->item_list = nullptr;
+    po->rule_list = nullptr;
 }
 
 /*
@@ -108,13 +90,10 @@ int PortObjectSetName(PortObject* po, const char* name)
 
     /* free the old name */
     if (po->name)
-        free(po->name);
+        snort_free(po->name);
 
     /* alloc a new name */
-    po->name = SnortStrdup(name);
-    if ( !po->name )
-        return -1;
-
+    po->name = snort_strdup(name);
     return 0;
 }
 
@@ -124,7 +103,7 @@ int PortObjectSetName(PortObject* po, const char* name)
 int PortObjectAddItem(PortObject* po, PortObjectItem* poi, int* errflag)
 {
     PortObjectItem* p;
-    SF_LNODE* pos = NULL;
+    SF_LNODE* pos = nullptr;
 
     if (!po || !poi)
         return 0;
@@ -133,19 +112,16 @@ int PortObjectAddItem(PortObject* po, PortObjectItem* poi, int* errflag)
         *errflag = 0;
 
     /* Make sure this is not a duplicate */
-    for (p=(PortObjectItem*)sflist_first(po->item_list,&pos);
-        p != 0;
-        p=(PortObjectItem*)sflist_next(&pos) )
+    for (p = (PortObjectItem*)sflist_first(po->item_list,&pos);
+        p != nullptr;
+        p = (PortObjectItem*)sflist_next(&pos))
     {
         if ((p->lport == poi->lport) && (p->hport == poi->hport))
-        {
-            if (errflag)
-                *errflag = 9; // FIXIT why return poparser code here? POPERR_DUPLICATE_ENTRY;
-            return -1; /* -1 chosen for consistency with sflist_add_tail */
-        }
+            ParseWarning(WARN_RULES, "duplicate ports in list");
     }
 
-    return sflist_add_tail(po->item_list, poi);
+    sflist_add_tail(po->item_list, poi);
+    return 0;
 }
 
 /*
@@ -154,14 +130,14 @@ int PortObjectAddItem(PortObject* po, PortObjectItem* poi, int* errflag)
 int PortObjectAddPortObject(PortObject* podst, PortObject* posrc, int* errflag)
 {
     PortObjectItem* po;
-    SF_LNODE* pos = NULL;
+    SF_LNODE* pos = nullptr;
     int ret = 0;
 
     if (errflag)
         *errflag = 0;
 
     for (po=(PortObjectItem*)sflist_first(posrc->item_list, &pos);
-        po != 0;
+        po != nullptr;
         po=(PortObjectItem*)sflist_next(&pos) )
     {
         PortObjectItem* poi = PortObjectItemDup(po);
@@ -175,24 +151,19 @@ int PortObjectAddPortObject(PortObject* podst, PortObject* posrc, int* errflag)
     return ret;
 }
 
-int PortObjectAddPort(PortObject* po, int port, int not_flag)
+int PortObjectAddPort(PortObject* po, int port)
 {
-    return PortObjectAddRange(po, port, port, not_flag);
+    return PortObjectAddRange(po, port, port);
 }
 
-int PortObjectAddRange(PortObject* po, int lport, int hport, int not_flag)
+int PortObjectAddRange(PortObject* po, int lport, int hport)
 {
     PortObjectItem* poi = PortObjectItemNew();
-
-    if ( !poi )
-        return -1;
-
     poi->lport = (unsigned short)lport;
     poi->hport = (unsigned short)hport;
 
-    poi->negate = not_flag != 0;
-
-    return sflist_add_tail(po->item_list, poi);
+    sflist_add_tail(po->item_list, poi);
+    return 0;
 }
 
 int PortObjectAddRule(PortObject* po, int rule)
@@ -207,28 +178,19 @@ int PortObjectAddRule(PortObject* po, int rule)
         return -1;
 
     /* Add rule index to rule list */
-    pruleid = (int*)calloc(1,sizeof(int));
-    if ( !pruleid )
-    {
-        return -1;
-    }
-
+    pruleid = (int*)snort_calloc(sizeof(int));
     *pruleid = rule;
 
     sflist_add_tail(po->rule_list, pruleid);
-
     return 0;
 }
 
 int PortObjectAddPortAny(PortObject* po)
 {
     if (!po->name)
-        po->name = strdup("any");
+        po->name = snort_strdup("any");
 
-    if (!po->name)
-        return -1;
-
-    return PortObjectAddRange(po, 0, SFPO_MAX_PORTS-1, 0);
+    return PortObjectAddRange(po, 0, SFPO_MAX_PORTS-1);
 }
 
 /*
@@ -236,65 +198,37 @@ int PortObjectAddPortAny(PortObject* po)
  */
 PortObject* PortObjectDup(PortObject* po)
 {
-    PortObject* ponew = NULL;
-    PortObjectItem* poi = NULL;
-    PortObjectItem* poinew = NULL;
-    SF_LNODE* lpos = NULL;
-    int* prid = NULL;
-    int* prule = NULL;
-
-    ponew = PortObjectNew();
-    if ( !ponew )
-        return 0;
+    SF_LNODE* lpos = nullptr;
+    PortObject* ponew = PortObjectNew();
 
     /* Dup the Name */
     if ( po->name )
-        ponew->name = strdup(po->name);
+        ponew->name = snort_strdup(po->name);
     else
-        ponew->name = strdup("dup");
-
-    if ( !ponew->name )
-    {
-        free(ponew);
-        return NULL;
-    }
+        ponew->name = snort_strdup("dup");
 
     /* Dup the Item List */
     if ( po->item_list )
     {
-        for (poi =(PortObjectItem*)sflist_first(po->item_list,&lpos);
-            poi != NULL;
-            poi =(PortObjectItem*)sflist_next(&lpos) )
+        for (PortObjectItem* poi = (PortObjectItem*)sflist_first(po->item_list, &lpos);
+            poi != nullptr;
+            poi = (PortObjectItem*)sflist_next(&lpos) )
         {
-            poinew = PortObjectItemDup(poi);
-            if (!poinew)
-            {
-                free(ponew->name);
-                free(ponew);
-                return 0;
-            }
-
-            PortObjectAddItem(ponew, poinew, NULL);
+            PortObjectItem* poinew = PortObjectItemDup(poi);
+            PortObjectAddItem(ponew, poinew, nullptr);
         }
     }
 
     /* Dup the input rule list */
     if ( po->rule_list )
     {
-        for (prid  = (int*)sflist_first(po->rule_list,&lpos);
-            prid != 0;
+        for (int* prid  = (int*)sflist_first(po->rule_list, &lpos);
+            prid != nullptr;
             prid  = (int*)sflist_next(&lpos) )
         {
-            prule = (int*)calloc(1,sizeof(int));
-            if (!prule)
-            {
-                free(poinew);
-                free(ponew->name);
-                free(ponew);
-                return NULL;
-            }
+            int* prule = (int*)snort_calloc(sizeof(int));
             *prule = *prid;
-            sflist_add_tail(ponew->rule_list,prule);
+            sflist_add_tail(ponew->rule_list, prule);
         }
     }
 
@@ -306,41 +240,24 @@ PortObject* PortObjectDup(PortObject* po)
  */
 PortObject* PortObjectDupPorts(PortObject* po)
 {
-    PortObject* ponew = NULL;
-    PortObjectItem* poi = NULL;
-    PortObjectItem* poinew = NULL;
-    SF_LNODE* lpos = NULL;
-
-    ponew = PortObjectNew();
-    if ( !ponew )
-        return 0;
+    SF_LNODE* lpos = nullptr;
+    PortObject* ponew = PortObjectNew();
 
     /* Dup the Name */
     if ( po->name )
-        ponew->name = strdup(po->name);
+        ponew->name = snort_strdup(po->name);
     else
-        ponew->name = strdup("dup");
-
-    if ( !ponew->name )
-    {
-        free(ponew);
-        return NULL;
-    }
+        ponew->name = snort_strdup("dup");
 
     /* Dup the Item List */
     if ( po->item_list )
     {
-        for (poi =(PortObjectItem*)sflist_first(po->item_list,&lpos);
-            poi != NULL;
-            poi =(PortObjectItem*)sflist_next(&lpos) )
+        for (PortObjectItem* poi = (PortObjectItem*)sflist_first(po->item_list, &lpos);
+            poi != nullptr;
+            poi = (PortObjectItem*)sflist_next(&lpos))
         {
-            poinew = PortObjectItemDup(poi);
-            if (!poinew)
-            {
-                free(ponew);
-                return NULL;
-            }
-            PortObjectAddItem(ponew, poinew, NULL);
+            PortObjectItem* poinew = PortObjectItemDup(poi);
+            PortObjectAddItem(ponew, poinew, nullptr);
         }
     }
     return ponew;
@@ -356,31 +273,12 @@ PortObject* PortObjectDupPorts(PortObject* po)
 int PortObjectNormalize(PortObject* po)
 {
     if ( PortObjectHasAny (po) )
-        return 0;   /* ANY =65K */
+        return 0;   /* ANY =64K */
 
     PortBitSet parray;
     int nports = PortObjectBits(parray, po);
 
-    sflist_free_all(po->item_list, free);
-    po->item_list = PortObjectItemListFromBits(parray, SFPO_MAX_PORTS);
-
-    return nports;
-}
-
-/*
-*    Negate an entire PortObject
-*/
-int PortObjectNegate(PortObject* po)
-{
-    if ( PortObjectHasAny (po) )
-        return 0;  /* ANY =65K */
-
-    PortBitSet parray;
-    int nports = PortObjectBits(parray, po);
-
-    parray = ~parray;
-
-    sflist_free_all(po->item_list, free);
+    sflist_free_all(po->item_list, snort_free);
     po->item_list = PortObjectItemListFromBits(parray, SFPO_MAX_PORTS);
 
     return nports;
@@ -389,7 +287,7 @@ int PortObjectNegate(PortObject* po)
 /*
    PortObjects should be normalized, prior to testing
 */
-int PortObjectEqual(PortObject* a, PortObject* b)
+bool PortObjectEqual(PortObject* a, PortObject* b)
 {
     PortObjectItem* pa;
     PortObjectItem* pb;
@@ -397,7 +295,7 @@ int PortObjectEqual(PortObject* a, PortObject* b)
     SF_LNODE* posb;
 
     if ( a->item_list->count != b->item_list->count )
-        return 0;
+        return false;
 
     pa = (PortObjectItem*)sflist_first(a->item_list,&posa);
     pb = (PortObjectItem*)sflist_first(b->item_list,&posb);
@@ -405,16 +303,16 @@ int PortObjectEqual(PortObject* a, PortObject* b)
     while ( pa && pb )
     {
         if ( !PortObjectItemsEqual(pa, pb) )
-            return 0;
+            return false;
 
         pa = (PortObjectItem*)sflist_next(&posa);
         pb = (PortObjectItem*)sflist_next(&posb);
     }
 
     if ( pa || pb ) /* both are not done - cannot match */
-        return 0;
+        return false;
 
-    return 1; /* match */
+    return true; /* match */
 }
 
 /*
@@ -430,22 +328,20 @@ int PortObjectEqual(PortObject* a, PortObject* b)
 */
 int PortObjectPortCount(PortObject* po)
 {
-    PortObjectItem* poi;
     SF_LNODE* cursor;
     int cnt=0;
-    int nports;
 
     if ( !po )
         return 0;
 
-    for (poi=(PortObjectItem*)sflist_first(po->item_list, &cursor);
-        poi != 0;
+    for (PortObjectItem* poi=(PortObjectItem*)sflist_first(po->item_list, &cursor);
+        poi != nullptr;
         poi=(PortObjectItem*)sflist_next(&cursor) )
     {
         if ( poi->any() )
             return -1;
 
-        nports = poi->hport - poi->lport + 1;
+        int nports = poi->hport - poi->lport + 1;
 
         if ( poi->negate )
             cnt -= nports;
@@ -481,7 +377,7 @@ int PortObjectHasPort(PortObject* po, int port)
         return 0;
 
     for (poi=(PortObjectItem*)sflist_first(po->item_list, &cursor);
-        poi != 0;
+        poi != nullptr;
         poi=(PortObjectItem*)sflist_next(&cursor) )
     {
         if ( poi->any() )
@@ -498,24 +394,6 @@ int PortObjectHasPort(PortObject* po, int port)
     return 0;
 }
 
-int PortObjectHasNot(PortObject* po)
-{
-    PortObjectItem* poi;
-    SF_LNODE* cursor;
-
-    if ( !po )
-        return 0;
-
-    for (poi=(PortObjectItem*)sflist_first(po->item_list, &cursor);
-        poi != 0;
-        poi=(PortObjectItem*)sflist_next(&cursor) )
-    {
-        if ( poi->negate )
-            return 1;
-    }
-    return 0;
-}
-
 void PortObjectToggle(PortObject* po)
 {
     PortObjectItem* poi;
@@ -525,7 +403,7 @@ void PortObjectToggle(PortObject* po)
         return;
 
     for (poi=(PortObjectItem*)sflist_first(po->item_list,&pos);
-        poi != 0;
+        poi != nullptr;
         poi=(PortObjectItem*)sflist_next(&pos) )
     {
         poi->negate = !poi->negate;
@@ -542,7 +420,7 @@ int PortObjectIsPureNot(PortObject* po)
         return 0;
 
     for (poi=(PortObjectItem*)sflist_first(po->item_list, &cursor);
-        poi != 0;
+        poi != nullptr;
         poi=(PortObjectItem*)sflist_next(&cursor) )
     {
         cnt++;
@@ -565,38 +443,10 @@ int PortObjectHasAny(PortObject* po)
         return 0;
 
     for (poi=(PortObjectItem*)sflist_first(po->item_list, &cursor);
-        poi != 0;
+        poi != nullptr;
         poi=(PortObjectItem*)sflist_next(&cursor) )
     {
         if ( poi->any() )
-            return 1;
-    }
-    return 0;
-}
-
-/*
- * This returns true if the object is an ANY port
- */
-int PortObjectIncludesPort(PortObject* po, int port)
-{
-    PortObjectItem* poi;
-    SF_LNODE* cursor;
-
-    if ( !po )
-        return 0;
-
-    for (poi=(PortObjectItem*)sflist_first(po->item_list, &cursor);
-        poi != 0;
-        poi=(PortObjectItem*)sflist_next(&cursor) )
-    {
-        if ( poi->any() )
-            return 1;
-
-        if ( (uint16_t)port >= poi->lport &&
-            (uint16_t)port <= poi->hport )
-            return 1;
-
-        if ( poi->negate )
             return 1;
     }
     return 0;
@@ -615,7 +465,7 @@ int PortObjectRemovePorts(PortObject* a,  PortObject* b)
     pA &= ~pB;
 
     /* Release the old port list */
-    sflist_free_all(a->item_list, free);
+    sflist_free_all(a->item_list, snort_free);
 
     /* Replace the old PortObject list */
     a->item_list = PortObjectItemListFromBits(pA, SFPO_MAX_PORTS);
@@ -628,59 +478,21 @@ int PortObjectRemovePorts(PortObject* a,  PortObject* b)
 */
 PortObject* PortObjectAppend(PortObject* poa, PortObject* pob)
 {
-    PortObjectItem* poia;
-    PortObjectItem* poib;
     SF_LNODE* cursor;
 
-    for ( poib = (PortObjectItem*)sflist_first(pob->item_list, &cursor);
-        poib!= 0;
-        poib = (PortObjectItem*)sflist_next(&cursor) )
+    for (PortObjectItem* poib = (PortObjectItem*)sflist_first(pob->item_list, &cursor);
+         poib!= nullptr;
+         poib = (PortObjectItem*)sflist_next(&cursor) )
     {
-        poia = PortObjectItemNew();
+        PortObjectItem* poia = PortObjectItemNew();
 
         if (!poia)
-            return 0;
+            return nullptr;
 
         memcpy(poia,poib,sizeof(PortObjectItem));
 
         sflist_add_tail(poa->item_list,poia);
     }
-    return poa;
-}
-
-/* Dup and append rule list numbers from pob to poa */
-PortObject* PortObjectAppendPortObject(PortObject* poa, PortObject* pob)
-{
-    int* prid;
-    int* prid2;
-    SF_LNODE* lpos;
-
-    for ( prid = (int*)sflist_first(pob->rule_list,&lpos);
-        prid!= 0;
-        prid = (int*)sflist_next(&lpos) )
-    {
-        prid2 = (int*)calloc(1, sizeof(int));
-        if ( !prid2 )
-            return 0;
-        *prid2 = *prid;
-        sflist_add_tail(poa->rule_list,prid2);
-    }
-    return poa;
-}
-
-/*
- *  Append Ports and Rules from pob to poa
- */
-PortObject* PortObjectAppendEx(PortObject* poa, PortObject* pob)
-{
-    // LogMessage("PortObjectAppendEx: appending ports\n");
-    if ( !PortObjectAppend(poa, pob) )
-        return 0;
-
-    //LogMessage("PortObjectAppendEx: appending rules\n");
-    if ( !PortObjectAppendPortObject(poa, pob) )
-        return 0;
-
     return poa;
 }
 
@@ -691,8 +503,8 @@ void PortObjectPrint(PortObject* po)
 
 void PortObjectPrintPortsRaw(PortObject* po)
 {
-    PortObjectItem* poi = NULL;
-    SF_LNODE* pos = NULL;
+    PortObjectItem* poi = nullptr;
+    SF_LNODE* pos = nullptr;
     char* buf;
     int bufsize;
 
@@ -706,12 +518,11 @@ void PortObjectPrintPortsRaw(PortObject* po)
      *       1potential_negation) + surrounding_whitespace + brackets + NULL */
 
     bufsize = po->item_list->count * (30 + 1 + 1) + 5;
-    buf = (char*)SnortAlloc(bufsize);
-
+    buf = (char*)snort_calloc(bufsize);
     SnortSnprintfAppend(buf, bufsize, " [");
 
     for (poi=(PortObjectItem*)sflist_first(po->item_list, &pos);
-        poi != 0;
+        poi != nullptr;
         poi=(PortObjectItem*)sflist_next(&pos) )
     {
         PortObjectItemPrint(poi, buf, bufsize);
@@ -721,29 +532,27 @@ void PortObjectPrintPortsRaw(PortObject* po)
 
     LogMessage("%s", buf);
 
-    free(buf);
+    snort_free(buf);
 }
 
 /*
    Print Port Object - Prints input ports and rules (uncompiled)
     ports
     rules (input by user)
-
 */
-void PortObjectPrintEx(PortObject* po,
-    void (* print_index_map)(int index, char* buf, int bufsize) )
+void PortObjectPrintEx(PortObject* po, po_print_f print_index_map)
 {
-    PortObjectItem* poi = NULL;
-    SF_LNODE* pos = NULL;
+    PortObjectItem* poi = nullptr;
+    SF_LNODE* pos = nullptr;
     int k=0;
-    int* rlist = NULL;
+    int* rlist = nullptr;
     unsigned i;
 
     /* static for printing so we don't put so many bytes on the stack */
-    static char po_print_buf[MAXPORTS];  // FIXIT-L delete this; replace with local stringstream
+    static char print_buf[MAX_PORTS];  // FIXIT-L delete this; replace with local stringstream
 
-    int bufsize = sizeof(po_print_buf);
-    po_print_buf[0] = '\0';
+    int bufsize = sizeof(print_buf);
+    print_buf[0] = '\0';
 
     if ( !po )
         return;
@@ -754,33 +563,31 @@ void PortObjectPrintEx(PortObject* po,
     if ( !po->rule_list->count )
         return;
 
-    SnortSnprintfAppend(po_print_buf, bufsize, " PortObject ");
+    SnortSnprintfAppend(print_buf, bufsize, " PortObject ");
 
     if ( po->name )
-    {
-        SnortSnprintfAppend(po_print_buf, bufsize, "%s ", po->name);
-    }
+        SnortSnprintfAppend(print_buf, bufsize, "%s ", po->name);
 
-    SnortSnprintfAppend(po_print_buf, bufsize,
-        " Id:%d  Ports:%d Rules:%d\n {\n",
-        po->id, po->item_list->count,po->rule_list->count);
+    SnortSnprintfAppend(print_buf, bufsize,
+        " Id:%d  Ports:%u Rules:%u\n {\n",
+        po->id, po->item_list->count, po->rule_list->count);
 
-    SnortSnprintfAppend(po_print_buf, bufsize, "  Ports [\n  ");
+    SnortSnprintfAppend(print_buf, bufsize, "  Ports [\n  ");
 
     if ( PortObjectHasAny(po) )
     {
-        SnortSnprintfAppend(po_print_buf, bufsize, "any");
+        SnortSnprintfAppend(print_buf, bufsize, "any");
     }
     else
     {
-        for (poi=(PortObjectItem*)sflist_first(po->item_list,&pos);
-            poi != 0;
-            poi=(PortObjectItem*)sflist_next(&pos) )
+        for (poi = (PortObjectItem*)sflist_first(po->item_list,&pos);
+            poi != nullptr;
+            poi = (PortObjectItem*)sflist_next(&pos) )
         {
-            PortObjectItemPrint(poi, po_print_buf, bufsize);
+            PortObjectItemPrint(poi, print_buf, bufsize);
         }
     }
-    SnortSnprintfAppend(po_print_buf, bufsize, "  ]\n");
+    SnortSnprintfAppend(print_buf, bufsize, "  ]\n");
 
     rlist = RuleListToSortedArray(po->rule_list);
     if (!rlist )
@@ -788,27 +595,24 @@ void PortObjectPrintEx(PortObject* po,
         return;
     }
 
-    SnortSnprintfAppend(po_print_buf, bufsize, "  Rules [ \n ");
-    for (i=0; i<po->rule_list->count; i++)
+    SnortSnprintfAppend(print_buf, bufsize, "  Rules [ \n ");
+    for (i = 0; i < po->rule_list->count; i++)
     {
         if ( print_index_map )
-        {
-            print_index_map(rlist[i], po_print_buf, bufsize);
-        }
+            print_index_map(rlist[i], print_buf, bufsize);
         else
-        {
-            SnortSnprintfAppend(po_print_buf, bufsize, " %d",rlist[i]);
-        }
+            SnortSnprintfAppend(print_buf, bufsize, " %d",rlist[i]);
+
         k++;
         if ( k == 25 )
         {
             k=0;
-            SnortSnprintfAppend(po_print_buf, bufsize, " \n ");
+            SnortSnprintfAppend(print_buf, bufsize, " \n ");
         }
     }
-    SnortSnprintfAppend(po_print_buf, bufsize, "  ]\n }\n");
+    SnortSnprintfAppend(print_buf, bufsize, "  ]\n }\n");
 
-    LogMessage("%s", po_print_buf);
-    free(rlist);
+    LogMessage("%s", print_buf);
+    snort_free(rlist);
 }
 

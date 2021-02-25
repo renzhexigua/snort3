@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,32 +17,21 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-/*
- *   Rule Index Map
- *
- *   author: marc norton
- */
+// sfrim.h author Marc Norton
+
 #ifndef SFRIM_H
 #define SFRIM_H
 
-typedef struct
-{
-    unsigned gid;
-    unsigned sid;
-}rule_number_t;
+// provides an ordinal for each rule so they can be looked up by a number
+// used during parse time when rules are compiled
 
-typedef struct
-{
-    int max_rules;
-    int num_rules;
-    rule_number_t* map;
-}rule_index_map_t;
+struct rule_index_map_t;
 
-unsigned RuleIndexMapSid(rule_index_map_t* map, int index);
-unsigned RuleIndexMapGid(rule_index_map_t* map, int index);
-rule_index_map_t* RuleIndexMapCreate(int max_rules);
-void RuleIndexMapFree(rule_index_map_t** p);
-int RuleIndexMapAdd(rule_index_map_t* p, unsigned gid, unsigned sid);
+rule_index_map_t* RuleIndexMapCreate();
+void RuleIndexMapFree(rule_index_map_t*);
+
+int RuleIndexMapAdd(rule_index_map_t*, unsigned gid, unsigned sid);
+bool RuleIndexMapGet(rule_index_map_t* map, int index, unsigned& gid, unsigned& sid);
 
 #endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,28 +17,18 @@
 //--------------------------------------------------------------------------
 // ips_dsize.cc author Russ Combs <rucombs@cisco.com>
 
-#include <ctype.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <string.h>
 
-#include "snort_types.h"
-#include "detection/treenodes.h"
-#include "protocols/packet.h"
-#include "snort_debug.h"
-#include "parser.h"
-#include "util.h"
-#include "sfhashfcn.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
 #include "framework/range.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "dsize"
 
@@ -51,12 +41,11 @@ public:
         IpsOption(s_name)
     { config = c; }
 
-    ~DsizeOption() { }
 
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     RangeCheck config;
@@ -68,61 +57,52 @@ private:
 
 uint32_t DsizeOption::hash() const
 {
-    uint32_t a,b,c;
-
-    a = config.min;
-    b = config.max;
-    c = config.op;
+    uint32_t a = config.min;
+    uint32_t b = config.max;
+    uint32_t c = config.op;
 
     mix(a,b,c);
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    a += IpsOption::hash();
 
+    finalize(a,b,c);
     return c;
 }
 
 bool DsizeOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    DsizeOption& rhs = (DsizeOption&)ips;
+    const DsizeOption& rhs = (const DsizeOption&)ips;
     return config == rhs.config;
 }
 
 // Test the packet's payload size against the rule payload size value
-int DsizeOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus DsizeOption::eval(Cursor&, Packet* p)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
-    PROFILE_VARS;
-
-    MODULE_PROFILE_START(dsizePerfStats);
+    RuleProfile profile(dsizePerfStats);
 
     /* fake packet dsizes are always wrong
        (unless they are PDUs) */
-    if (
-        (p->packet_flags & PKT_REBUILT_STREAM) &&
-        !(p->packet_flags & PKT_PDU_HEAD) )
-    {
-        MODULE_PROFILE_END(dsizePerfStats);
-        return rval;
-    }
+    if ((p->packet_flags & PKT_REBUILT_STREAM) && !p->is_pdu_start())
+        return NO_MATCH;
 
     if ( config.eval(p->dsize) )
-        rval = DETECTION_OPTION_MATCH;
+        return MATCH;
 
-    MODULE_PROFILE_END(dsizePerfStats);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
 // module
 //-------------------------------------------------------------------------
 
+#define RANGE "0:65535"
+
 static const Parameter s_params[] =
 {
-    { "~range", Parameter::PT_STRING, nullptr, nullptr,
-      "check if packet payload size is 'size | min<>max | <max | >min'" },
+    { "~range", Parameter::PT_INTERVAL, RANGE, nullptr,
+      "check if packet payload size is in the given range" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -141,6 +121,10 @@ public:
     ProfileStats* get_profile() const override
     { return &dsizePerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     RangeCheck data;
 };
 
@@ -155,7 +139,7 @@ bool DsizeModule::set(const char*, Value& v, SnortConfig*)
     if ( !v.is("~range") )
         return false;
 
-    return data.parse(v.get_string());
+    return data.validate(v.get_string(), RANGE);
 }
 
 //-------------------------------------------------------------------------
@@ -210,11 +194,11 @@ static const IpsApi dsize_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_dsize[] =
+#endif
 {
     &dsize_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_dsize = &dsize_api.base;
-#endif
 

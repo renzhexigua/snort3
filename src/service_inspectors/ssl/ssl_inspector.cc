@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,118 +17,130 @@
 //--------------------------------------------------------------------------
 //
 
-/*
- * SSL inspector
- *
- */
-
-#include "ssl_inspector.h"
+// SSL inspector
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <assert.h>
-#include <string.h>
-#include <stdio.h>
-#include <sys/types.h>
+#include "ssl_inspector.h"
 
-#include "snort_types.h"
-#include "snort_debug.h"
+#include "detection/detect.h"
+#include "detection/detection_engine.h"
+#include "events/event_queue.h"
+#include "log/messages.h"
+#include "main/snort_debug.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+#include "protocols/ssl.h"
+#include "pub_sub/finalize_packet_event.h"
+#include "pub_sub/opportunistic_tls_event.h"
+#include "stream/stream.h"
+#include "stream/stream_splitter.h"
 
-#include "ssl.h"
 #include "ssl_module.h"
-#include "profiler.h"
-#include "stream/stream_api.h"
-#include "parser.h"
-#include "framework/inspector.h"
-#include "utils/sfsnprintfappend.h"
-#include "target_based/snort_protocols.h"
-#include "detect.h"
+#include "ssl_splitter.h"
+
+using namespace snort;
 
 THREAD_LOCAL ProfileStats sslPerfStats;
-THREAD_LOCAL SimpleStats sslstats;
-THREAD_LOCAL SSL_counters_t counts;
+THREAD_LOCAL SslStats sslstats;
 
-/*
- * Function prototype(s)
- */
-static void snort_ssl(SSL_PROTO_CONF* GlobalConf, Packet* p);
+unsigned SslFlowData::inspector_id = 0;
 
-unsigned SslFlowData::flow_id = 0;
+const PegInfo ssl_peg_names[] =
+{
+    { CountType::SUM, "packets", "total packets processed" },
+    { CountType::SUM, "decoded", "ssl packets decoded" },
+    { CountType::SUM, "client_hello", "total client hellos" },
+    { CountType::SUM, "server_hello", "total server hellos" },
+    { CountType::SUM, "certificate", "total ssl certificates" },
+    { CountType::SUM, "server_done", "total server done" },
+    { CountType::SUM, "client_key_exchange", "total client key exchanges" },
+    { CountType::SUM, "server_key_exchange", "total server key exchanges" },
+    { CountType::SUM, "change_cipher", "total change cipher records" },
+    { CountType::SUM, "finished", "total handshakes finished" },
+    { CountType::SUM, "client_application", "total client application records" },
+    { CountType::SUM, "server_application", "total server application records" },
+    { CountType::SUM, "alert", "total ssl alert records" },
+    { CountType::SUM, "unrecognized_records", "total unrecognized records" },
+    { CountType::SUM, "handshakes_completed", "total completed ssl handshakes" },
+    { CountType::SUM, "bad_handshakes", "total bad handshakes" },
+    { CountType::SUM, "sessions_ignored", "total sessions ignore" },
+    { CountType::SUM, "detection_disabled", "total detection disabled" },
+    { CountType::NOW, "concurrent_sessions", "total concurrent ssl sessions" },
+    { CountType::MAX, "max_concurrent_sessions", "maximum concurrent ssl sessions" },
 
-SSLData* SetNewSSLData(Packet* p)
+    { CountType::END, nullptr, nullptr }
+};
+
+SslFlowData::SslFlowData() : FlowData(inspector_id)
+{
+    memset(&session, 0, sizeof(session));
+    finalize_info = {};
+    sslstats.concurrent_sessions++;
+    if(sslstats.max_concurrent_sessions < sslstats.concurrent_sessions)
+        sslstats.max_concurrent_sessions = sslstats.concurrent_sessions;
+}
+
+SslFlowData::~SslFlowData()
+{
+    assert(sslstats.concurrent_sessions > 0);
+    sslstats.concurrent_sessions--;
+}
+
+static SSLData* SetNewSSLData(Packet* p)
 {
     SslFlowData* fd = new SslFlowData;
-    p->flow->set_application_data(fd);
+    p->flow->set_flow_data(fd);
     return &fd->session;
 }
 
 SSLData* get_ssl_session_data(Flow* flow)
 {
-    SslFlowData* fd = (SslFlowData*)flow->get_application_data(
-        SslFlowData::flow_id);
-
-    return fd ? &fd->session : NULL;
-}
-
-void SSL_InitGlobals(void)
-{
-    memset(&counts, 0, sizeof(counts));
-}
-
-static void PrintSslConf(SSL_PROTO_CONF* config)
-{
-    if (config == NULL)
-        return;
-    LogMessage("SSL config:\n");
-    if ( config->flags & SSLPP_TRUSTSERVER_FLAG )
-    {
-        LogMessage("    Server side data is trusted\n");
-    }
-
-    LogMessage("\n");
+    SslFlowData* fd = (SslFlowData*)flow->get_flow_data(SslFlowData::inspector_id);
+    return fd ? &fd->session : nullptr;
 }
 
 static void SSL_UpdateCounts(const uint32_t new_flags)
 {
     if (new_flags & SSL_CHANGE_CIPHER_FLAG)
-        counts.cipher_change++;
+        sslstats.cipher_change++;
 
     if (new_flags & SSL_ALERT_FLAG)
-        counts.alerts++;
+        sslstats.alerts++;
 
     if (new_flags & SSL_CLIENT_HELLO_FLAG)
-        counts.hs_chello++;
+        sslstats.hs_chello++;
 
     if (new_flags & SSL_SERVER_HELLO_FLAG)
-        counts.hs_shello++;
+        sslstats.hs_shello++;
 
     if (new_flags & SSL_CERTIFICATE_FLAG)
-        counts.hs_cert++;
+        sslstats.hs_cert++;
 
     if (new_flags & SSL_SERVER_KEYX_FLAG)
-        counts.hs_skey++;
+        sslstats.hs_skey++;
 
     if (new_flags & SSL_CLIENT_KEYX_FLAG)
-        counts.hs_ckey++;
+        sslstats.hs_ckey++;
 
     if (new_flags & SSL_SFINISHED_FLAG)
-        counts.hs_finished++;
+        sslstats.hs_finished++;
 
     if (new_flags & SSL_HS_SDONE_FLAG)
-        counts.hs_sdone++;
+        sslstats.hs_sdone++;
 
     if (new_flags & SSL_SAPP_FLAG)
-        counts.sapp++;
+        sslstats.sapp++;
 
     if (new_flags & SSL_CAPP_FLAG)
-        counts.capp++;
+        sslstats.capp++;
 }
 
 static inline bool SSLPP_is_encrypted(SSL_PROTO_CONF* config, uint32_t ssl_flags, Packet* packet)
 {
-    if (config->flags & SSLPP_TRUSTSERVER_FLAG)
+    if (config->trustservers)
     {
         if (ssl_flags & SSL_SAPP_FLAG)
             return true;
@@ -139,13 +151,13 @@ static inline bool SSLPP_is_encrypted(SSL_PROTO_CONF* config, uint32_t ssl_flags
         if (((ssl_flags & SSLPP_ENCRYPTED_FLAGS) == SSLPP_ENCRYPTED_FLAGS) ||
             ((ssl_flags & SSLPP_ENCRYPTED_FLAGS2) == SSLPP_ENCRYPTED_FLAGS2))
         {
-            counts.completed_hs++;
+            sslstats.completed_hs++;
             return true;
         }
         /* Check if we're either midstream or if packets were missed after the
          *          * connection was established */
-        else if ((stream.get_session_flags (packet->flow) & SSNFLAG_MIDSTREAM) ||
-            (stream.missed_packets(packet->flow, SSN_DIR_BOTH)))
+        else if ( packet->test_session_flags(SSNFLAG_MIDSTREAM) ||
+            (Stream::missed_packets(packet->flow, SSN_DIR_BOTH)))
         {
             if ((ssl_flags & (SSL_CAPP_FLAG | SSL_SAPP_FLAG)) == (SSL_CAPP_FLAG | SSL_SAPP_FLAG))
             {
@@ -160,8 +172,6 @@ static inline bool SSLPP_is_encrypted(SSL_PROTO_CONF* config, uint32_t ssl_flags
 static inline uint32_t SSLPP_process_alert(
     SSL_PROTO_CONF*, uint32_t ssn_flags, uint32_t new_flags, Packet* packet)
 {
-    DEBUG_WRAP(DebugMessage(DEBUG_SSL, "Process Alert\n"); );
-
     ssn_flags |= new_flags;
 
     /* Check if we've seen a handshake, that this isn't it,
@@ -171,16 +181,16 @@ static inline uint32_t SSLPP_process_alert(
         !(new_flags & SSL_CHANGE_CIPHER_FLAG) &&
         !(new_flags & SSL_HEARTBEAT_SEEN))
     {
-        DEBUG_WRAP(DebugMessage(DEBUG_SSL, "Disabling detect\n"); );
-        DisableDetect(packet);
+        DetectionEngine::disable_content(packet);
+        sslstats.disabled++;
     }
 
     /* Need to negate the application flags from the opposing side. */
 
-    if (packet->packet_flags & PKT_FROM_CLIENT)
+    if (packet->is_from_client())
         return ssn_flags & ~SSL_SAPP_FLAG;
 
-    else if (packet->packet_flags & PKT_FROM_SERVER)
+    else if (packet->is_from_server())
         return ssn_flags & ~SSL_CAPP_FLAG;
 
     return ssn_flags;
@@ -188,8 +198,6 @@ static inline uint32_t SSLPP_process_alert(
 
 static inline uint32_t SSLPP_process_hs(uint32_t ssl_flags, uint32_t new_flags)
 {
-    DEBUG_WRAP(DebugMessage(DEBUG_SSL, "Process Handshake\n"); );
-
     if (!SSL_BAD_HS(new_flags))
     {
         ssl_flags |= new_flags & (SSL_CLIENT_HELLO_FLAG |
@@ -199,7 +207,7 @@ static inline uint32_t SSLPP_process_hs(uint32_t ssl_flags, uint32_t new_flags)
     }
     else
     {
-        counts.bad_handshakes++;
+        sslstats.bad_handshakes++;
     }
 
     return ssl_flags;
@@ -208,8 +216,6 @@ static inline uint32_t SSLPP_process_hs(uint32_t ssl_flags, uint32_t new_flags)
 static inline uint32_t SSLPP_process_app(SSL_PROTO_CONF* config, uint32_t ssn_flags, uint32_t
     new_flags, Packet* packet)
 {
-    DEBUG_WRAP(DebugMessage(DEBUG_SSL, "Process Application\n"); );
-
     if (SSLPP_is_encrypted(config, ssn_flags | new_flags, packet) )
     {
         ssn_flags |= SSL_ENCRYPTED_FLAG;
@@ -217,14 +223,13 @@ static inline uint32_t SSLPP_process_app(SSL_PROTO_CONF* config, uint32_t ssn_fl
         // Heartbleed check is disabled. Stop inspection on this session.
         if (!config->max_heartbeat_len)
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_SSL, "STOPPING INSPECTION (process_app)\n"); );
-            stream.stop_inspection(packet->flow,
-                packet, SSN_DIR_BOTH, -1, 0);
-            counts.stopped++;
+            Stream::stop_inspection(packet->flow, packet, SSN_DIR_BOTH, -1, 0);
+            sslstats.stopped++;
         }
         else if (!(new_flags & SSL_HEARTBEAT_SEEN))
         {
-            DisableDetect(packet);
+            DetectionEngine::disable_content(packet);
+            sslstats.disabled++;
         }
     }
 
@@ -246,18 +251,17 @@ static inline void SSLPP_process_other(SSL_PROTO_CONF* config, SSLData* sd, uint
 
         if (!config->max_heartbeat_len)
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_SSL, "STOPPING INSPECTION (process_other)\n"); );
-            stream.stop_inspection(packet->flow,
-                packet, SSN_DIR_BOTH, -1, 0);
+            Stream::stop_inspection(packet->flow, packet, SSN_DIR_BOTH, -1, 0);
         }
         else if (!(new_flags & SSL_HEARTBEAT_SEEN))
         {
-            DisableDetect(packet);
+            DetectionEngine::disable_content(packet);
+            sslstats.disabled++;
         }
     }
     else
     {
-        counts.unrecognized++;
+        sslstats.unrecognized++;
 
         /* Special handling for SSLv2 */
         if (new_flags & SSL_VER_SSLV2_FLAG)
@@ -280,19 +284,12 @@ static inline void SSLPP_process_other(SSL_PROTO_CONF* config, SSLData* sd, uint
  */
 static void snort_ssl(SSL_PROTO_CONF* config, Packet* p)
 {
-    SSLData* sd = NULL;
-    uint8_t dir;
-    uint8_t index;
-    uint32_t new_flags;
-    uint8_t heartbleed_type = 0;
-    PROFILE_VARS;
-
-    MODULE_PROFILE_START(sslPerfStats);
+    Profile profile(sslPerfStats);
 
     /* Attempt to get a previously allocated SSL block. */
-    sd = get_ssl_session_data(p->flow);
+    SSLData* sd = get_ssl_session_data(p->flow);
 
-    if (sd == NULL)
+    if (sd == nullptr)
     {
         /* Check the stream session. If it does not currently
          * have our SSL data-block attached, create one.
@@ -300,52 +297,52 @@ static void snort_ssl(SSL_PROTO_CONF* config, Packet* p)
         sd = SetNewSSLData(p);
 
         if ( !sd )
-        {
-            /* Could not get/create the session data for this packet. */
-            MODULE_PROFILE_END(sslPerfStats);
+            // Could not get/create the session data for this packet.
             return;
-        }
     }
+
     SSL_CLEAR_TEMPORARY_FLAGS(sd->ssn_flags);
 
-    dir = (p->packet_flags & PKT_FROM_SERVER) ? 1 : 0;
-    index = (p->packet_flags & PKT_REBUILT_STREAM) ? 2 : 0;
-    new_flags = SSL_decode(p->data, (int)p->dsize, p->packet_flags, sd->ssn_flags,
+    uint8_t dir = (p->is_from_server()) ? 1 : 0;
+    uint8_t index = (p->packet_flags & PKT_REBUILT_STREAM) ? 2 : 0;
+
+    uint8_t heartbleed_type = 0;
+    uint32_t new_flags = SSL_decode(p->data, (int)p->dsize, p->packet_flags, sd->ssn_flags,
         &heartbleed_type, &(sd->partial_rec_len[dir+index]), config->max_heartbeat_len);
 
     if (heartbleed_type & SSL_HEARTBLEED_REQUEST)
     {
-        SnortEventqAdd(GID_SSL, SSL_ALERT_HB_REQUEST);
+        DetectionEngine::queue_event(GID_SSL, SSL_ALERT_HB_REQUEST);
     }
     else if (heartbleed_type & SSL_HEARTBLEED_RESPONSE)
     {
-        SnortEventqAdd(GID_SSL, SSL_ALERT_HB_RESPONSE);
+        DetectionEngine::queue_event(GID_SSL, SSL_ALERT_HB_RESPONSE);
     }
     else if (heartbleed_type & SSL_HEARTBLEED_UNKNOWN)
     {
         if (!dir)
         {
-            SnortEventqAdd(GID_SSL, SSL_ALERT_HB_REQUEST);
+            DetectionEngine::queue_event(GID_SSL, SSL_ALERT_HB_REQUEST);
         }
         else
         {
-            SnortEventqAdd(GID_SSL, SSL_ALERT_HB_RESPONSE);
+            DetectionEngine::queue_event(GID_SSL, SSL_ALERT_HB_RESPONSE);
         }
     }
     if (sd->ssn_flags & SSL_ENCRYPTED_FLAG )
     {
-        counts.decoded++;
+        sslstats.decoded++;
 
         SSL_UpdateCounts(new_flags);
 
         if (!(new_flags & SSL_HEARTBEAT_SEEN))
         {
-            DisableDetect(p);
+            DetectionEngine::disable_content(p);
+            sslstats.disabled++;
         }
 
         sd->ssn_flags |= new_flags;
 
-        MODULE_PROFILE_END(sslPerfStats);
         return;
     }
 
@@ -360,18 +357,18 @@ static void snort_ssl(SSL_PROTO_CONF* config, Packet* p)
     if ( (SSL_IS_CHELLO(new_flags) && SSL_IS_CHELLO(sd->ssn_flags) && SSL_IS_SHELLO(sd->ssn_flags) )
             || (SSL_IS_CHELLO(new_flags) && SSL_IS_SHELLO(sd->ssn_flags) ))
     {
-        SnortEventqAdd(GID_SSL, SSL_INVALID_CLIENT_HELLO);
+        DetectionEngine::queue_event(GID_SSL, SSL_INVALID_CLIENT_HELLO);
     }
-    else if (!(config->flags & SSLPP_TRUSTSERVER_FLAG))
+    else if (!(config->trustservers))
     {
         if ( (SSL_IS_SHELLO(new_flags) && !SSL_IS_CHELLO(sd->ssn_flags) ))
         {
-            if (!(stream.missed_packets(p->flow, SSN_DIR_FROM_CLIENT)))
-                SnortEventqAdd(GID_SSL, SSL_INVALID_SERVER_HELLO);
+            if (!(Stream::missed_packets(p->flow, SSN_DIR_FROM_CLIENT)))
+                DetectionEngine::queue_event(GID_SSL, SSL_INVALID_SERVER_HELLO);
         }
     }
 
-    counts.decoded++;
+    sslstats.decoded++;
 
     SSL_UpdateCounts(new_flags);
 
@@ -400,30 +397,67 @@ static void snort_ssl(SSL_PROTO_CONF* config, Packet* p)
 
         /* Application data is updated inside of SSLPP_process_other */
 
-        MODULE_PROFILE_END(sslPerfStats);
         return;
     }
 
     sd->ssn_flags |= new_flags;
-
-    MODULE_PROFILE_END(sslPerfStats);
 }
 
 //-------------------------------------------------------------------------
 // class stuff
 //-------------------------------------------------------------------------
+static const char* s_name = "ssl";
 
 class Ssl : public Inspector
 {
 public:
     Ssl(SSL_PROTO_CONF*);
-    ~Ssl();
+    ~Ssl() override;
 
-    void show(SnortConfig*) override;
+    void show(const SnortConfig*) const override;
     void eval(Packet*) override;
+    bool configure(SnortConfig*) override;
+
+    StreamSplitter* get_splitter(bool c2s) override
+    { return new SslSplitter(c2s); }
 
 private:
     SSL_PROTO_CONF* config;
+};
+
+class SslStartTlsEventtHandler : public DataHandler
+{
+public:
+    SslStartTlsEventtHandler() : DataHandler(s_name) { }
+
+    void handle(DataEvent&, Flow* flow) override
+    {
+        SslFlowData* fd = new SslFlowData;
+        fd->finalize_info.orig_flag = flow->flags.trigger_finalize_event;
+        fd->finalize_info.switch_in = true;
+        flow->set_flow_data(fd);
+        flow->flags.trigger_finalize_event = true;
+    }
+};
+
+class SslFinalizePacketHandler : public DataHandler
+{
+public:
+    SslFinalizePacketHandler() : DataHandler(s_name) {}
+
+    void handle(DataEvent& e, Flow*) override
+    {
+        FinalizePacketEvent* fp_event = (FinalizePacketEvent*)&e;
+        const Packet* pkt = fp_event->get_packet();
+        SslFlowData* fd = (SslFlowData*)pkt->flow->get_flow_data(SslFlowData::inspector_id);
+        if (fd and fd->finalize_info.switch_in)
+        {
+            pkt->flow->flags.trigger_finalize_event = fd->finalize_info.orig_flag;
+            fd->finalize_info.switch_in = false;
+            pkt->flow->set_proxied();
+            pkt->flow->set_service(const_cast<Packet*>(pkt), s_name);
+        }
+    }
 };
 
 Ssl::Ssl(SSL_PROTO_CONF* pc)
@@ -437,18 +471,30 @@ Ssl::~Ssl()
         delete config;
 }
 
-void Ssl::show(SnortConfig*)
+void Ssl::show(const SnortConfig*) const
 {
-    PrintSslConf(config);
+    if ( !config )
+        return;
+
+    ConfigLogger::log_flag("trust_servers", config->trustservers);
+    ConfigLogger::log_value("max_heartbeat_length", config->max_heartbeat_len);
 }
 
 void Ssl::eval(Packet* p)
 {
     // precondition - what we registered for
     assert(p->has_tcp_data());
+    assert(p->flow);
 
-    ++sslstats.total_packets;
+    sslstats.packets++;
     snort_ssl(config, p);
+}
+
+bool Ssl::configure(SnortConfig*)
+{
+    DataBus::subscribe(FINALIZE_PACKET_EVENT, new SslFinalizePacketHandler());
+    DataBus::subscribe(OPPORTUNISTIC_TLS_EVENT, new SslStartTlsEventtHandler());
+    return true;
 }
 
 //-------------------------------------------------------------------------
@@ -492,9 +538,9 @@ const InspectApi ssl_api =
         mod_dtor
     },
     IT_SERVICE,
-    (uint16_t)PktType::PDU,
+    PROTO_BIT__PDU,
     nullptr, // buffers
-    "ssl",
+    s_name,
     ssl_init,
     nullptr, // pterm
     nullptr, // tinit
@@ -505,13 +551,20 @@ const InspectApi ssl_api =
     nullptr  // reset
 };
 
+#undef BUILDING_SO  // FIXIT-L can't be linked dynamically yet
+
+extern const BaseApi* ips_ssl_state;
+extern const BaseApi* ips_ssl_version;
+
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* sin_ssl[] =
+#endif
 {
     &ssl_api.base,
+    ips_ssl_state,
+    ips_ssl_version,
     nullptr
 };
-#else
-const BaseApi* sin_ssl = &ssl_api.base;
-#endif
 

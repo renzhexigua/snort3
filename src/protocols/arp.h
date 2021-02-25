@@ -1,5 +1,6 @@
+
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,8 +21,11 @@
 #ifndef PROTOCOLS_ARP_H
 #define PROTOCOLS_ARP_H
 
+namespace snort
+{
 namespace arp
 {
+
 struct ARPHdr
 {
     uint16_t ar_hrd;       /* format of hardware address   */
@@ -42,15 +46,28 @@ struct EtherARP
     };
     uint8_t arp_tha[6];    /* target hardware address */
     uint8_t arp_tpa[4];    /* target protocol address */
-};
+} __attribute__((__packed__));
 
 constexpr uint16_t ETHERARP_HDR_LEN = 28; /*  sizeof EtherARP != 28 */
-} // namespace arp
 
+} // namespace arp
+} // namespace snort
+
+#ifndef ARPOP_REQUEST
 constexpr uint16_t ARPOP_REQUEST = 1;  /* ARP request  */
+#endif
+
+#ifndef ARPOP_REPLY
 constexpr uint16_t ARPOP_REPLY = 2;    /* ARP reply    */
+#endif
+
+#ifndef ARPOP_RREQUEST
 constexpr uint16_t ARPOP_RREQUEST = 3; /* RARP request */
+#endif
+
+#ifndef ARPOP_RREPLY
 constexpr uint16_t ARPOP_RREPLY = 4;   /* RARP reply   */
+#endif
 
 #endif
 

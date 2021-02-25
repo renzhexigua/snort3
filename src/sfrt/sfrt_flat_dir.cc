@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2011-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -25,10 +25,7 @@
 #include "sfrt_flat.h" // FIXIT-L these includes are circular
 #include "sfrt_flat_dir.h"
 
-#include <stdarg.h> /* For variadic */
-#include <stdio.h>
-#include <string.h> /* For memset   */
-#include "snort_types.h"
+#include <cstdarg>
 
 #if SIZEOF_UNSIGNED_LONG_INT == 8
 #define ARCH_WIDTH 64
@@ -38,7 +35,7 @@
 
 typedef struct
 {
-    const sfip_t* ip;
+    const uint32_t* addr;
     int bits;
 } IPLOOKUP;
 
@@ -66,7 +63,7 @@ static TABLE_PTR _sub_table_flat_new(dir_table_flat_t* root, uint32_t dimension,
     }
 
     /* Set up the initial prefilled "sub table" */
-    sub_ptr = segment_malloc(sizeof(dir_sub_table_flat_t));
+    sub_ptr = segment_snort_alloc(sizeof(dir_sub_table_flat_t));
 
     if (!sub_ptr)
     {
@@ -87,7 +84,7 @@ static TABLE_PTR _sub_table_flat_new(dir_table_flat_t* root, uint32_t dimension,
      * information if "RT_FAVOR_SPECIFIC" insertions are being performed. */
     sub->num_entries = len;
 
-    sub->entries = segment_malloc(sizeof(DIR_Entry) * sub->num_entries);
+    sub->entries = segment_snort_alloc(sizeof(DIR_Entry) * sub->num_entries);
 
     if (!sub->entries)
     {
@@ -116,13 +113,12 @@ static TABLE_PTR _sub_table_flat_new(dir_table_flat_t* root, uint32_t dimension,
 TABLE_PTR sfrt_dir_flat_new(uint32_t mem_cap, int count,...)
 {
     va_list ap;
-    uint32_t val;
     int index;
     TABLE_PTR table_ptr;
     dir_table_flat_t* table;
     uint8_t* base;
 
-    table_ptr = segment_malloc(sizeof(dir_table_flat_t));
+    table_ptr = segment_snort_alloc(sizeof(dir_table_flat_t));
 
     if (!table_ptr)
     {
@@ -140,7 +136,7 @@ TABLE_PTR sfrt_dir_flat_new(uint32_t mem_cap, int count,...)
 
     for (index=0; index < count; index++)
     {
-        val = va_arg(ap, int);
+        uint32_t val = va_arg(ap, int);
         table->dimensions[index] = val;
     }
 
@@ -366,41 +362,29 @@ static int _dir_sub_insert(IPLOOKUP* ip, int length, int cur_len, INFO ptr,
     INFO* data)
 {
     word index;
-    uint32_t fill;
     uint8_t* base = (uint8_t*)segment_basePtr();
     dir_sub_table_flat_t* sub_table = (dir_sub_table_flat_t*)(&base[sub_ptr]);
 
     {
         uint32_t local_index, i;
         /* need to handle bits usage across multiple 32bit vals within IPv6. */
-        if (ip->ip->family == AF_INET)
+        if (ip->bits < 32)
         {
             i=0;
         }
-        else if (ip->ip->family == AF_INET6)
+        else if (ip->bits < 64)
         {
-            if (ip->bits < 32 )
-            {
-                i=0;
-            }
-            else if (ip->bits < 64)
-            {
-                i=1;
-            }
-            else if (ip->bits < 96)
-            {
-                i=2;
-            }
-            else
-            {
-                i=3;
-            }
+            i=1;
+        }
+        else if (ip->bits < 96)
+        {
+            i=2;
         }
         else
         {
-            return RT_INSERT_FAILURE;
+            i=3;
         }
-        local_index = ip->ip->ip32[i] << (ip->bits %32);
+        local_index = ip->addr[i] << (ip->bits % 32);
         index = local_index >> (ARCH_WIDTH - sub_table->width);
     }
 
@@ -410,7 +394,7 @@ static int _dir_sub_insert(IPLOOKUP* ip, int length, int cur_len, INFO ptr,
         /* Calculate how many entries need to be filled
          * in this table. If the table is 24 bits wide, and the entry
          * is 20 bytes long, 2^4 entries need to be filled. */
-        fill = 1 << (sub_table->width - cur_len);
+        uint32_t fill = 1 << (sub_table->width - cur_len);
 
         index = (index >> (sub_table->width - cur_len)) <<
             (sub_table->width - cur_len);
@@ -483,20 +467,15 @@ static int _dir_sub_insert(IPLOOKUP* ip, int length, int cur_len, INFO ptr,
     return RT_SUCCESS;
 }
 
-/* Insert entry into DIR-n-m tables
- * @param ip        IP address structure
- * @param len       Number of bits of the IP used for lookup
- * @param ptr       Information to be associated with this IP range
- * @param master_table    The table that describes all, returned by dir_new */
-int sfrt_dir_flat_insert(const sfip_t* ip, int len, word data_index,
+/* Insert entry into DIR-n-m tables */
+int sfrt_dir_flat_insert(const uint32_t* addr, int /* numAddrDwords */, int len, word data_index,
     int behavior, TABLE_PTR table_ptr, updateEntryInfoFunc updateEntry, INFO* data)
 {
     dir_table_flat_t* root;
-
     uint8_t* base;
-
+    uint32_t h_addr[4];
     IPLOOKUP iplu;
-    iplu.ip = ip;
+    iplu.addr = h_addr;
     iplu.bits = 0;
 
     base = (uint8_t*)segment_basePtr();
@@ -505,6 +484,32 @@ int sfrt_dir_flat_insert(const sfip_t* ip, int len, word data_index,
     if (!root || !root->sub_table)
     {
         return DIR_INSERT_FAILURE;
+    }
+
+    h_addr[0] = ntohl(addr[0]);
+    if (len > 96)
+    {
+        h_addr[1] = ntohl(addr[1]);
+        h_addr[2] = ntohl(addr[2]);
+        h_addr[3] = ntohl(addr[3]);
+    }
+    else if (len > 64)
+    {
+        h_addr[1] = ntohl(addr[1]);
+        h_addr[2] = ntohl(addr[2]);
+        h_addr[3] = 0;
+    }
+    else if (len > 32)
+    {
+        h_addr[1] = ntohl(addr[1]);
+        h_addr[2] = 0;
+        h_addr[3] = 0;
+    }
+    else
+    {
+        h_addr[1] = 0;
+        h_addr[2] = 0;
+        h_addr[3] = 0;
     }
 
     /* Find the sub table in which to insert */
@@ -524,35 +529,23 @@ static tuple_flat_t _dir_sub_flat_lookup(IPLOOKUP* ip, TABLE_PTR table_ptr)
     {
         uint32_t local_index, i;
         /* need to handle bits usage across multiple 32bit vals within IPv6. */
-        if (ip->ip->family == AF_INET)
+        if (ip->bits < 32)
         {
             i=0;
         }
-        else if (ip->ip->family == AF_INET6)
+        else if (ip->bits < 64)
         {
-            if (ip->bits < 32 )
-            {
-                i=0;
-            }
-            else if (ip->bits < 64)
-            {
-                i=1;
-            }
-            else if (ip->bits < 96)
-            {
-                i=2;
-            }
-            else
-            {
-                i=3;
-            }
+            i=1;
+        }
+        else if (ip->bits < 96)
+        {
+            i=2;
         }
         else
         {
-            tuple_flat_t ret = { 0, 0 };
-            return ret;
+            i=3;
         }
-        local_index = ip->ip->ip32[i] << (ip->bits %32);
+        local_index = ip->addr[i] << (ip->bits %32);
         index = local_index >> (ARCH_WIDTH - table->width);
     }
     entry = (DIR_Entry*)(&base[table->entries]);
@@ -570,15 +563,17 @@ static tuple_flat_t _dir_sub_flat_lookup(IPLOOKUP* ip, TABLE_PTR table_ptr)
 }
 
 /* Lookup information associated with the value "ip" */
-tuple_flat_t sfrt_dir_flat_lookup(const sfip_t* ip, TABLE_PTR table_ptr)
+tuple_flat_t sfrt_dir_flat_lookup(const uint32_t* addr, int numAddrDwords, TABLE_PTR table_ptr)
 {
     dir_table_flat_t* root;
     uint8_t* base = (uint8_t*)segment_basePtr();
+    uint32_t h_addr[4];
+    int i;
     IPLOOKUP iplu;
-    iplu.ip = ip;
+    iplu.addr = h_addr;
     iplu.bits = 0;
 
-    if (!table_ptr )
+    if (!table_ptr)
     {
         tuple_flat_t ret = { 0, 0 };
         return ret;
@@ -591,6 +586,11 @@ tuple_flat_t sfrt_dir_flat_lookup(const sfip_t* ip, TABLE_PTR table_ptr)
         tuple_flat_t ret = { 0, 0 };
         return ret;
     }
+
+    for (i = 0; i < numAddrDwords; i++)
+        h_addr[i] = ntohl(addr[i]);
+    while (i < 4)
+        h_addr[i++] = 0;
 
     return _dir_sub_flat_lookup(&iplu, root->sub_table);
 }

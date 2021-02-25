@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,25 +17,18 @@
 //--------------------------------------------------------------------------
 // ips_fragoffset.cc author Russ Combs <rucombs@cisco.com>
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <stdlib.h>
-#include <ctype.h>
-
-#include "snort_types.h"
-#include "protocols/packet.h"
-#include "snort_debug.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
 #include "framework/range.h"
+#include "hash/hash_key_operations.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
+
+using namespace snort;
 
 #define s_name "fragoffset"
 
@@ -51,7 +44,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     RangeCheck config;
@@ -63,57 +56,50 @@ private:
 
 uint32_t FragOffsetOption::hash() const
 {
-    uint32_t a,b,c;
+    uint32_t a = config.op;
+    uint32_t b = (uint32_t)config.min;
+    uint32_t c = (uint32_t)config.max;
 
-    a = config.op;
-    b = (uint32_t)config.min;
-    c = (uint32_t)config.max;
+    mix(a,b,c);
+    a += IpsOption::hash();
 
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
-
+    finalize(a,b,c);
     return c;
 }
 
 bool FragOffsetOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    FragOffsetOption& rhs = (FragOffsetOption&)ips;
+    const FragOffsetOption& rhs = (const FragOffsetOption&)ips;
     return config == rhs.config;
-
-    return false;
 }
 
-int FragOffsetOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus FragOffsetOption::eval(Cursor&, Packet* p)
 {
-    int p_offset = p->ptrs.ip_api.off();
-    int rval = DETECTION_OPTION_NO_MATCH;
-    PROFILE_VARS;
+    RuleProfile profile(fragOffsetPerfStats);
 
     if (!p->has_ip())
-    {
-        return rval;
-    }
+        return NO_MATCH;
 
-    MODULE_PROFILE_START(fragOffsetPerfStats);
 
-    if ( config.eval(p_offset) )
-        rval = DETECTION_OPTION_MATCH;
+    if ( !config.eval(p->ptrs.ip_api.off()) )
+        return NO_MATCH;
 
-    MODULE_PROFILE_END(fragOffsetPerfStats);
-    return rval;
+    return MATCH;
 }
 
 //-------------------------------------------------------------------------
 // module
 //-------------------------------------------------------------------------
 
+#define RANGE "0:8192"
+
 static const Parameter s_params[] =
 {
-    { "~range", Parameter::PT_STRING, nullptr, nullptr,
-      "check if packet payload size is 'size | min<>max | <max | >min'" },
+    { "~range", Parameter::PT_INTERVAL, RANGE, nullptr,
+      "check if ip fragment offset is in given range" },
 
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
@@ -132,6 +118,10 @@ public:
     ProfileStats* get_profile() const override
     { return &fragOffsetPerfStats; }
 
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
     RangeCheck data;
 };
 
@@ -146,7 +136,7 @@ bool FragOffsetModule::set(const char*, Value& v, SnortConfig*)
     if ( !v.is("~range") )
         return false;
 
-    return data.parse(v.get_string());
+    return data.validate(v.get_string(), RANGE);
 }
 
 //-------------------------------------------------------------------------
@@ -201,11 +191,11 @@ static const IpsApi fragoffset_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_fragoffset[] =
+#endif
 {
     &fragoffset_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_fragoffset = &fragoffset_api.base;
-#endif
 

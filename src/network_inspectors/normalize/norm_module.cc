@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2010-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,15 +17,16 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "norm_module.h"
 
-#include <string.h>
-#include <string>
-#include <sstream>
-#include <vector>
+#include "main/policy.h"
+#include "stream/tcp/tcp_normalizer.h"
 
-#include "stream/stream.h"
-
+using namespace snort;
 using namespace std;
 
 static bool allow_names(NormalizerConfig* config, const char* s)
@@ -86,7 +87,7 @@ static bool allow_codes(NormalizerConfig* config, const char* s)
 
 static const Parameter norm_ip4_params[] =
 {
-    { "base", Parameter::PT_BOOL, nullptr, "true",
+    { "base", Parameter::PT_BOOL, nullptr, "false",
       "clear options" },
 
     { "df", Parameter::PT_BOOL, nullptr, "false",
@@ -106,22 +107,22 @@ static const Parameter norm_ip4_params[] =
 
 static const Parameter norm_tcp_params[] =
 {
-    { "base", Parameter::PT_BOOL, nullptr, "true",
+    { "base", Parameter::PT_BOOL, nullptr, "false",
       "clear reserved bits and option padding and fix urgent pointer / flags issues" },
 
-    { "block", Parameter::PT_BOOL, nullptr, "true",
+    { "block", Parameter::PT_BOOL, nullptr, "false",
       "allow packet drops during TCP normalization" },
 
-    { "urp", Parameter::PT_BOOL, nullptr, "true",
+    { "urp", Parameter::PT_BOOL, nullptr, "false",
       "adjust urgent pointer if beyond segment length" },
 
-    { "ips", Parameter::PT_BOOL, nullptr, "false",
+    { "ips", Parameter::PT_BOOL, nullptr, "true",
       "ensure consistency in retransmitted data" },
 
     { "ecn", Parameter::PT_SELECT, "off | packet | stream", "off",
       "clear ecn for all packets | sessions w/o ecn setup" },
 
-    { "pad", Parameter::PT_BOOL, nullptr, "true",
+    { "pad", Parameter::PT_BOOL, nullptr, "false",
       "clear any option padding bytes" },
 
     { "trim_syn", Parameter::PT_BOOL, nullptr, "false",
@@ -139,19 +140,19 @@ static const Parameter norm_tcp_params[] =
     { "trim", Parameter::PT_BOOL, nullptr, "false",
       "enable all of the TCP trim options" },
 
-    { "opts", Parameter::PT_BOOL, nullptr, "true",
+    { "opts", Parameter::PT_BOOL, nullptr, "false",
       "clear all options except mss, wscale, timestamp, and any explicitly allowed" },
 
-    { "req_urg", Parameter::PT_BOOL, nullptr, "true",
+    { "req_urg", Parameter::PT_BOOL, nullptr, "false",
       "clear the urgent pointer if the urgent flag is not set" },
 
-    { "req_pay", Parameter::PT_BOOL, nullptr, "true",
+    { "req_pay", Parameter::PT_BOOL, nullptr, "false",
       "clear the urgent pointer and the urgent flag if there is no payload" },
 
-    { "rsv", Parameter::PT_BOOL, nullptr, "true",
+    { "rsv", Parameter::PT_BOOL, nullptr, "false",
       "clear the reserved bits in the TCP header" },
 
-    { "req_urp", Parameter::PT_BOOL, nullptr, "true",
+    { "req_urp", Parameter::PT_BOOL, nullptr, "false",
       "clear the urgent flag if the urgent pointer is not set" },
 
     { "allow_names", Parameter::PT_MULTI,
@@ -186,8 +187,16 @@ static const Parameter s_params[] =
 };
 
 //-------------------------------------------------------------------------
-// normalize parameters
+// normalize module
 //-------------------------------------------------------------------------
+
+// using string* instead of string because clang++ 5.1
+// vector::back() does not seem to return a reference
+//
+// FIXIT-L these are static since get_pegs() is const
+// consider making that non-const
+std::vector<const std::string*> NormalizeModule::test_text;
+std::vector<PegInfo> NormalizeModule::test_pegs;
 
 NormalizeModule::NormalizeModule() :
     Module(NORM_NAME, NORM_HELP, s_params)
@@ -195,10 +204,16 @@ NormalizeModule::NormalizeModule() :
     memset(&config, 0, sizeof(config));
 }
 
+NormalizeModule::~NormalizeModule()
+{
+    for ( auto s : test_text )
+        delete s;
+}
+
 ProfileStats* NormalizeModule::get_profile() const
 { return &norm_perf_stats; }
 
-bool NormalizeModule::set_ip4(const char*, Value& v, SnortConfig*)
+bool NormalizeModule::set_ip4(const char*, const Value& v, SnortConfig*)
 {
     if ( v.is("base") )
         Norm_Set(&config, NORM_IP4_BASE, v.get_bool());
@@ -221,7 +236,7 @@ bool NormalizeModule::set_ip4(const char*, Value& v, SnortConfig*)
     return true;
 }
 
-bool NormalizeModule::set_tcp(const char*, Value& v, SnortConfig*)
+bool NormalizeModule::set_tcp(const char*, const Value& v, SnortConfig*)
 {
     if ( v.is("base") )
     {
@@ -339,97 +354,67 @@ bool NormalizeModule::begin(const char* fqn, int, SnortConfig*)
     return true;
 }
 
-bool NormalizeModule::end(const char* fqn, int, SnortConfig*)
+void NormalizeModule::add_test_peg(const PegInfo& norm) const
 {
-    if ( !strcmp(fqn, NORM_NAME) )
-    {
-        NetworkPolicy* policy = get_network_policy();
+    PegInfo test;
 
-        if ( (policy->new_ttl > 1) && (policy->new_ttl >= policy->min_ttl) )
-        {
-            if ( Norm_IsEnabled(&config, NORM_IP4_BASE) )
-                Norm_Enable(&config, NORM_IP4_TTL);
-        }
-        if ( (policy->new_ttl > 1) && (policy->new_ttl >= policy->min_ttl) )
-        {
-            if ( Norm_IsEnabled(&config, NORM_IP6_BASE) )
-                Norm_Enable(&config, NORM_IP6_TTL);
-        }
-    }
-    return true;
-}
+    std::string* test_name = new std::string("test_");
+    test_name->append(norm.name);
+    test_text.emplace_back(test_name);
+    test.name = test_text.back()->c_str();
 
-static inline PegInfo createTestPeg(const PegInfo p)
-{
-    // using a static vector to ensure the char* referred to in the PegInfo
-    // are valid after this function returns
-    static vector<std::string> test_pegs;
-    PegInfo test_peg;
+    std::string* test_info = new std::string("test ");
+    test_info->append(norm.help);
+    test_text.emplace_back(test_info);
+    test.help = test_text.back()->c_str();
 
-    std::string test_name("test ");
-    test_name.append(p.name);
-    test_pegs.push_back(test_name);
-    test_peg.name = test_pegs.back().c_str();
-
-    std::string test_info("During inline mode, would have ");
-    test_info.append(p.help);
-    test_pegs.push_back(test_info);
-    test_peg.help = test_pegs.back().c_str();
-
-    return test_peg;
+    test.type = norm.type;
+    test_pegs.emplace_back(test);
 }
 
 const PegInfo* NormalizeModule::get_pegs() const
 {
-    static vector<PegInfo> pegs;
-    pegs.clear();
+    if ( !test_pegs.empty() )
+        return &test_pegs[0];
 
     const PegInfo* p = Norm_GetPegs();
     assert(p);
 
     while ( p->name )
     {
-        pegs.push_back(*p);
-        pegs.push_back(createTestPeg(*p));
+        add_test_peg(*p);
+        test_pegs.emplace_back(*p);
         p++;
     }
 
-    p = Stream_GetNormPegs();
+    p = TcpNormalizer::get_normalization_pegs();
     assert(p);
 
     while ( p->name )
     {
-        pegs.push_back(*p);
-        pegs.push_back(createTestPeg(*p));
+        add_test_peg(*p);
+        test_pegs.emplace_back(*p);
         p++;
     }
 
-    pegs.push_back(*p);
-    return &pegs[0];
+    test_pegs.emplace_back(*p);
+    return &test_pegs[0];
 }
 
 PegCount* NormalizeModule::get_counts() const
 {
-    static vector<PegCount> counts;
-    counts.clear();
     unsigned c = 0;
-
     NormPegs p = Norm_GetCounts(c);
 
-    for ( unsigned i = 0; i < c; ++i )
+    unsigned tc = 0;
+    NormPegs tp = TcpNormalizer::get_normalization_counts(tc);
+
+    for ( unsigned i = 0; i < tc; ++i )
     {
-        counts.push_back(p[i][NORM_MODE_ON]);
-        counts.push_back(p[i][NORM_MODE_TEST]);
+        p[c+i][NORM_MODE_ON] = tp[i][NORM_MODE_ON];
+        p[c+i][NORM_MODE_TEST] = tp[i][NORM_MODE_TEST];
     }
 
-    p = Stream_GetNormCounts(c);
-
-    for ( unsigned i = 0; i < c; ++i )
-    {
-        counts.push_back(p[i][NORM_MODE_ON]);
-        counts.push_back(p[i][NORM_MODE_TEST]);
-    }
-
-    return &counts[0];
+    return (PegCount*)p;
 }
 

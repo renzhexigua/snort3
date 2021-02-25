@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,9 +20,10 @@
 #ifndef PROTOCOLS_IP_OPTIONS_H
 #define PROTOCOLS_IP_OPTIONS_H
 
-#include <cstdint>
 #include "main/snort_types.h"
 
+namespace snort
+{
 struct Packet;
 
 namespace ip
@@ -45,11 +46,13 @@ enum class IPOptionCodes : std::uint8_t
     ANY = 0xff,
 };
 
+// FIXIT-L reduce all these classes to a simple pointer based approach
+// that doesn't require any reinterpret casts (see also tcp_options.h)
 struct IpOptions
 {
     IPOptionCodes code;
     uint8_t len;
-    uint8_t data[6];  // arbitrary number. choosing six to align with 64 bits
+    uint8_t data[40];  // maximum possible
 
     inline uint8_t get_len() const
     { return ((uint8_t)code <= 1) ? 1 : len; }
@@ -59,26 +62,26 @@ struct IpOptions
 
     inline const IpOptions& next() const
     {
+#ifdef __GNUC__
         //  because gcc requires strict aliasing.
-#       if defined(__GNUC__)
         const uint8_t tmp_len = ((uint8_t)code <= 1) ? 1 : len;
         const uint8_t* const tmp = reinterpret_cast<const uint8_t*>(this);
         const IpOptions* opt = reinterpret_cast<const IpOptions*>(&tmp[tmp_len]);
         return *opt;
 
+#else
         // ... and the legible code
-#       else
         if ( (uint8_t)code <= 1 )
             return reinterpret_cast<const IpOptions&>(len);
         else
             return reinterpret_cast<const IpOptions&>(data[len -2]);
-#       endif
+#endif
     }
 };
 
 /*
- * relly creative name ... right
- * Use IpOptionIter ... this is the placehold
+ * really creative name ... right
+ * Use IpOptionIter ... this is the placeholder
  */
 class SO_PUBLIC IpOptionIteratorIter
 {
@@ -91,7 +94,7 @@ public:
     bool operator!=(const IpOptionIteratorIter& rhs)
     { return opt != rhs.opt; }
 
-    // I'd suggest just using IpOptionIterator and completley ignoring this
+    // I'd suggest just using IpOptionIterator and completely ignoring this
     // horror of a ++ operation.
     IpOptionIteratorIter& operator++()
     {
@@ -106,7 +109,7 @@ private:
 };
 
 /*
- * relly creative name ... right
+ * really creative name ... right
  * Use IP ranged for loop rather than calling this directly.
  * i.e.,
  *      IpOptionIter iter(ip4h, p)
@@ -118,16 +121,16 @@ private:
 class SO_PUBLIC IpOptionIterator
 {
 public:
-    /* CONSTRUCTOR VALID AFTER DECODE()
-     * Some options in the provided header may not be valid.
-     * Provide the packet struct ensures only valid options
-     * will be returned
-     */
+    // CONSTRUCTOR VALID AFTER DECODE()
+    // Some options in the provided header may not be valid.
+    // Provide the packet struct ensures only valid options
+    // will be returned
     IpOptionIterator(const IP4Hdr* const, const Packet* const);
-    /* If you already know the validated option length (for instance,
-     * if you are in a decode() method), then call this constructor.
-     * You MUST validate the a;; ip_options within len before
-     * using this constuctor*/
+
+    // If you already know the validated option length (for instance,
+    // if you are in a decode() method), then call this constructor.
+    // You MUST validate all ip_options within len before using this
+    // constructor
     IpOptionIterator(const IP4Hdr* const, const uint8_t valid_hdr_len);
     IpOptionIteratorIter begin() const;
     IpOptionIteratorIter end() const;
@@ -137,6 +140,6 @@ private:
     const uint8_t* start_ptr;
 };
 } // namespace ip
-
-#endif /* PROTOCOLS_IP_OPTIONS_H */
+} // namespace snort
+#endif
 

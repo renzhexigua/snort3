@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2004-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -38,12 +38,8 @@
 #ifndef FTPP_UI_CONFIG_H
 #define FTPP_UI_CONFIG_H
 
-#include "ftpp_include.h"
-#include "hi_util_kmap.h"
-#include "sfrt/sfrt.h"
-#include "snort_bounds.h"
-#include "framework/bits.h"
-#include "sfip/sfip_t.h"
+#include "sfip/sf_ip.h"
+#include "utils/kmap.h"
 
 /*
  * Defines
@@ -51,8 +47,8 @@
 #define FTPP_UI_CONFIG_STATELESS 0
 #define FTPP_UI_CONFIG_STATEFUL  1
 
-#define FTPP_UI_CONFIG_TELNET_DEF_AYT_THRESHOLD -1
-#define FTPP_UI_CONFIG_FTP_DEF_RESP_MSG_MAX -1
+#define FTPP_UI_CONFIG_TELNET_DEF_AYT_THRESHOLD (-1)
+#define FTPP_UI_CONFIG_FTP_DEF_RESP_MSG_MAX (-1)
 #define FTPP_UI_CONFIG_FTP_DEF_CMD_PARAM_MAX 100
 
 #define MIN_CMD 3
@@ -148,9 +144,6 @@ typedef struct s_FTP_PARAM_FMT
     struct s_FTP_PARAM_FMT** choices;
     int numChoices;
     int prev_optional; /* Only set if optional is set */
-    const char* next_param; /* Pointer to buffer for the next parameter.
-                         To be used to backtrack for optional
-                         parameters that don't match. */
 }  FTP_PARAM_FMT;
 
 typedef struct s_FTP_CMD_CONF
@@ -160,13 +153,15 @@ typedef struct s_FTP_CMD_CONF
     unsigned int max_param_len;
     int max_param_len_overridden;
 
-    int check_validity;
-    int data_chan_cmd;
-    int data_xfer_cmd;
-    int file_put_cmd;
-    int file_get_cmd;
-    int encr_cmd;
-    int login_cmd;
+    bool check_validity;
+    bool data_chan_cmd;
+    bool data_xfer_cmd;
+    bool data_rest_cmd;
+    bool file_put_cmd;
+    bool file_get_cmd;
+    bool encr_cmd;
+    bool login_cmd;
+    bool prot_cmd;
     int dir_response;
 
     FTP_PARAM_FMT* param_format;
@@ -199,7 +194,7 @@ struct FTP_SERVER_PROTO_CONF
 
 typedef struct s_FTP_BOUNCE_TO
 {
-    sfip_t ip;
+    snort::SfIp ip;
     int relevant_bits;
     unsigned short portlo;
     unsigned short porthi;
@@ -213,16 +208,16 @@ typedef struct s_FTP_BOUNCE_TO
  */
 struct FTP_CLIENT_PROTO_CONF
 {
-    unsigned int max_resp_len;
+    unsigned int max_resp_len = FTPP_UI_CONFIG_FTP_DEF_RESP_MSG_MAX;
 
-    bool data_chan;
-    bool bounce;
-    bool telnet_cmds;
-    bool ignore_telnet_erase_cmds;
+    bool data_chan = false;
+    bool bounce = false;
+    bool telnet_cmds = false;
+    bool ignore_telnet_erase_cmds = false;
 
-    /* allow_bounce to IP/mask port|port-range
-       TODO: change this to use a quick find of IP/mask */
-    BOUNCE_LOOKUP* bounce_lookup;
+    // allow_bounce to IP/mask port|port-range
+    // FIXIT-P change this to use a quick find of IP/mask
+    BOUNCE_LOOKUP* bounce_lookup = nullptr;
 
     FTP_CLIENT_PROTO_CONF();
     ~FTP_CLIENT_PROTO_CONF();

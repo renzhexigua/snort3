@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -23,8 +23,8 @@
 #define PORT_UTILS_H
 
 #include "framework/bits.h"
+#include "protocols/packet.h"
 #include "utils/sflsq.h"
-#include "utils/snort_bounds.h"
 
 struct PortObject;
 struct PortObjectItem;
@@ -37,7 +37,7 @@ int* RuleListToSortedArray(SF_LIST*);
 int integer_compare(const void* int1, const void* int2);
 
 // global for printing so we don't put so many bytes on the stack
-extern char po_print_buf[MAXPORTS];  // FIXIT-L delete this; replace with local stringstream
+extern char po_print_buf[snort::MAX_PORTS];  // FIXIT-L delete this; replace with local stringstream
 
 #endif
 

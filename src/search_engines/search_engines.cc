@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -16,28 +16,36 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "search_engines.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "framework/mpse.h"
 
-const BaseApi* search_engines[] =
+#include "search_engines.h"
+
+#include "managers/plugin_manager.h"
+
+using namespace snort;
+
+extern const BaseApi* se_ac_bnfa[];
+
+#ifdef STATIC_SEARCH_ENGINES
+extern const BaseApi* se_ac_std[];
+extern const BaseApi* se_acsmx2[];
+#ifdef HAVE_HYPERSCAN
+extern const BaseApi* se_hyperscan[];
+#endif
+#endif
+
+void load_search_engines()
 {
-#ifdef STATIC_IPS_OPTIONS
-    se_ac_banded,
-    se_ac_full,
-    se_ac_full_q,
-    se_ac_sparse,
-    se_ac_sparse_bands,
-    se_ac_std,
-#ifdef INTEL_SOFT_CPM
-    se_intel_cpm,
+    PluginManager::load_plugins(se_ac_bnfa);
+
+#ifdef STATIC_SEARCH_ENGINES
+    PluginManager::load_plugins(se_ac_std);
+    PluginManager::load_plugins(se_acsmx2);
+#ifdef HAVE_HYPERSCAN
+    PluginManager::load_plugins(se_hyperscan);
 #endif
 #endif
-    se_ac_bnfa,
-    se_ac_bnfa_q,
-    nullptr
-};
+}
 

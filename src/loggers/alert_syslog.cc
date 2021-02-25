@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -22,32 +22,27 @@
 #include "config.h"
 #endif
 
-#include <sys/types.h>
 #include <syslog.h>
-#include <stdlib.h>
 
-#include <string>
-
+#include "detection/ips_context.h"
+#include "detection/signature.h"
+#include "events/event.h"
 #include "framework/logger.h"
 #include "framework/module.h"
-#include "protocols/packet.h"
-#include "detect.h"
-#include "event.h"
-#include "rules.h"
-#include "treenodes.h"
-#include "snort_debug.h"
-#include "parser.h"
-#include "util.h"
-#include "util_net.h"
-#include "snort_config.h"
+#include "log/messages.h"
+#include "main/snort_config.h"
 #include "packet_io/sfdaq.h"
-#include "packet_io/intf.h"
+#include "protocols/packet.h"
+#include "utils/util.h"
+#include "utils/util_cstring.h"
+#include "utils/util_net.h"
+
+using namespace snort;
+using namespace std;
 
 #ifndef LOG_AUTHPRIV
 #define LOG_AUTHPRIV LOG_AUTH
 #endif
-
-using namespace std;
 
 #define s_name "alert_syslog"
 
@@ -99,8 +94,11 @@ static int get_level(unsigned lvl)
     return 0;
 }
 
-#define syslog_options \
-    "cons | ndelay | perror | pid"
+#ifdef LOG_PERROR
+#define syslog_options "cons | ndelay | perror | pid"
+#else
+#define syslog_options "cons | ndelay | pid"
+#endif
 
 static int get_options(const char* s)
 {
@@ -112,8 +110,10 @@ static int get_options(const char* s)
     if ( strstr(s, "ndelay") )
         opts |= LOG_NDELAY;
 
+#ifdef LOG_PERROR
     if ( strstr(s, "perror") )
         opts |= LOG_PERROR;
+#endif
 
     if ( strstr(s, "pid") )
         opts |= LOG_PID;
@@ -151,19 +151,22 @@ public:
     bool begin(const char*, int, SnortConfig*) override;
     bool end(const char*, int, SnortConfig*) override;
 
+    Usage get_usage() const override
+    { return GLOBAL; }
+
 public:
-    int facility;
-    int level;
-    int options;
+    int facility = 0;
+    int level = 0;
+    int options = 0;
 };
 
 bool SyslogModule::set(const char*, Value& v, SnortConfig*)
 {
     if ( v.is("facility") )
-        facility = get_facility(v.get_long());
+        facility = get_facility(v.get_uint8());
 
     else if ( v.is("level") )
-        level = get_level(v.get_long());
+        level = get_level(v.get_uint8());
 
     else if ( v.is("options") )
         options = get_options(v.get_string());
@@ -182,9 +185,9 @@ bool SyslogModule::begin(const char*, int, SnortConfig*)
     return true;
 }
 
-bool SyslogModule::end(const char*, int, SnortConfig*)
+bool SyslogModule::end(const char*, int, SnortConfig* sc)
 {
-    if ( SnortConfig::daemon_mode() )
+    if ( sc->daemon_mode() )
         options |= LOG_PID;
 
     return true;
@@ -196,97 +199,98 @@ bool SyslogModule::end(const char*, int, SnortConfig*)
 
 // FIXIT-M can't message be put in Event?
 static void AlertSyslog(
-    int priority, Packet* p, const char* msg, Event* event)
+    int priority, Packet* p, const char* msg, const Event& event)
 {
     char event_string[STD_BUF];
     event_string[0] = '\0';
 
-    if ((p != NULL) && p->ptrs.ip_api.is_valid())
+    if ((p != nullptr) && p->ptrs.ip_api.is_valid())
     {
-        if (event != NULL)
-        {
-            SnortSnprintfAppend(event_string, sizeof(event_string),
-                "[%lu:%lu:%lu] ",
-                (unsigned long)event->sig_info->generator,
-                (unsigned long)event->sig_info->id,
-                (unsigned long)event->sig_info->rev);
-        }
+        SnortSnprintfAppend(event_string, sizeof(event_string),
+            "[%u:%u:%u] ", event.sig_info->gid, event.sig_info->sid, event.sig_info->rev);
 
-        if (msg != NULL)
+        if (msg != nullptr)
             SnortSnprintfAppend(event_string, sizeof(event_string), "%s ", msg);
         else
             SnortSnprintfAppend(event_string, sizeof(event_string), "ALERT ");
 
-        if ( event )
-        {
-            if ((event->sig_info->classType != NULL)
-                && (event->sig_info->classType->name != NULL))
-            {
-                SnortSnprintfAppend(event_string, sizeof(event_string),
-                    "[Classification: %s] ",
-                    event->sig_info->classType->name);
-            }
-
-            if (event->sig_info->priority != 0)
-            {
-                SnortSnprintfAppend(event_string, sizeof(event_string),
-                    "[Priority: %d] ", event->sig_info->priority);
-            }
-        }
-
-        if (SnortConfig::alert_interface())
+        if ( event.sig_info->class_type and !event.sig_info->class_type->text.empty() )
         {
             SnortSnprintfAppend(event_string, sizeof(event_string),
-                "<%s> ", PRINT_INTERFACE(DAQ_GetInterfaceSpec()));
+                "[Classification: %s] ", event.sig_info->class_type->text.c_str());
+        }
+
+        if (event.sig_info->priority != 0)
+        {
+            SnortSnprintfAppend(event_string, sizeof(event_string),
+                "[Priority: %u] ", event.sig_info->priority);
+        }
+
+        if (p->context->conf->alert_interface())
+        {
+            SnortSnprintfAppend(event_string, sizeof(event_string),
+                "<%s> ", SFDAQ::get_input_spec());
         }
     }
-    if ((p != NULL) && p->ptrs.ip_api.is_ip())
+    if ((p != nullptr) && p->ptrs.ip_api.is_ip())
     {
-        uint16_t proto = p->get_ip_proto_next();
-        if (protocol_names[proto] != NULL)
+        IpProtocol ip_proto = p->get_ip_proto_next();
+        if (protocol_names[to_utype(ip_proto)] != nullptr)
         {
             SnortSnprintfAppend(event_string, sizeof(event_string),
-                "{%s} ", protocol_names[proto]);
+                "{%s} ", protocol_names[to_utype(ip_proto)]);
         }
         else
         {
             SnortSnprintfAppend(event_string, sizeof(event_string),
-                "{%d} ", proto);
+                "{%d} ", static_cast<uint8_t>(ip_proto));
         }
 
         if ((p->ptrs.decode_flags & DECODE_FRAG)
-            || ((proto != IPPROTO_TCP)
-            && (proto != IPPROTO_UDP)))
+            || ((ip_proto != IpProtocol::TCP)
+            && (ip_proto != IpProtocol::UDP)))
         {
             const char* ip_fmt = "%s -> %s";
+            InetBuf src, dst;
 
-            if (SnortConfig::obfuscate())
+            if (p->context->conf->obfuscate())
             {
-                SnortSnprintfAppend(event_string, sizeof(event_string), ip_fmt,
-                    ObfuscateIpToText(p->ptrs.ip_api.get_src()),
-                    ObfuscateIpToText(p->ptrs.ip_api.get_dst()));
+                ObfuscateIpToText(p->ptrs.ip_api.get_src(), p->context->conf->get_conf()->homenet,
+                    p->context->conf->get_conf()->obfuscation_net, src);
+
+                ObfuscateIpToText(p->ptrs.ip_api.get_dst(), p->context->conf->get_conf()->homenet,
+                    p->context->conf->get_conf()->obfuscation_net, dst);
+
+                SnortSnprintfAppend(event_string, sizeof(event_string), ip_fmt, src, dst);
             }
             else
             {
                 SnortSnprintfAppend(event_string, sizeof(event_string), ip_fmt,
-                    inet_ntoax(p->ptrs.ip_api.get_src()), inet_ntoax(p->ptrs.ip_api.get_dst()));
+                    sfip_ntop(p->ptrs.ip_api.get_src(), src, sizeof(src)),
+                    sfip_ntop(p->ptrs.ip_api.get_dst(), dst, sizeof(dst)));
             }
         }
         else
         {
             const char* ip_fmt = "%s:%d -> %s:%d";
+            InetBuf src, dst;
 
-            if (SnortConfig::obfuscate())
+            if (p->context->conf->obfuscate())
             {
+                ObfuscateIpToText(p->ptrs.ip_api.get_src(), p->context->conf->get_conf()->homenet,
+                    p->context->conf->get_conf()->obfuscation_net, src);
+
+                ObfuscateIpToText(p->ptrs.ip_api.get_dst(), p->context->conf->get_conf()->homenet,
+                    p->context->conf->get_conf()->obfuscation_net, dst);
+
                 SnortSnprintfAppend(event_string, sizeof(event_string), ip_fmt,
-                    ObfuscateIpToText(p->ptrs.ip_api.get_src()), p->ptrs.sp,
-                    ObfuscateIpToText(p->ptrs.ip_api.get_dst()), p->ptrs.dp);
+                    src, p->ptrs.sp, dst, p->ptrs.dp);
             }
             else
             {
                 SnortSnprintfAppend(event_string, sizeof(event_string), ip_fmt,
-                    inet_ntoax(p->ptrs.ip_api.get_src()), p->ptrs.sp,
-                    inet_ntoax(p->ptrs.ip_api.get_dst()), p->ptrs.dp);
+                    sfip_ntop(p->ptrs.ip_api.get_src(), src, sizeof(src)), p->ptrs.sp,
+                    sfip_ntop(p->ptrs.ip_api.get_dst(), dst, sizeof(dst)), p->ptrs.dp);
             }
         }
 
@@ -294,7 +298,7 @@ static void AlertSyslog(
     }
     else
     {
-        syslog(priority, "%s", msg == NULL ? "ALERT" : msg);
+        syslog(priority, "%s", msg == nullptr ? "ALERT" : msg);
     }
 }
 
@@ -306,9 +310,8 @@ class SyslogLogger : public Logger
 {
 public:
     SyslogLogger(SyslogModule*);
-    ~SyslogLogger();
 
-    void alert(Packet*, const char* msg, Event*) override;
+    void alert(Packet*, const char* msg, const Event&) override;
 
 private:
     int priority;
@@ -323,10 +326,8 @@ SyslogLogger::SyslogLogger(SyslogModule* m)
 }
 
 // do not closelog() here since it has other uses
-SyslogLogger::~SyslogLogger()
-{ }
 
-void SyslogLogger::alert(Packet* p, const char* msg, Event* event)
+void SyslogLogger::alert(Packet* p, const char* msg, const Event& event)
 {
     AlertSyslog(priority, p, msg, event);
 }
@@ -341,7 +342,7 @@ static Module* mod_ctor()
 static void mod_dtor(Module* m)
 { delete m; }
 
-static Logger* syslog_ctor(SnortConfig*, Module* mod)
+static Logger* syslog_ctor(Module* mod)
 { return new SyslogLogger((SyslogModule*)mod); }
 
 static void syslog_dtor(Logger* p)
@@ -368,11 +369,11 @@ static LogApi syslog_api
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* alert_syslog[] =
+#endif
 {
     &syslog_api.base,
     nullptr
 };
-#else
-const BaseApi* alert_syslog = &syslog_api.base;
-#endif
 

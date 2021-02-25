@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2013-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,15 +17,15 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "acsmx.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include "framework/mpse.h"
+
 #include "acsmx2.h"
 
-#include "snort_debug.h"
-#include "snort_types.h"
-#include "util.h"
-#include "profiler.h"
-#include "snort_config.h"
-#include "framework/mpse.h"
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // "ac_banded"
@@ -37,54 +37,44 @@ private:
     ACSM_STRUCT2* obj;
 
 public:
-    AcbMpse(
-        SnortConfig*,
-        bool use_gc,
-        void (* user_free)(void*),
-        void (* tree_free)(void**),
-        void (* list_free)(void**))
-        : Mpse("ac_banded", use_gc)
-    {
-        obj = acsmNew2(user_free, tree_free, list_free);
-        if ( obj ) acsmSelectFormat2(obj, ACF_BANDED);
-    }
+    AcbMpse(const MpseAgent* agent) : Mpse("ac_banded")
+    { obj = acsmNew2(agent, ACF_BANDED); }
 
-    ~AcbMpse()
-    {
-        if (obj)
-            acsmFree2(obj);
-    }
+    ~AcbMpse() override
+    { acsmFree2(obj); }
+
+    void set_opt(int) override
+    { obj->enable_dfa(); }
 
     int add_pattern(
-        SnortConfig*, const uint8_t* P, unsigned m,
-        bool noCase, bool negative, void* ID, int IID) override
+        const uint8_t* P, unsigned m, const PatternDescriptor& desc, void* user) override
     {
-        return acsmAddPattern2(obj, P, m, noCase, negative, ID, IID);
+        return acsmAddPattern2(obj, P, m, desc.no_case, desc.negated, user);
     }
 
-    int prep_patterns(
-        SnortConfig* sc, mpse_build_f build_tree, mpse_negate_f neg_list) override
-    {
-        return acsmCompile2(sc, obj, build_tree, neg_list);
-    }
+    int prep_patterns(SnortConfig* sc) override
+    { return acsmCompile2(sc, obj); }
 
     int _search(
-        const unsigned char* T, int n, mpse_action_f action,
-        void* data, int* current_state) override
+        const uint8_t* T, int n, MpseMatch match,
+        void* context, int* current_state) override
     {
-        return acsmSearchSparseDFA_Banded(
-            obj, (unsigned char*)T, n, action, data, current_state);
+#if 1
+        return acsm_search_dfa_banded(obj, T, n, match, context, current_state);
+#else
+        if ( obj->dfa_enabled() )
+            return acsm_search_dfa_banded(obj, T, n, match, context, current_state);
+
+        // FIXIT-L banded will crash in get_next_state_nfa()
+        return acsm_search_nfa(obj, T, n, match, context, current_state);
+#endif
     }
 
     int print_info() override
-    {
-        return acsmPrintDetailInfo2(obj);
-    }
+    { return acsmPrintDetailInfo2(obj); }
 
-    int get_pattern_count() override
-    {
-        return acsmPatternCount2(obj);
-    }
+    int get_pattern_count() const override
+    { return acsmPatternCount2(obj); }
 };
 
 //-------------------------------------------------------------------------
@@ -92,14 +82,9 @@ public:
 //-------------------------------------------------------------------------
 
 static Mpse* acb_ctor(
-    SnortConfig* sc,
-    class Module*,
-    bool use_gc,
-    void (* user_free)(void*),
-    void (* tree_free)(void**),
-    void (* list_free)(void**))
+    const SnortConfig*, class Module*, const MpseAgent* agent)
 {
-    return new AcbMpse(sc, use_gc, user_free, tree_free, list_free);
+    return new AcbMpse(agent);
 }
 
 static void acb_dtor(Mpse* p)
@@ -132,7 +117,7 @@ static const MpseApi acb_api =
         nullptr,
         nullptr
     },
-    false,
+    MPSE_BASE,
     nullptr,
     nullptr,
     nullptr,
@@ -141,6 +126,7 @@ static const MpseApi acb_api =
     acb_dtor,
     acb_init,
     acb_print,
+    nullptr,
 };
 
 const BaseApi* se_ac_banded = &acb_api.base;

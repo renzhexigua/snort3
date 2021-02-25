@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -23,12 +23,14 @@
 #include <cstdint>
 #include "protocols/ipv4.h" // for in_addr
 
+namespace snort
+{
 namespace icmp
 {
 constexpr uint32_t ICMP_BASE_LEN = 4;
 constexpr uint8_t ICMP_UNREACH_DATA_LEN = 8;
 
-// do NOT add 'ICMP_' to the begining of these const because they
+// do NOT add 'ICMP_' to the beginning of these const because they
 // will overlap with dnet macros
 
 //enum class IcmpType : std::uint8_t {
@@ -73,7 +75,7 @@ enum IcmpCode : std::uint8_t
     PREC_VIOLATION = 14,
     PREC_CUTOFF = 15,
 
-    /* Code for ICMP Source Quence (4) */
+    /* Code for ICMP Source Quench (4) */
     SOURCE_QUENCH_CODE = 0,
 
     /* Codes for an ICMP Redirect (5) */
@@ -85,7 +87,7 @@ enum IcmpCode : std::uint8_t
     /* Codes for ICMP Echo (8) */
     ECHO_CODE = 0,
 
-    /* Codes for ICMP time excceeded (11) */
+    /* Codes for ICMP time exceeded (11) */
     TIMEOUT_TRANSIT = 0,
     TIMEOUT_REASSY = 1,
 
@@ -172,7 +174,7 @@ struct ICMPHdr
         /* IP header for unreach */
         struct ih_ip
         {
-            ip::IP4Hdr* ip;
+            snort::ip::IP4Hdr* ip;
             /* options and then 64 bits of data */
         } ip;
 
@@ -195,8 +197,9 @@ struct ICMPHdr
 #define s_icmp_data       icmp_dun.data
 };
 } //namespace icmp
+} // namespace snort
 
-typedef icmp::ICMPHdr ICMPHdr;
+typedef snort::icmp::ICMPHdr ICMPHdr;
 
 #ifndef ICMP_ECHOREPLY
 constexpr uint8_t ICMP_ECHOREPLY = 0;    /* Echo Reply                   */

@@ -19,17 +19,13 @@ set (FILE_LIST
     ftp_server.h
     ftp_splitter.h
     ftp_splitter.cc
-    ftpp_include.h
+    ftpdata_splitter.h
+    ftpdata_splitter.cc
     ftpp_return_codes.h
     ftpp_si.cc
     ftpp_si.h
     ftpp_ui_config.cc
     ftpp_ui_config.h
-    ftpp_util_kmap.h
-    hi_util_kmap.cc
-    hi_util_kmap.h
-    hi_util_xmalloc.cc
-    hi_util_xmalloc.h
     pp_ftp.cc
     pp_ftp.h
     pp_telnet.cc
@@ -41,11 +37,10 @@ set (FILE_LIST
 )
 
 if (STATIC_INSPECTORS)
-    add_library(ftp_telnet STATIC ${FILE_LIST})
-    target_link_libraries(ftp_telnet utils)
+    add_library(ftp_telnet OBJECT ${FILE_LIST})
 
 else (STATIC_INSPECTORS)
-   add_shared_library(ftp_telnet inspectors ${FILE_LIST})
+   add_dynamic_module(ftp_telnet inspectors ${FILE_LIST})
 
 endif (STATIC_INSPECTORS)
 

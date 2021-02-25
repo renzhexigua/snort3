@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,35 +20,28 @@
 #ifndef CONVERSION_STATE_H
 #define CONVERSION_STATE_H
 
-#include <string>
-#include <fstream>
 #include <sstream>
-#include <cctype>
-#include <iostream>
 
-#include "data/dt_data.h"
-#include "data/dt_table_api.h"
-#include "data/dt_rule_api.h"
-
-// the following three files are for the function 'set_next_rule_state'
+#include "helpers/converter.h"
 #include "helpers/s2l_util.h"
 #include "rule_states/rule_api.h"
-#include "helpers/converter.h"
-#include "conversion_defines.h"
 
 class DataApi;
 class RuleApi;
+class StateApi;
 class TableApi;
 
 class ConversionState
 {
 public:
     ConversionState(Converter& c) : cv(c),
+        // FIXIT-L these should be removed and accessed through cv
         data_api(c.get_data_api()),
         table_api(c.get_table_api()),
-        rule_api(c.get_rule_api())
+        rule_api(c.get_rule_api()),
+        state_api(c.get_state_api())
     { }
-    virtual ~ConversionState() { }
+    virtual ~ConversionState() = default;
     virtual bool convert(std::istringstream& data)=0;
 
 protected:
@@ -56,32 +49,7 @@ protected:
     DataApi& data_api;
     TableApi& table_api;
     RuleApi& rule_api;
-
-#if 0
-    Forward declaration fo parsing methods.Since these are all inline,
-    unable to forward declare in regular code.
-
-    inline bool eat_option(std::istringstream& stream);
-    inline bool parse_string_option(std::string opt_name,
-        std::istringstream& stream);
-    inline bool parse_int_option(std::string opt_name,
-        std::istringstream& stream, bool append);
-    inline bool parse_curly_bracket_list(std::string list_name,
-        std::istringstream& stream);
-    inline bool parse_yn_bool_option(std::string opt_name,
-        std::istringstream& stream, bool append);
-    inline bool parse_bracketed_byte_list(std::string list_name,
-        std::istringstream& stream);
-    inline bool parse_bracketed_unsupported_list(std::string list_name,
-        std::istringstream& stream);
-    inline bool parse_deleted_option(std::string table_name,
-        std::istringstream& stream);
-
-    //  rules have no order. Function placed here because every rule
-    //  uses this.
-    inline bool set_next_rule_state(std::istringstream& stream)
-
-#endif
+    StateApi& state_api;
 
     inline bool eat_option(std::istringstream& stream)
     {
@@ -92,7 +60,7 @@ protected:
         return false;
     }
 
-    inline bool parse_string_option(std::string opt_name,
+    inline bool parse_string_option(const std::string& opt_name,
         std::istringstream& stream)
     {
         std::string val;
@@ -106,11 +74,55 @@ protected:
             return true;
         }
 
-        table_api.add_comment("snort.conf missing argument for: " + opt_name + " <int>");
+        table_api.add_comment("snort.conf missing argument for: " + opt_name + " <string>");
         return false;
     }
 
-    inline bool parse_int_option(std::string opt_name,
+    inline bool parse_path_option(const std::string& opt_name,
+        std::istringstream& stream)
+    {
+        std::string val;
+
+        if (stream >> val)
+        {
+            std::size_t prev_pos = 0;
+            while (true)
+            {
+                auto env_start = val.find('$', prev_pos);
+                if (env_start == std::string::npos)
+                {
+                    if (prev_pos)
+                        val.push_back('\'');
+                    break;
+                }
+
+                if (env_start)
+                {
+                    if (!prev_pos)
+                    {
+                        val.insert(prev_pos, "$\'");
+                        env_start += 2;
+                    }
+                    val.replace(env_start, 1, "\' .. ");
+                }
+
+                auto env_end = val.find('/', env_start + 1);
+                if (env_end == std::string::npos)
+                    break;
+
+                val.replace(env_end, 1, " .. \'/");
+                prev_pos = env_end + 5;
+            }
+
+            table_api.add_option(opt_name, val);
+            return true;
+        }
+
+        table_api.add_comment("snort.conf missing argument for: " + opt_name + " <string>");
+        return false;
+    }
+
+    inline bool parse_int_option(const std::string& opt_name,
         std::istringstream& stream, bool append)
     {
         int val;
@@ -128,8 +140,50 @@ protected:
         return false;
     }
 
+    // Reduces int value to max value if value > max value
+    inline bool parse_max_int_option(const std::string& opt_name,
+        std::istringstream& stream, int max, bool append)
+    {
+        int val;
+
+        if (stream >> val)
+        {
+            if (val > max)
+            {
+                table_api.add_comment("option value reduced to maximum: '" + opt_name + "'");
+                val = max;
+            }
+
+            if (append)
+                table_api.append_option(opt_name, val);
+            else
+                table_api.add_option(opt_name, val);
+            return true;
+        }
+
+        table_api.add_comment("snort.conf missing argument for: " + opt_name + " <int>");
+        return false;
+    }
+
+    // Like parse_int_option() but reverses -1 and 0 values
+    inline bool parse_int_option_reverse_m10(const std::string& opt_name,
+        std::istringstream& stream)
+    {
+        int val;
+
+        if (stream >> val)
+        {
+            val = !val ? -1 : ( val == -1 ? 0 : val );
+            table_api.add_option(opt_name, val);
+            return true;
+        }
+
+        table_api.add_comment("snort.conf missing argument for: " + opt_name + " <int>");
+        return false;
+    }
+
     // parse and add a curly bracketed list to the table
-    inline bool parse_curly_bracket_list(std::string list_name, std::istringstream& stream)
+    inline bool parse_curly_bracket_list(const std::string& list_name, std::istringstream& stream)
     {
         std::string elem;
         bool retval = true;
@@ -144,14 +198,14 @@ protected:
     }
 
     // parse and add a yes/no boolean option.
-    inline bool parse_yn_bool_option(std::string opt_name, std::istringstream& stream, bool append)
+    inline bool parse_yn_bool_option(const std::string& opt_name, std::istringstream& stream, bool append, const char* yes = "yes", const char* no = "no")
     {
         std::string val;
 
         if (!(stream >> val))
             return false;
 
-        else if (!val.compare("yes"))
+        else if (val == yes)
         {
             if (append)
             {
@@ -161,7 +215,7 @@ protected:
             else
                 return table_api.add_option(opt_name, true);
         }
-        else if (!val.compare("no"))
+        else if (val == no)
         {
             if (append)
             {
@@ -177,7 +231,7 @@ protected:
     }
 
     // parse a curly bracketed bit and add it to the table
-    inline bool parse_bracketed_byte_list(std::string list_name, std::istringstream& stream)
+    inline bool parse_bracketed_byte_list(const std::string& list_name, std::istringstream& stream)
     {
         std::string elem;
         bool retval = true;
@@ -204,8 +258,9 @@ protected:
             }
             else
             {
-                table_api.add_comment("Unable to convert " + elem +
-                    "!!  The element must be a single charachter or number between 0 - 255 inclusive");
+                table_api.add_comment(
+                    "Unable to convert " + elem + "!!  "
+                    "The element must be a single character or number between 0 - 255 inclusive");
                 retval = false;
             }
         }
@@ -214,9 +269,9 @@ protected:
     }
 
     // parse and add a curly bracket list '{...}' which is currently unsupported in Snort++
-    inline bool parse_bracketed_unsupported_list(std::string list_name, std::istringstream& stream)
+    inline bool parse_bracketed_unsupported_list(const std::string& list_name, std::istringstream& stream)
     {
-        std::string tmp = "";
+        std::string tmp;
         std::string elem;
 
         if (!(stream >> elem) || (elem != "{"))
@@ -225,14 +280,14 @@ protected:
         while (stream >> elem && elem != "}")
             tmp += " " + elem;
 
-        // remove the extra space at the beginig of the string
-        if (tmp.size() > 0)
+        // remove the extra space at the beginning of the string
+        if (!tmp.empty())
             tmp.erase(tmp.begin());
 
         return table_api.add_option("--" + list_name, tmp);
     }
 
-    inline bool parse_deleted_option(std::string opt_name,
+    inline bool parse_deleted_option(const std::string& opt_name,
         std::istringstream& stream)
     {
         std::string val;
@@ -254,10 +309,8 @@ protected:
             std::size_t semi_colon_pos = keyword.find(';');
             if (semi_colon_pos != std::string::npos)
             {
-                // found an option without a colon, so set stream
-                // to semi-colon
-                std::streamoff off = 1 + (std::streamoff)(pos) +
-                    (std::streamoff)(semi_colon_pos);
+                // found an option without a colon, so set stream to semi-colon
+                std::streamoff off = 1 + (std::streamoff)(pos) + (std::streamoff)(semi_colon_pos);
                 stream.seekg(off);
                 keyword = keyword.substr(0, semi_colon_pos);
             }
@@ -293,8 +346,20 @@ protected:
          */
         return true;
     }
+};
 
-private:
+template<std::string* config_header>
+class UnsupportedState : public ConversionState
+{
+public:
+    UnsupportedState(Converter& c) : ConversionState(c) {}
+
+    bool convert(std::istringstream& data_stream) override
+    {
+        data_api.add_unsupported_comment(*config_header +
+            std::string(std::istreambuf_iterator<char>(data_stream), {}));
+        return true;
+    }
 };
 
 #endif

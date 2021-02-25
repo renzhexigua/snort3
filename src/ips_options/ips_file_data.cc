@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 1998-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -22,19 +22,13 @@
 #include "config.h"
 #endif
 
-#include <sys/types.h>
-#include <stdlib.h>
-#include <ctype.h>
-#include <errno.h>
-
-#include "snort_types.h"
-#include "snort_debug.h"
-#include "profiler.h"
-#include "detection/detection_defines.h"
-#include "detection/detection_util.h"
+#include "detection/detection_engine.h"
 #include "framework/cursor.h"
 #include "framework/ips_option.h"
 #include "framework/module.h"
+#include "profiler/profiler.h"
+
+using namespace snort;
 
 #define s_name "file_data"
 
@@ -43,42 +37,30 @@ static THREAD_LOCAL ProfileStats fileDataPerfStats;
 class FileDataOption : public IpsOption
 {
 public:
-    FileDataOption() : IpsOption(s_name) { }
-    ~FileDataOption() { }
+    FileDataOption() : IpsOption(s_name, RULE_OPTION_TYPE_BUFFER_SET) { }
 
     CursorActionType get_cursor_type() const override
     { return CAT_SET_FILE; }
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 };
 
 //-------------------------------------------------------------------------
 // class methods
 //-------------------------------------------------------------------------
 
-int FileDataOption::eval(Cursor& c, Packet*)
+IpsOption::EvalStatus FileDataOption::eval(Cursor& c, Packet* p)
 {
-    int rval = DETECTION_OPTION_NO_MATCH;
-    uint8_t* data;
-    uint16_t len;
+    RuleProfile profile(fileDataPerfStats);
 
-    PROFILE_VARS;
-    MODULE_PROFILE_START(fileDataPerfStats);
+    DataPointer dp = DetectionEngine::get_file_data(p->context);
 
-    data = g_file_data.data;
-    len = g_file_data.len;
+    if ( !dp.data || !dp.len )
+        return NO_MATCH;
 
-    if ( (data == NULL)|| (len == 0) )
-    {
-        MODULE_PROFILE_END(fileDataPerfStats);
-        return rval;
-    }
+    c.set(s_name, dp.data, dp.len);
 
-    c.set(s_name, data, len);
-    rval = DETECTION_OPTION_MATCH;
-
-    MODULE_PROFILE_END(fileDataPerfStats);
-    return rval;
+    return MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -95,6 +77,9 @@ public:
 
     ProfileStats* get_profile() const override
     { return &fileDataPerfStats; }
+
+    Usage get_usage() const override
+    { return DETECT; }
 };
 
 //-------------------------------------------------------------------------
@@ -148,11 +133,11 @@ static const IpsApi file_data_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_file_data[] =
+#endif
 {
     &file_data_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_file_data = &file_data_api.base;
-#endif
 

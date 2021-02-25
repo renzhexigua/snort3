@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -21,7 +21,26 @@
 #ifndef SNORT_MODULE_H
 #define SNORT_MODULE_H
 
-class Module* get_snort_module();
+// the snort module is for handling command line args,
+// shell commands, and basic application stats
+
+#include "main/thread.h"
+
+namespace snort
+{
+class Module;
+class Trace;
+}
+
+extern THREAD_LOCAL const snort::Trace* snort_trace;
+
+snort::Module* get_snort_module();
+
+enum
+{
+    TRACE_MAIN = 0,
+    TRACE_INSPECTOR_MANAGER
+};
 
 #endif
 

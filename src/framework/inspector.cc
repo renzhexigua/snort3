@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,13 +17,17 @@
 //--------------------------------------------------------------------------
 // inspector.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "inspector.h"
 
-#include <assert.h>
-#include <string.h>
-
+#include "main/thread_config.h"
 #include "protocols/packet.h"
 #include "stream/stream_splitter.h"
+
+using namespace snort;
 
 //-------------------------------------------------------------------------
 // packet handler stuff
@@ -34,9 +38,9 @@ unsigned Inspector::max_slots = 1;
 
 Inspector::Inspector()
 {
-    unsigned max = get_instance_max();
+    unsigned max = ThreadConfig::get_instance_max();
     assert(slot < max);
-    ref_count = new unsigned[max];
+    ref_count = new std::atomic_uint[max];
 
     for ( unsigned i = 0; i < max; ++i )
         ref_count[i] = 0;
@@ -46,7 +50,7 @@ Inspector::~Inspector()
 {
     unsigned total = 0;
 
-    for (unsigned i = 0; i < get_instance_max(); ++i )
+    for (unsigned i = 0; i < ThreadConfig::get_instance_max(); ++i )
         total += ref_count[i];
 
     assert(!total);
@@ -56,7 +60,7 @@ Inspector::~Inspector()
 
 bool Inspector::is_inactive()
 {
-    for (unsigned i = 0; i < get_instance_max(); ++i )
+    for (unsigned i = 0; i < ThreadConfig::get_instance_max(); ++i )
         if ( ref_count[i] )
             return false;
 
@@ -97,7 +101,7 @@ StreamSplitter* Inspector::get_splitter(bool to_server)
 
 bool Inspector::likes(Packet* p)
 {
-    if ( !((uint16_t)p->type() & api->proto_bits) )
+    if ( !(BIT((uint16_t)p->type()) & api->proto_bits) )
         return false;
 
     if ( p->is_tcp() && api->type == IT_SERVICE )
@@ -106,3 +110,34 @@ bool Inspector::likes(Packet* p)
     return true;
 }
 
+void Inspector::add_ref()
+{ ++ref_count[slot]; }
+
+void Inspector::rem_ref()
+{ --ref_count[slot]; }
+
+void Inspector::add_global_ref()
+{ ++ref_count[0]; }
+
+void Inspector::rem_global_ref()
+{ --ref_count[0]; }
+
+static const char* InspectorTypeNames[IT_MAX] =
+{
+    "passive",
+    "wizard",
+    "packet",
+    "stream",
+    "network",
+    "service",
+    "control",
+    "probe"
+};
+
+const char* InspectApi::get_type(InspectorType type)
+{
+    if ( (type < IT_PASSIVE) or (type >= IT_MAX) )
+        return "";
+
+    return InspectorTypeNames[type];
+}

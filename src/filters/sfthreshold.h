@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2003-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -20,25 +20,32 @@
 #ifndef SFTHRESHOLD_H
 #define SFTHRESHOLD_H
 
-struct sfip_t;
+#include "main/policy.h"
+
+namespace snort
+{
+struct SfIp;
+struct SnortConfig;
+}
 struct THDX_STRUCT;
 struct ThresholdObjects;
 
 struct ThresholdConfig
 {
-    int memcap;
-    int enabled;
     ThresholdObjects* thd_objs;
+    unsigned memcap;
+    int enabled;
 };
 
-ThresholdConfig* ThresholdConfigNew(void);
+ThresholdConfig* ThresholdConfigNew();
 void ThresholdConfigFree(ThresholdConfig*);
-void sfthreshold_reset(void);
-int sfthreshold_create(struct SnortConfig*, ThresholdConfig*, THDX_STRUCT*);
-int sfthreshold_test(unsigned int, unsigned int, const sfip_t*, const sfip_t*, long curtime);
-void print_thresholding(ThresholdConfig*, unsigned shutdown);
-void sfthreshold_reset_active(void);
-void sfthreshold_free(void);
+void sfthreshold_reset();
+int sfthreshold_create(snort::SnortConfig*, ThresholdConfig*, THDX_STRUCT*, PolicyId);
+int sfthreshold_test(
+    unsigned int, unsigned int, const snort::SfIp*, const snort::SfIp*, long curtime,
+    PolicyId);
+void sfthreshold_free();
+
+int sfthreshold_alloc(unsigned int l_memcap, unsigned int g_memcap);
 
 #endif
-

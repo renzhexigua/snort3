@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 // Copyright (C) 1998-2002 Martin Roesch <roesch@sourcefire.com>
 //
@@ -18,28 +18,21 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include <sys/types.h>
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
 
-#include "snort_types.h"
-#include "detection/treenodes.h"
-#include "protocols/packet.h"
-#include "parser.h"
-#include "snort_debug.h"
-#include "util.h"
-#include "profiler.h"
-#include "sfhashfcn.h"
-#include "detection/detection_defines.h"
+#include <cassert>
+
 #include "framework/ips_option.h"
-#include "framework/parameter.h"
 #include "framework/module.h"
+#include "hash/hash_key_operations.h"
+#include "log/messages.h"
+#include "profiler/profiler.h"
+#include "protocols/packet.h"
 #include "protocols/tcp.h"
+
+using namespace snort;
 
 #define M_NORMAL  0
 #define M_ALL     1
@@ -61,9 +54,9 @@ static THREAD_LOCAL ProfileStats tcpFlagsPerfStats;
 
 struct TcpFlagCheckData
 {
-    u_char mode;
-    u_char tcp_flags;
-    u_char tcp_mask; /* Mask to take away from the flags check */
+    uint8_t mode;
+    uint8_t tcp_flags;
+    uint8_t tcp_mask; /* Mask to take away from the flags check */
 };
 
 class TcpFlagOption : public IpsOption
@@ -76,7 +69,7 @@ public:
     uint32_t hash() const override;
     bool operator==(const IpsOption&) const override;
 
-    int eval(Cursor&, Packet*) override;
+    EvalStatus eval(Cursor&, Packet*) override;
 
 private:
     TcpFlagCheckData config;
@@ -88,27 +81,24 @@ private:
 
 uint32_t TcpFlagOption::hash() const
 {
-    uint32_t a,b,c;
-    const TcpFlagCheckData* data = &config;
+    uint32_t a = config.mode;
+    uint32_t b = config.tcp_flags | (config.tcp_mask << 8);
+    uint32_t c = IpsOption::hash();
 
-    a = data->mode;
-    b = data->tcp_flags || (data->tcp_mask << 8);
-    c = 0;
-
-    mix_str(a,b,c,get_name());
-    final(a,b,c);
+    mix(a,b,c);
+    finalize(a,b,c);
 
     return c;
 }
 
 bool TcpFlagOption::operator==(const IpsOption& ips) const
 {
-    if ( strcmp(get_name(), ips.get_name()) )
+    if ( !IpsOption::operator==(ips) )
         return false;
 
-    TcpFlagOption& rhs = (TcpFlagOption&)ips;
-    TcpFlagCheckData* left = (TcpFlagCheckData*)&config;
-    TcpFlagCheckData* right = (TcpFlagCheckData*)&rhs.config;
+    const TcpFlagOption& rhs = (const TcpFlagOption&)ips;
+    const TcpFlagCheckData* left = &config;
+    const TcpFlagCheckData* right = &rhs.config;
 
     if ((left->mode == right->mode) &&
         (left->tcp_flags == right->tcp_flags) &&
@@ -120,41 +110,27 @@ bool TcpFlagOption::operator==(const IpsOption& ips) const
     return false;
 }
 
-int TcpFlagOption::eval(Cursor&, Packet* p)
+IpsOption::EvalStatus TcpFlagOption::eval(Cursor&, Packet* p)
 {
-    TcpFlagCheckData* flagptr = &config;
-    int rval = DETECTION_OPTION_NO_MATCH;
-    u_char tcp_flags;
-    PROFILE_VARS;
+    RuleProfile profile(tcpFlagsPerfStats);
 
-    MODULE_PROFILE_START(tcpFlagsPerfStats);
-
+    // if error appeared when tcp header was processed,
+    // test fails automagically.
     if (!p->ptrs.tcph)
-    {
-        /* if error appeared when tcp header was processed,
-         * test fails automagically */
-        MODULE_PROFILE_END(tcpFlagsPerfStats);
-        return rval;
-    }
+        return NO_MATCH;
 
     /* the flags we really want to check are all the ones
      */
 
-    tcp_flags = p->ptrs.tcph->th_flags & (0xFF ^ flagptr->tcp_mask);
-
-    DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "           <!!> CheckTcpFlags: "); );
+    TcpFlagCheckData* flagptr = &config;
+    uint8_t tcp_flags = p->ptrs.tcph->th_flags & (0xFF ^ flagptr->tcp_mask);
 
     switch ((flagptr->mode))
     {
     case M_NORMAL:
         if (flagptr->tcp_flags == tcp_flags)    /* only these set */
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"Got TCP [default] flag match!\n"); );
-            rval = DETECTION_OPTION_MATCH;
-        }
-        else
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"No match\n"); );
+            return MATCH;
         }
         break;
 
@@ -162,47 +138,29 @@ int TcpFlagOption::eval(Cursor&, Packet* p)
         /* all set */
         if ((flagptr->tcp_flags & tcp_flags) == flagptr->tcp_flags)
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "Got TCP [ALL] flag match!\n"); );
-            rval = DETECTION_OPTION_MATCH;
-        }
-        else
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"No match\n"); );
+            return MATCH;
         }
         break;
 
     case M_NOT:
         if ((flagptr->tcp_flags & tcp_flags) == 0)     /* none set */
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"Got TCP [NOT] flag match!\n"); );
-            rval = DETECTION_OPTION_MATCH;
-        }
-        else
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "No match\n"); );
+            return MATCH;
         }
         break;
 
     case M_ANY:
         if ((flagptr->tcp_flags & tcp_flags) != 0)     /* something set */
         {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"Got TCP [ANY] flag match!\n"); );
-            rval = DETECTION_OPTION_MATCH;
-        }
-        else
-        {
-            DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN,"No match\n"); );
+            return MATCH;
         }
         break;
 
     default:      /* Should never see this */
-        DEBUG_WRAP(DebugMessage(DEBUG_PLUGIN, "TCP flag check went to default case"
-            " for some silly reason\n"); );
         break;
     }
 
-    MODULE_PROFILE_END(tcpFlagsPerfStats);
-    return rval;
+    return NO_MATCH;
 }
 
 //-------------------------------------------------------------------------
@@ -215,22 +173,7 @@ static void flags_parse_test(const char* rule, TcpFlagCheckData* idx)
     const char* fend;
 
     fptr = rule;
-
-    /* make sure there is atleast a split pointer */
-    if (fptr == NULL)
-    {
-        ParseError("flags missing in TCP flag rule");
-        return;
-    }
-
-    while (isspace((u_char) *fptr))
-        fptr++;
-
-    if (strlen(fptr) == 0)
-    {
-        ParseError("flags missing in TCP flag rule");
-        return;
-    }
+    assert(fptr and *fptr);
 
     /* find the end of the alert string */
     fend = fptr + strlen(fptr);
@@ -302,7 +245,7 @@ static void flags_parse_test(const char* rule, TcpFlagCheckData* idx)
         default:
             ParseError(
                 "bad TCP flag = '%c'"
-                "Valid otions: UAPRSFCE or 0 for NO flags (e.g. NULL scan),"
+                "Valid options: UAPRSFCE or 0 for NO flags (e.g. NULL scan),"
                 " and !, + or * for modifiers",
                 *fptr);
             return;
@@ -318,22 +261,7 @@ static void flags_parse_mask(const char* rule, TcpFlagCheckData* idx)
     const char* fend;
 
     fptr = rule;
-
-    /* make sure there is atleast a split pointer */
-    if (fptr == NULL)
-    {
-        ParseError("flags missing in TCP flag rule");
-        return;
-    }
-
-    while (isspace((u_char) *fptr))
-        fptr++;
-
-    if (strlen(fptr) == 0)
-    {
-        ParseError("flags missing in TCP flag rule");
-        return;
-    }
+    assert(fptr and *fptr);
 
     /* find the end of the alert string */
     fend = fptr + strlen(fptr);
@@ -385,7 +313,7 @@ static void flags_parse_mask(const char* rule, TcpFlagCheckData* idx)
             idx->tcp_mask |= R_ECE;     /* ECN echo, RFC 3168 */
             break;
         default:
-            ParseError("bad TCP flag = '%c'. Valid otions: UAPRSFCE", *fptr);
+            ParseError("bad TCP flag = '%c'. Valid options: UAPRSFCE", *fptr);
             return;
         }
 
@@ -422,7 +350,11 @@ public:
     ProfileStats* get_profile() const override
     { return &tcpFlagsPerfStats; }
 
-    TcpFlagCheckData data;
+    Usage get_usage() const override
+    { return DETECT; }
+
+public:
+    TcpFlagCheckData data = {};
 };
 
 bool FlagsModule::begin(const char*, int, SnortConfig*)
@@ -497,11 +429,11 @@ static const IpsApi flags_api =
 
 #ifdef BUILDING_SO
 SO_PUBLIC const BaseApi* snort_plugins[] =
+#else
+const BaseApi* ips_flags[] =
+#endif
 {
     &flags_api.base,
     nullptr
 };
-#else
-const BaseApi* ips_flags = &flags_api.base;
-#endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -18,16 +18,22 @@
 
 // wiz_module.cc author Russ Combs <rucombs@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "wiz_module.h"
 
-#include <assert.h>
-#include <string.h>
+#include "log/messages.h"
+#include "trace/trace.h"
 
-#include <string>
+#include "curses.h"
+#include "magic.h"
+
+using namespace snort;
 using namespace std;
 
-#include "wizard.h"
-#include "magic.h"
+THREAD_LOCAL const Trace* wizard_trace = nullptr;
 
 //-------------------------------------------------------------------------
 // wizard module
@@ -97,6 +103,9 @@ static const Parameter s_params[] =
     { "spells", Parameter::PT_LIST, wizard_spells_params, nullptr,
       "criteria for text service identification" },
 
+    { "curses", Parameter::PT_MULTI, "dce_smb | dce_udp | dce_tcp", nullptr,
+      "enable service identification based on internal algorithm" },
+
     { nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }
 };
 
@@ -106,6 +115,7 @@ WizardModule::WizardModule() : Module(WIZ_NAME, WIZ_HELP, s_params)
     s2c_hexes = nullptr;
     c2s_spells = nullptr;
     s2c_spells = nullptr;
+    curses = nullptr;
 }
 
 WizardModule::~WizardModule()
@@ -115,6 +125,17 @@ WizardModule::~WizardModule()
 
     delete c2s_spells;
     delete s2c_spells;
+
+    delete curses;
+}
+
+void WizardModule::set_trace(const Trace* trace) const
+{ wizard_trace = trace; }
+
+const TraceOption* WizardModule::get_trace_options() const
+{
+    static const TraceOption wizard_trace_options(nullptr, 0, nullptr);
+    return &wizard_trace_options;
 }
 
 ProfileStats* WizardModule::get_profile() const
@@ -132,19 +153,20 @@ bool WizardModule::set(const char*, Value& v, SnortConfig*)
     else if ( v.is("client_first") )
         return true;
 
-    else if ( v.is("hex") )
-        spells.push_back(v.get_string());
-
-    else if ( v.is("spell") )
-        spells.push_back(v.get_string());
-
-    else
-        return false;
+    else if ( v.is("hex") || v.is("spell") )
+    {
+        if (c2s)
+            c2s_patterns.emplace_back(v.get_string());
+        else
+            s2c_patterns.emplace_back(v.get_string());
+    }
+    else if ( v.is("curses") )
+        curses->add_curse(v.get_string());
 
     return true;
 }
 
-bool WizardModule::begin(const char* fqn, int, SnortConfig*)
+bool WizardModule::begin(const char* fqn, int idx, SnortConfig*)
 {
     if ( !strcmp(fqn, "wizard") )
     {
@@ -153,55 +175,104 @@ bool WizardModule::begin(const char* fqn, int, SnortConfig*)
 
         c2s_spells = new SpellBook;
         s2c_spells = new SpellBook;
+
+        curses = new CurseBook;
     }
-    else if ( !strcmp(fqn, "wizard.hexes") )
-        hex = true;
-
-    else if ( !strcmp(fqn, "wizard.spells") )
-        hex = false;
-
-    else if ( !strcmp(fqn, "wizard.hexes.to_client") )
+    else if ( !strcmp(fqn, "wizard.hexes") || !strcmp(fqn, "wizard.spells") )
+    {
+        if ( idx > 0 )
+        {
+            service.clear();
+            c2s_patterns.clear();
+            s2c_patterns.clear();
+        }
+    }
+    else if ( !strcmp(fqn, "wizard.hexes.to_client") || !strcmp(fqn, "wizard.spells.to_client") )
         c2s = false;
 
-    else if ( !strcmp(fqn, "wizard.spells.to_client") )
-        c2s = false;
-
-    else if ( !strcmp(fqn, "wizard.hexes.to_server") )
-        c2s = true;
-
-    else if ( !strcmp(fqn, "wizard.spells.to_server") )
+    else if ( !strcmp(fqn, "wizard.hexes.to_server") || !strcmp(fqn, "wizard.spells.to_server") )
         c2s = true;
 
     return true;
 }
 
-void WizardModule::add_spells(MagicBook* b, string& service)
+static bool add_spells(MagicBook* b, const string& service, const vector<string>& patterns, bool hex)
 {
-    for ( auto p : spells )
-        b->add_spell(p.c_str(), service.c_str());
+    for ( const auto& p : patterns )
+    {
+        const char* val = service.c_str();
+        if ( !b->add_spell(p.c_str(), val) )
+        {
+            if ( !val )
+            {
+                ParseError("Invalid %s '%s' for service '%s'",
+                    hex ? "hex" : "spell", p.c_str(), service.c_str());
+                return false;
+            }
+            else if ( service != val )
+            {
+                ParseWarning(WARN_CONF, "%s '%s' for service '%s' already exists for service '%s'",
+                    hex ? "Hex" : "Spell", p.c_str(), service.c_str(), val);
+            }
+            else
+            {
+                ParseWarning(WARN_CONF, "Duplicate %s '%s' for service '%s'",
+                    hex ? "hex" : "spell", p.c_str(), val);
+            }
+        }
+    }
+    return true;
 }
 
-bool WizardModule::end(const char*, int idx, SnortConfig*)
+bool WizardModule::end(const char* fqn, int idx, SnortConfig*)
 {
-    if ( !idx )
-        return true;
-
-    if ( hex )
+    if ( !strcmp(fqn, "wizard") )
     {
-        if ( c2s )
-            add_spells(c2s_hexes, service);
-        else
-            add_spells(s2c_hexes, service);
+        service.clear();
+        c2s_patterns.clear();
     }
-    else
+    else if ( !strcmp(fqn, "wizard.hexes") )
     {
-        if ( c2s )
-            add_spells(c2s_spells, service);
-        else
-            add_spells(s2c_spells, service);
+        if ( idx > 0 )
+        {
+            // Validate the hex
+            if ( service.empty() )
+            {
+                ParseError("Hexes must have a service name");
+                return false;
+            }
+            if ( c2s_patterns.empty() && s2c_patterns.empty() )
+            {
+                ParseError("Hexes must have at least one pattern");
+                return false;
+            }
+            if ( !add_spells(c2s_hexes, service, c2s_patterns, true) )
+                return false;
+            if ( !add_spells(s2c_hexes, service, s2c_patterns, true) )
+                return false;
+        }
     }
-    spells.clear();
-    service.clear();
+    else if ( !strcmp(fqn, "wizard.spells") )
+    {
+        if ( idx > 0 )
+        {
+            // Validate the spell
+            if ( service.empty() )
+            {
+                ParseError("Spells must have a service name");
+                return false;
+            }
+            if ( c2s_patterns.empty() && s2c_patterns.empty() )
+            {
+                ParseError("Spells must have at least one pattern");
+                return false;
+            }
+            if ( !add_spells(c2s_spells, service, c2s_patterns, false) )
+                return false;
+            if ( !add_spells(s2c_spells, service, s2c_patterns, false) )
+                return false;
+        }
+    }
 
     return true;
 }
@@ -235,6 +306,13 @@ MagicBook* WizardModule::get_book(bool c2s, bool hex)
         c2s_hexes = nullptr;
         break;
     }
+    return b;
+}
+
+CurseBook* WizardModule::get_curse_book()
+{
+    CurseBook* b = curses;
+    curses = nullptr;
     return b;
 }
 

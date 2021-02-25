@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,25 +17,48 @@
 //--------------------------------------------------------------------------
 // codec_module.cc author Josh Rosenbaum <jrosenba@cisco.com>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "codecs/codec_module.h"
+
+#include "trace/trace.h"
+
+using namespace snort;
 
 #define codec_module_help \
     "general decoder rules"
 
-CodecModule::CodecModule() : Module("decode", codec_module_help)
+#define s_name "decode"
+
+THREAD_LOCAL const Trace* decode_trace = nullptr;
+
+static const Parameter s_params[] = {{ nullptr, Parameter::PT_MAX, nullptr, nullptr, nullptr }};
+
+CodecModule::CodecModule() : BaseCodecModule(s_name, codec_module_help, s_params)
 { }
+
+void CodecModule::set_trace(const Trace* trace) const
+{ decode_trace = trace; }
+
+const TraceOption* CodecModule::get_trace_options() const
+{
+    static const TraceOption codec_trace_options(nullptr, 0, nullptr);
+    return &codec_trace_options;
+}
 
 static const RuleMap general_decode_rules[] =
 {
-    { DECODE_IP_BAD_PROTO, "BAD-TRAFFIC bad IP protocol" },
+    { DECODE_IP_BAD_PROTO, "bad IP protocol" },
     { DECODE_IP_MULTIPLE_ENCAPSULATION,
-      "two or more IP (v4 and/or v6) encapsulation layers present" },
+        "two or more IP (v4 and/or v6) encapsulation layers present" },
     { DECODE_ZERO_LENGTH_FRAG, "fragment with zero length" },
-    { DECODE_BAD_TRAFFIC_LOOPBACK, "bad traffic loopback IP" },
-    { DECODE_BAD_TRAFFIC_SAME_SRCDST, "bad traffic same src/dst IP" },
-    { DECODE_IP_UNASSIGNED_PROTO, "BAD-TRAFFIC unassigned/reserved IP protocol" },
-
+    { DECODE_BAD_TRAFFIC_LOOPBACK, "loopback IP" },
+    { DECODE_BAD_TRAFFIC_SAME_SRCDST, "same src/dst IP" },
+    { DECODE_IP_UNASSIGNED_PROTO, "unassigned/reserved IP protocol" },
     { DECODE_TOO_MANY_LAYERS, "too many protocols present" },
+    { DECODE_BAD_ETHER_TYPE, "ether type out of range" },
     { 0, nullptr },
 };
 

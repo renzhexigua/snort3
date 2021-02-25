@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -19,18 +19,23 @@
 
 // port_item.cc derived from sfportobject.h by Marc Noron
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "port_item.h"
 
-#include <string.h>
 #include "utils/util.h"
+#include "utils/util_cstring.h"
+
+using namespace snort;
 
 /*
  * Create a new PortObjectItem
  */
-PortObjectItem* PortObjectItemNew(void)
+PortObjectItem* PortObjectItemNew()
 {
-    PortObjectItem* poi = (PortObjectItem*)SnortAlloc(sizeof(PortObjectItem));
-
+    PortObjectItem* poi = (PortObjectItem*)snort_calloc(sizeof(PortObjectItem));
     return poi;
 }
 
@@ -40,7 +45,7 @@ PortObjectItem* PortObjectItemNew(void)
 void PortObjectItemFree(PortObjectItem* poi)
 {
     if (poi)
-        free(poi);
+        snort_free(poi);
 }
 
 /*
@@ -48,17 +53,8 @@ void PortObjectItemFree(PortObjectItem* poi)
 */
 PortObjectItem* PortObjectItemDup(PortObjectItem* poi)
 {
-    PortObjectItem* poinew;
-
-    if ( !poi )
-        return 0;
-
-    poinew = PortObjectItemNew();
-    if ( !poinew )
-        return 0;
-
-    memcpy(poinew,poi,sizeof(PortObjectItem));
-
+    PortObjectItem* poinew = PortObjectItemNew();
+    memcpy(poinew,poi, sizeof(PortObjectItem));
     return poinew;
 }
 
@@ -85,9 +81,9 @@ void PortObjectItemPrint(PortObjectItem* poi, char* dstbuf, int bufsize)
         SnortSnprintfAppend(dstbuf, bufsize, "any");
 
     else if ( poi->one() )
-        SnortSnprintfAppend(dstbuf, bufsize, "%u", poi->lport);
+        SnortSnprintfAppend(dstbuf, bufsize, "%hu", poi->lport);
 
     else
-        SnortSnprintfAppend(dstbuf, bufsize, "%u:%u",poi->lport,poi->hport);
+        SnortSnprintfAppend(dstbuf, bufsize, "%hu:%hu",poi->lport,poi->hport);
 }
 

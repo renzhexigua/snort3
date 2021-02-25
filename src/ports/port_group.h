@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -18,22 +18,45 @@
 //--------------------------------------------------------------------------
 
 // port_group.h derived from pcrm.h by
-/*
-** Marc Norton <mnorton@sourcefire.com>
-** Dan Roelker <droelker@sourcefire.com>
-*/
-#ifndef PortGroup_H
-#define PortGroup_H
+//
+// Marc Norton <mnorton@sourcefire.com>
+// Dan Roelker <droelker@sourcefire.com>
+
+#ifndef PORT_GROUP_H
+#define PORT_GROUP_H
+
+namespace snort
+{
+    class MpseGroup;
+}
+
+// PortGroup contains a set of fast patterns in the form of an MPSE and a
+// set of non-fast-pattern (nfp) rules.  when a PortGroup is selected, the
+// MPSE will run fp rules if there is a match on the associated fast
+// patterns.  it will always run nfp rules since there is no way to filter
+// them out.
 
 enum PmType
 {
-    PM_TYPE_PKT,
+    PM_TYPE_PKT = 0,
     PM_TYPE_ALT,
     PM_TYPE_KEY,
     PM_TYPE_HEADER,
     PM_TYPE_BODY,
     PM_TYPE_FILE,
+    PM_TYPE_RAW_KEY,
+    PM_TYPE_RAW_HEADER,
+    PM_TYPE_METHOD,
+    PM_TYPE_STAT_CODE,
+    PM_TYPE_STAT_MSG,
+    PM_TYPE_COOKIE,
     PM_TYPE_MAX
+};
+
+const char* const pm_type_strings[PM_TYPE_MAX] =
+{
+    "packet", "alt", "key", "header", "body", "file", "raw_key", "raw_header",
+    "method", "stat_code", "stat_msg", "cookie"
 };
 
 struct RULE_NODE
@@ -49,7 +72,7 @@ struct PortGroup
     RULE_NODE* nfp_head, * nfp_tail;
 
     // pattern matchers
-    class Mpse* mpse[PM_TYPE_MAX];
+    snort::MpseGroup* mpsegrp[PM_TYPE_MAX];
 
     // detection option tree
     void* nfp_tree;
@@ -57,13 +80,12 @@ struct PortGroup
     unsigned rule_count;
     unsigned nfp_rule_count;
 
-    // FIXIT-L these runtime counts are only valid with one packet thread
-    unsigned match_count;
-    unsigned event_count;
-
     void add_rule();
     bool add_nfp_rule(void*);
     void delete_nfp_rules();
+
+    static PortGroup* alloc();
+    static void free(PortGroup*);
 };
 
 #endif

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2002-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,67 +16,67 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-// Author(s):   Andrew R. Baker <andrewb@sourcefire.com>
+
+// signature.h author Andrew R. Baker <andrewb@sourcefire.com>
+
 #ifndef SIGNATURE_H
 #define SIGNATURE_H
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+// basic non-detection signature info:  gid, sid, rev, class, priority, etc.
 
-#include <sys/types.h>
-#include <stdio.h>
+#include <cstdint>
+#include <cstdio>
+#include <string>
 
-#include "main/snort_types.h"
+#include "target_based/snort_protocols.h"
 
-struct SnortConfig;
-struct OptTreeNode;
-struct SFGHASH;
-
-/* this contains a list of the URLs for various reference systems */
-struct ReferenceSystemNode
+namespace snort
 {
-    char* name;
-    char* url;
-    ReferenceSystemNode* next;
+class GHash;
+struct SnortConfig;
+}
+
+struct OptTreeNode;
+
+struct ReferenceSystem
+{
+    ReferenceSystem(const std::string& n, const char* u) : name(n), url(u) { }
+    std::string name;
+    std::string url;
 };
 
-ReferenceSystemNode* ReferenceSystemAdd(SnortConfig*, const char*, const char*);
-ReferenceSystemNode* ReferenceSystemLookup(ReferenceSystemNode*, const char*);
-void ParseReferenceSystemConfig(char* args);
+const ReferenceSystem* reference_system_add(snort::SnortConfig*, const std::string&, const char* = "");
 
-/* XXX: update to point to the ReferenceURLNode in the referenceURL list */
 struct ReferenceNode
 {
-    char* id;
-    ReferenceSystemNode* system;
-    ReferenceNode* next;
+    ReferenceNode(const ReferenceSystem* sys, const std::string& id) : system(sys), id(id) { }
+    const ReferenceSystem* system;
+    std::string id;
 };
 
-ReferenceNode* AddReference(SnortConfig*, ReferenceNode**, const char*, const char*);
-void FPrintReference(FILE*, ReferenceNode*);
+void add_reference(snort::SnortConfig*, OptTreeNode*, const std::string& sys, const std::string& id);
 
-/* struct for rule classification */
 struct ClassType
 {
-    // FIXIT-L type and name are backwards (name -> text, type -> name)
-    char* type;      /* classification type */
-    int id;          /* classification id */
-    char* name;      /* "pretty" classification name */
-    int priority;    /* priority */
-    ClassType* next;
+    ClassType(const char* s, const char* txt, unsigned pri, int id) :
+        name(s), text(txt), priority(pri), id(id) { }
+
+    std::string name;
+    std::string text;
+    unsigned priority;
+    int id;
 };
 
-/* NOTE:  These methods can only be used during parse time */
-void AddClassification(SnortConfig*, const char* type, const char* name, int priority);
+void add_classification(snort::SnortConfig*, const char* name, const char* text, unsigned priority);
 
-ClassType* ClassTypeLookupByType(SnortConfig*, const char*);
-ClassType* ClassTypeLookupById(SnortConfig*, int);
+const ClassType* get_classification(snort::SnortConfig*, const char*);
 
-struct ServiceInfo
+struct SignatureServiceInfo
 {
-    char* service;
-    int16_t service_ordinal;
+    SignatureServiceInfo(const char* s, SnortProtocolId proto) :
+        service(s), snort_protocol_id(proto) { }
+    std::string service;
+    SnortProtocolId snort_protocol_id;
 };
 
 struct OtnKey
@@ -85,30 +85,42 @@ struct OtnKey
     uint32_t sid;
 };
 
+enum Target
+{ TARGET_NONE, TARGET_SRC, TARGET_DST, TARGET_MAX = TARGET_DST };
+
 struct SigInfo
 {
-    uint32_t generator;
-    uint32_t id;
-    uint32_t rev;
-    uint32_t class_id;
-    ClassType* classType;
-    uint32_t priority;
-    char* message;
-    ReferenceNode* refs;
-    bool text_rule;
-    unsigned int num_services;
-    ServiceInfo* services;
-    const char* os;
+    std::string message;
+    std::string* body = nullptr;
+
+    std::vector<const ReferenceNode*> refs;
+    std::vector<SignatureServiceInfo> services;
+
+    const ClassType* class_type = nullptr;
+
+    uint32_t gid = 0;
+    uint32_t sid = 0;
+    uint32_t rev = 0;
+
+    uint32_t class_id = 0;
+    uint32_t priority = 0;
+
+    bool builtin = false;
+    Target target = TARGET_NONE;
 };
 
-SFGHASH* OtnLookupNew(void);
-void OtnLookupAdd(SFGHASH*, OptTreeNode*);
-OptTreeNode* OtnLookup(SFGHASH*, uint32_t gid, uint32_t sid);
-void OtnLookupFree(SFGHASH*);
-void OtnRemove(SFGHASH*, OptTreeNode*);
+snort::GHash* OtnLookupNew();
+void OtnLookupAdd(snort::GHash*, OptTreeNode*);
+OptTreeNode* OtnLookup(snort::GHash*, uint32_t gid, uint32_t sid);
+void OtnLookupFree(snort::GHash*);
+void OtnRemove(snort::GHash*, OptTreeNode*);
 
-void OtnDeleteData(void* data);
-void OtnFree(void* data);
+OptTreeNode* GetOTN(uint32_t gid, uint32_t sid);
 
-#endif /* SIGNATURE */
+void dump_msg_map(const snort::SnortConfig*);
+void dump_rule_deps(const snort::SnortConfig*);
+void dump_rule_meta(const snort::SnortConfig*);
+void dump_rule_state(const snort::SnortConfig*);
+
+#endif
 

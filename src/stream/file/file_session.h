@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2015-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2015-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -17,24 +17,20 @@
 //--------------------------------------------------------------------------
 // file_session.h author Russ Combs <rucombs@cisco.com>
 
-#ifndef USER_SESSION_H
-#define USER_SESSION_H
-
-#include <assert.h>
-#include <list>
+#ifndef FILE_SESSION_H
+#define FILE_SESSION_H
 
 #include "flow/session.h"
-#include "stream/paf.h"
 
 class FileSession : public Session
 {
 public:
-    FileSession(Flow*);
-    ~FileSession();
+    FileSession(snort::Flow*);
+    ~FileSession() override;
 
-    bool setup(Packet*) override;
+    bool setup(snort::Packet*) override;
     void clear() override;
-    int process(Packet*) override;
+    int process(snort::Packet*) override;
 
     bool is_sequenced(uint8_t /*dir*/) override
     { return true; }
@@ -46,9 +42,9 @@ public:
     { return SSN_MISSING_NONE; }
 
 private:
-    void start(Packet*, Flow*);
-    void update(Packet*, Flow*);
-    void end(Packet*, Flow*);
+    void start(snort::Packet*, snort::Flow*);
+    void update(snort::Packet*, snort::Flow*);
+    void end(snort::Packet*, snort::Flow*);
 };
 
 #endif

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2011-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -16,19 +16,22 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
-//
 
-/*
- * SIP preprocessor
- * Author: Hui Cao <huica@cisco.com>
- *
- *
- */
+// sip_config.cc author Hui Cao <huica@cisco.com>
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 #include "sip_config.h"
-#include "util.h"
-#include "snort_debug.h"
-#include "parser.h"
+
+#include <cassert>
+
+#include "log/messages.h"
+#include "main/snort_debug.h"
+#include "utils/util.h"
+
+using namespace snort;
 
 #define SIP_SEPERATORS       "()<>@,;:\\/[]?={}\" "
 
@@ -56,15 +59,15 @@ SIPMethod StandardMethods[] =
     { "message", SIP_METHOD_MESSAGE },
     { "notify", SIP_METHOD_NOTIFY },
     { "prack", SIP_METHOD_PRACK },
-    { NULL, SIP_METHOD_NULL }
+    { nullptr, SIP_METHOD_NULL }
 };
 
 static SIPMethodsFlag currentUseDefineMethod = SIP_METHOD_USER_DEFINE;
 
-int SIP_findMethod(const char* token, SIPMethod* methods)
+static int SIP_findMethod(const char* token, SIPMethod* methods)
 {
     int i = 0;
-    while (NULL != methods[i].name)
+    while (nullptr != methods[i].name)
     {
         if ((strlen(token) == strlen(methods[i].name))&&
             (strncasecmp(methods[i].name, token, strlen(token)) == 0))
@@ -85,11 +88,8 @@ void SIP_SetDefaultMethods(SIP_PROTO_CONF* config)
     config->methodsConfig = SIP_METHOD_DEFAULT;
     for (i = 0; i < 6; i++)
     {
-        if (SIP_AddMethodToList(StandardMethods[i].name,
-            StandardMethods[i].methodFlag, &config->methods) == NULL)
-        {
-            FatalError("Failed to add SIP default method: %s.\n", StandardMethods[i].name);
-        }
+        SIP_AddMethodToList(StandardMethods[i].name,
+            StandardMethods[i].methodFlag, &config->methods);
     }
 }
 
@@ -117,24 +117,19 @@ void SIP_ParseMethods(const char* cur_tokenp, uint32_t* methodsConfig, SIPMethod
     /* If the user specified methods, remove default methods for now since
      * it now needs to be set explicitly. */
     *methodsConfig =  SIP_METHOD_NULL;
-    DEBUG_WRAP(DebugMessage(DEBUG_SIP, "Method token: %s\n",cur_tokenp); );
     // Check whether this is a standard method
 
     i_method = SIP_findMethod(cur_tokenp, StandardMethods);
     if (METHOD_NOT_FOUND != i_method )
     {
         *methodsConfig |= 1 << (StandardMethods[i_method].methodFlag - 1);
-        if (SIP_AddMethodToList(cur_tokenp,
-            StandardMethods[i_method].methodFlag, pmethods) == NULL)
-        {
-            ParseError("Failed to add SIP method: %s.\n", cur_tokenp);
-        }
+        SIP_AddMethodToList(cur_tokenp, StandardMethods[i_method].methodFlag, pmethods);
     }
     else
     {
-        if (SIP_AddUserDefinedMethod(cur_tokenp, methodsConfig, pmethods) == NULL)
+        if (SIP_AddUserDefinedMethod(cur_tokenp, methodsConfig, pmethods) == nullptr)
         {
-            ParseError("Failed to add user defined SIP method: %s.\n", cur_tokenp);
+            ParseError("Failed to add user defined SIP method: %s.", cur_tokenp);
         }
     }
 }
@@ -142,8 +137,7 @@ void SIP_ParseMethods(const char* cur_tokenp, uint32_t* methodsConfig, SIPMethod
 static SIPMethodNode* SIP_AddMethodToList(
     const char* methodName, SIPMethodsFlag methodConf, SIPMethodlist* p_methodList)
 {
-    if ( !methodName )
-        return nullptr;
+    assert (methodName );
 
     int methodLen = strlen(methodName);
     SIPMethodNode* method = *p_methodList;
@@ -159,8 +153,8 @@ static SIPMethodNode* SIP_AddMethodToList(
         method =  method->nextm;
     }
 
-    method = (SIPMethodNode*)SnortAlloc(sizeof(*method));
-    method->methodName = SnortStrdup(methodName);
+    method = (SIPMethodNode*)snort_calloc(sizeof(*method));
+    method->methodName = snort_strdup(methodName);
     method->methodLen = methodLen;
     method->methodFlag = methodConf;
     method->nextm = nullptr;
@@ -196,18 +190,18 @@ SIPMethodNode* SIP_AddUserDefinedMethod(
     /*Check whether all the chars are defined by RFC2616*/
     while (methodName[i])
     {
-        if (iscntrl(methodName[i])|(NULL != strchr(SIP_SEPERATORS,methodName[i]))| (methodName[i] <
+        if (iscntrl(methodName[i])|(nullptr != strchr(SIP_SEPERATORS,methodName[i]))| (methodName[i] <
             0) )
         {
             ParseError("Bad character included in the User defined method \n");
-            return NULL;
+            return nullptr;
         }
         i++;
     }
     if (currentUseDefineMethod > SIP_METHOD_USER_DEFINE_MAX)
     {
         ParseError("Exceeded max number of user defined methods \n");
-        return NULL;
+        return nullptr;
     }
     *methodsConfig |= 1 << (currentUseDefineMethod - 1);
     method = SIP_AddMethodToList(methodName, currentUseDefineMethod, pmethods);
@@ -220,8 +214,8 @@ void SIP_DeleteMethods(SIPMethodNode* node)
     while (node)
     {
         SIPMethodNode* next = node->nextm;
-        free(node->methodName);
-        free(node);
+        snort_free(node->methodName);
+        snort_free(node);
         node = next;
     }
 }

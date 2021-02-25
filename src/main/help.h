@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify it
 // under the terms of the GNU General Public License Version 2 as published
@@ -20,37 +20,45 @@
 #ifndef HELP_H
 #define HELP_H
 
-struct SnortConfig;
+// utility methods that provide output modes other than the normal packet
+// processing.  these are called based on command line arguments.
 
-void config_markup(SnortConfig*, const char*);
+namespace snort
+{
+struct SnortConfig;
+}
+
+void config_markup(snort::SnortConfig*, const char*);
 
 void help_args(const char* pfx);
-void help_basic(SnortConfig*, const char*);
-void help_usage(SnortConfig*, const char*);
-void help_options(SnortConfig*, const char*);
-void help_signals(SnortConfig*, const char*);
-void help_config(SnortConfig* sc, const char*);
-void help_commands(SnortConfig* sc, const char*);
-void help_gids(SnortConfig* sc, const char*);
-void help_buffers(SnortConfig* sc, const char*);
-void help_builtin(SnortConfig* sc, const char*);
-void help_module(SnortConfig* sc, const char*);
-void help_modules(SnortConfig* sc, const char*);
-void help_plugins(SnortConfig* sc, const char*);
-void help_version(SnortConfig*, const char*);
-void help_counts(SnortConfig* sc, const char*);
 
-void list_modules(SnortConfig* sc, const char*);
-void list_plugins(SnortConfig* sc, const char*);
-void list_interfaces(SnortConfig*, const char*);
-void list_daqs(SnortConfig* sc, const char*);
+[[noreturn]] void help_basic(snort::SnortConfig*, const char*);
+[[noreturn]] void help_buffers(snort::SnortConfig* sc, const char*);
+[[noreturn]] void help_builtin(snort::SnortConfig* sc, const char*);
+[[noreturn]] void help_commands(snort::SnortConfig* sc, const char*);
+[[noreturn]] void help_config(snort::SnortConfig* sc, const char*);
+[[noreturn]] void help_counts(snort::SnortConfig* sc, const char*);
+[[noreturn]] void help_gids(snort::SnortConfig* sc, const char*);
+[[noreturn]] void help_limits(snort::SnortConfig* sc, const char*);
+[[noreturn]] void help_module(snort::SnortConfig* sc, const char*);
+[[noreturn]] void help_modules(snort::SnortConfig* sc, const char*);
+[[noreturn]] void help_modules_json(snort::SnortConfig* sc, const char*);
+[[noreturn]] void help_options(snort::SnortConfig*, const char*);
+[[noreturn]] void help_plugins(snort::SnortConfig* sc, const char*);
+[[noreturn]] void help_signals(snort::SnortConfig*, const char*);
+[[noreturn]] void help_usage(snort::SnortConfig*, const char*);
+[[noreturn]] void help_version(snort::SnortConfig*);
 
-void dump_defaults(SnortConfig* sc, const char*);
-void dump_builtin_rules(SnortConfig* sc, const char*);
-void dump_dynamic_rules(SnortConfig* sc, const char*);
-void dump_rule_hex(SnortConfig* sc, const char*);
-void dump_rule_text(SnortConfig* sc, const char*);
-void dump_version(SnortConfig* sc, const char*);
+[[noreturn]] void list_daqs(snort::SnortConfig* sc);
+[[noreturn]] void list_modules(snort::SnortConfig* sc, const char*);
+[[noreturn]] void list_plugins(snort::SnortConfig* sc, const char*);
+
+[[noreturn]] void dump_builtin_rules(snort::SnortConfig* sc, const char*);
+[[noreturn]] void dump_defaults(snort::SnortConfig* sc, const char*);
+[[noreturn]] void dump_dynamic_rules(snort::SnortConfig* sc, const char*);
+[[noreturn]] void dump_rule_hex(snort::SnortConfig* sc, const char*);
+[[noreturn]] void dump_rule_text(snort::SnortConfig* sc, const char*);
+[[noreturn]] void dump_version(snort::SnortConfig* sc);
 
 #endif
 

@@ -1,5 +1,5 @@
 //--------------------------------------------------------------------------
-// Copyright (C) 2014-2015 Cisco and/or its affiliates. All rights reserved.
+// Copyright (C) 2014-2020 Cisco and/or its affiliates. All rights reserved.
 // Copyright (C) 2005-2013 Sourcefire, Inc.
 //
 // This program is free software; you can redistribute it and/or modify it
@@ -17,44 +17,33 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //--------------------------------------------------------------------------
 
-#include "stream_icmp.h"
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include "icmp_module.h"
 #include "icmp_session.h"
-#include "snort_types.h"
-#include "snort_debug.h"
-#include "protocols/packet.h"
-#include "sfxhash.h"
-#include "util.h"
-#include "stream/stream.h"
-#include "flow/flow.h"
-#include "flow/flow_control.h"
-#include "flow/session.h"
-#include "perf_monitor/perf.h"
-#include "profiler.h"
-#include "protocols/layer.h"
-#include "protocols/vlan.h"
-#include "protocols/ip.h"
-#include "protocols/icmp4.h"
-#include "protocols/udp.h"
-#include "protocols/tcp.h"
-#include "sfip/sf_ip.h"
 
-struct IcmpStats
-{
-    PegCount created;
-    PegCount released;
-};
+#include "detection/ips_context.h"
+#include "flow/flow_key.h"
+#include "memory/memory_cap.h"
+#include "profiler/profiler_defs.h"
+#include "protocols/icmp4.h"
+#include "protocols/packet.h"
+#include "protocols/tcp.h"
+#include "protocols/udp.h"
+#include "protocols/vlan.h"
+#include "utils/util.h"
+
+#include "icmp_ha.h"
+#include "icmp_module.h"
+#include "stream_icmp.h"
+
+using namespace snort;
 
 const PegInfo icmp_pegs[] =
 {
-    { "created", "icmp session trackers created" },
-    { "released", "icmp session trackers released" },
-    { nullptr, nullptr }
+    SESSION_PEGS("icmp"),
+    { CountType::END, nullptr, nullptr }
 };
 
 THREAD_LOCAL IcmpStats icmpStats;
@@ -66,19 +55,6 @@ THREAD_LOCAL ProfileStats icmp_perf_stats;
 
 static void IcmpSessionCleanup(Flow* ssn)
 {
-    if (ssn->ssn_state.session_flags & SSNFLAG_PRUNED)
-    {
-        CloseStreamSession(&sfBase, SESSION_CLOSED_PRUNED);
-    }
-    else if (ssn->ssn_state.session_flags & SSNFLAG_TIMEDOUT)
-    {
-        CloseStreamSession(&sfBase, SESSION_CLOSED_TIMEDOUT);
-    }
-    else
-    {
-        CloseStreamSession(&sfBase, SESSION_CLOSED_NORMALLY);
-    }
-
     if ( ssn->ssn_state.session_flags & SSNFLAG_SEEN_SENDER )
         icmpStats.released++;
 
@@ -89,12 +65,13 @@ static int ProcessIcmpUnreach(Packet* p)
 {
     /* Handle ICMP unreachable */
     FlowKey skey;
-    Flow* ssn = NULL;
+    Flow* ssn = nullptr;
     uint16_t sport;
     uint16_t dport;
-    const sfip_t* src;
-    const sfip_t* dst;
+    const SfIp* src;
+    const SfIp* dst;
     ip::IpApi iph;
+    bool reversed = false;
 
     /* Set the Ip API to the embedded IP Header. */
     if (!layer::set_api_ip_embed_icmp(p, iph))
@@ -106,8 +83,9 @@ static int ProcessIcmpUnreach(Packet* p)
     src = iph.get_src();
     dst = iph.get_dst();
 
-    skey.protocol = p->get_ip_proto_next();
+    skey.pkt_type = p->type();
     skey.version = src->is_ip4() ? 4 : 6;
+    skey.ip_protocol = (uint8_t)p->get_ip_proto_next();
 
     if (p->proto_bits & PROTO_BIT__TCP_EMBED_ICMP)
     {
@@ -128,16 +106,16 @@ static int ProcessIcmpUnreach(Packet* p)
         dport = 0;
     }
 
-    if (sfip_fast_lt6(src, dst))
+    if (src->fast_lt6(*dst))
     {
-        COPY4(skey.ip_l, src->ip32);
+        COPY4(skey.ip_l, src->get_ip6_ptr());
         skey.port_l = sport;
-        COPY4(skey.ip_h, dst->ip32);
+        COPY4(skey.ip_h, dst->get_ip6_ptr());
         skey.port_h = dport;
     }
-    else if (sfip_equals(iph.get_src(), iph.get_dst()))
+    else if (iph.get_src()->equals(*iph.get_dst()))
     {
-        COPY4(skey.ip_l, src->ip32);
+        COPY4(skey.ip_l, src->get_ip6_ptr());
         COPY4(skey.ip_h, skey.ip_l);
         if (sport < dport)
         {
@@ -148,14 +126,16 @@ static int ProcessIcmpUnreach(Packet* p)
         {
             skey.port_l = dport;
             skey.port_h = sport;
+            reversed = true;
         }
     }
     else
     {
-        COPY4(skey.ip_l, dst->ip32);
-        COPY4(skey.ip_h, src->ip32);
+        COPY4(skey.ip_l, dst->get_ip6_ptr());
+        COPY4(skey.ip_h, src->get_ip6_ptr());
         skey.port_l = dport;
         skey.port_h = sport;
+        reversed = true;
     }
 
     uint16_t vlan = (p->proto_bits & PROTO_BIT__VLAN) ?
@@ -163,23 +143,27 @@ static int ProcessIcmpUnreach(Packet* p)
 
     // FIXIT-L see FlowKey::init*() - call those instead
     // or do mpls differently for ip4 and ip6
-    skey.init_vlan(vlan);
-    skey.init_address_space(0);
-    skey.init_mpls(0);
+    const SnortConfig* sc = p->context->conf;
+    skey.init_vlan(sc, vlan);
+    skey.init_address_space(sc, 0);
+    skey.init_mpls(sc, 0);
+    skey.flags.group_used = p->is_inter_group_flow();
+    skey.init_groups(p->pkth->ingress_group, p->pkth->egress_group, reversed);
+    skey.flags.ubits = 0;
 
     switch (p->type())
     {
     case PktType::TCP:
         /* Lookup a TCP session */
-        ssn = Stream::get_session(&skey);
+        ssn = Stream::get_flow(&skey);
         break;
     case PktType::UDP:
         /* Lookup a UDP session */
-        ssn = Stream::get_session(&skey);
+        ssn = Stream::get_flow(&skey);
         break;
     case PktType::ICMP:
         /* Lookup a ICMP session */
-        ssn = Stream::get_session(&skey);
+        ssn = Stream::get_flow(&skey);
         break;
     default:
         break;
@@ -188,8 +172,6 @@ static int ProcessIcmpUnreach(Packet* p)
     if (ssn)
     {
         /* Mark this session as dead. */
-        DEBUG_WRAP(DebugMessage(DEBUG_STREAM_STATE,
-            "Marking session as dead, per ICMP Unreachable!\n"); );
         ssn->ssn_state.session_flags |= SSNFLAG_DROP_CLIENT;
         ssn->ssn_state.session_flags |= SSNFLAG_DROP_SERVER;
         ssn->session_state |= STREAM_STATE_UNREACH;
@@ -202,28 +184,43 @@ static int ProcessIcmpUnreach(Packet* p)
 // IcmpSession methods
 //-------------------------------------------------------------------------
 
-IcmpSession::IcmpSession(Flow* flow) : Session(flow)
-{
-}
+IcmpSession::IcmpSession(Flow* f) : Session(f)
+{ memory::MemoryCap::update_allocations(sizeof(*this)); }
+
+IcmpSession::~IcmpSession()
+{ memory::MemoryCap::update_deallocations(sizeof(*this)); }
 
 bool IcmpSession::setup(Packet*)
 {
     echo_count = 0;
     ssn_time.tv_sec = 0;
     ssn_time.tv_usec = 0;
-    icmpStats.created++;
     flow->ssn_state.session_flags |= SSNFLAG_SEEN_SENDER;
+    SESSION_STATS_ADD(icmpStats)
+
+    StreamIcmpConfig* pc = get_icmp_cfg(flow->ssn_server);
+    flow->set_default_session_timeout(pc->session_timeout, false);
+
     return true;
 }
 
 void IcmpSession::clear()
 {
     IcmpSessionCleanup(flow);
+    IcmpHAManager::process_deletion(*flow);
 }
 
 int IcmpSession::process(Packet* p)
 {
     int status;
+
+    flow->set_expire(p, flow->default_session_timeout);
+
+    if (!(flow->ssn_state.session_flags & SSNFLAG_ESTABLISHED) and !(p->is_from_client()))
+    {
+        DataBus::publish(STREAM_ICMP_BIDIRECTIONAL_EVENT, p);
+        flow->ssn_state.session_flags |= SSNFLAG_ESTABLISHED;
+    }
 
     switch (p->ptrs.icmph->type)
     {
@@ -238,34 +235,5 @@ int IcmpSession::process(Packet* p)
     }
 
     return status;
-}
-
-#define icmp_sender_ip flow->client_ip
-#define icmp_responder_ip flow->server_ip
-
-void IcmpSession::update_direction(char dir, const sfip_t* ip, uint16_t)
-{
-    if (sfip_equals(&icmp_sender_ip, ip))
-    {
-        if ((dir == SSN_DIR_FROM_SENDER) && (flow->ssn_state.direction == SSN_DIR_FROM_SENDER))
-        {
-            /* Direction already set as SENDER */
-            return;
-        }
-    }
-    else if (sfip_equals(&icmp_responder_ip, ip))
-    {
-        if ((dir == SSN_DIR_FROM_RESPONDER) &&
-            (flow->ssn_state.direction == SSN_DIR_FROM_RESPONDER))
-        {
-            /* Direction already set as RESPONDER */
-            return;
-        }
-    }
-
-    /* Swap them -- leave ssn->ssn_state.direction the same */
-    sfip_t tmpIp = icmp_sender_ip;
-    icmp_sender_ip = icmp_responder_ip;
-    icmp_responder_ip = tmpIp;
 }
 
